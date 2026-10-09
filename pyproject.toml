@@ -1,0 +1,9 @@
+[project]
+name = "graphicsupgrade"
+version = "0.1.0"
+description = "Reflective, dynamic water, sun shadows and lighting for Civilization IV: Beyond the Sword"
+requires-python = ">=3.12"
+dependencies = []
+
+[tool.uv]
+package = false
