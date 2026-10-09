@@ -20,8 +20,8 @@ cast shadows. These apply only while that mod is running. See [For modders](#for
 | **Unit, ship and tree shadows** | Round blobs under units; nothing for trees | Real shadows cast by the sun, weapons and rigging included |
 | **Hill and peak shadows** | None | Hills and peaks shade the ground behind them |
 | **Building shadows** | Painted on, always pointing the same way | Real shadows from buildings, improvements and resources |
-| **Lighting** | BtS's white sun and grey shade | A warm sun and cool blue shade, as in Colonization; colours adjustable for units, ships, trees, buildings, terrain and rivers |
-| **Day and night** | None | The light changes colour and the sun circles the sky, with shadows turning to follow it |
+| **Lighting** | BtS's white sun and grey shade | [Without day-night cycle] A warm sun and cool blue shade, as in Colonization; colours adjustable for units, ships, trees, buildings, terrain and rivers |
+| **Day and night** | None | [With day-night cycle] The light changes colour and the sun circles the sky, with shadows turning to follow it |
 
 Everything is on by default. Water, shadows and lighting can be switched off in game (see the hotkeys below), and every
 part can be turned off in the settings. Shadows fall on the terrain, rivers, roads and the water's surface. Unit flags and other markers don't cast shadows.
