@@ -322,13 +322,13 @@ void LoadConfig()
     g_config.ghostKey = IniKey(ini, L"ghost", L"ToggleKey", 'G');
     std::wstring offset = IniString(ini, L"ghost", L"Offset", L"90,0,0");
     swscanf_s(offset.c_str(), L"%f,%f,%f", &g_config.ghostOffset[0], &g_config.ghostOffset[1], &g_config.ghostOffset[2]);
-    g_config.reflectionEnabled = IniInt(ini, L"reflection", L"Enabled", 0) != 0;
+    g_config.reflectionEnabled = IniInt(ini, L"reflection", L"Enabled", 1) != 0;
     g_config.reflectionSize = static_cast<UINT>(IniInt(ini, L"reflection", L"Size", 512));
     g_config.waterHeight = static_cast<float>(_wtof(IniString(ini, L"reflection", L"WaterHeight", L"49.5").c_str()));
     g_config.reflectionKey = IniKey(ini, L"reflection", L"ToggleKey", 'R');
     g_config.overlayEnabled = IniInt(ini, L"reflection", L"Overlay", 0) != 0;
     g_config.overlayKey = IniKey(ini, L"reflection", L"OverlayToggleKey", 'O');
-    g_config.waterEnabled = IniInt(ini, L"water", L"Enabled", 0) != 0;
+    g_config.waterEnabled = IniInt(ini, L"water", L"Enabled", 1) != 0;
     g_config.waterKey = IniKey(ini, L"water", L"ToggleKey", 'W');
     std::wstring colDir = IniString(ini, L"water", L"ColonizationDir", L"");
     if (!colDir.empty())
@@ -341,7 +341,7 @@ void LoadConfig()
     if (!wc.empty())
         swscanf_s(wc.c_str(), L"%f,%f,%f,%f", &g_config.waterConstants[0], &g_config.waterConstants[1],
                   &g_config.waterConstants[2], &g_config.waterConstants[3]);
-    g_config.shadowsEnabled = IniInt(ini, L"shadows", L"Enabled", 0) != 0;
+    g_config.shadowsEnabled = IniInt(ini, L"shadows", L"Enabled", 1) != 0;
     g_config.shadowsKey = IniKey(ini, L"shadows", L"ToggleKey", 'S');
     g_config.shadowSize = static_cast<UINT>(IniInt(ini, L"shadows", L"Size", 2048));
     g_config.shadowMaxRadius = static_cast<float>(_wtof(IniString(ini, L"shadows", L"MaxRadius", L"2000").c_str()));
@@ -376,7 +376,7 @@ void LoadConfig()
             out[i] = static_cast<float>((std::max)(0, (std::min)(255, c[i]))) / 255.0f;
         return true;
     };
-    g_config.lightingEnabled = IniInt(ini, L"lighting", L"Enabled", 0) != 0;
+    g_config.lightingEnabled = IniInt(ini, L"lighting", L"Enabled", 1) != 0;
     g_config.lightingKey = IniKey(ini, L"lighting", L"ToggleKey", 'L');
     g_config.lightCycleKey = IniKey(ini, L"lighting", L"LightCycleToggleKey", 'P');
     g_config.matchShadowDirection = IniInt(ini, L"lighting", L"MatchShadowDirection", 1) != 0;
@@ -404,7 +404,7 @@ void LoadConfig()
     rgb(L"BakedTerrainSun", g_config.bakedTerrainSun);
     // Light colour cycle: LightCycleSteps (sun) and LightCycleAmbientSteps = step,R,G,B;step,R,G,B;... (steps from 0
     // to LightChangeStepCount, colours 0..255), blended in a loop over LightChangeCycleTime seconds.
-    g_config.lightCycleOn = IniInt(ini, L"lighting", L"LightCycleOn", 0) != 0;
+    g_config.lightCycleOn = IniInt(ini, L"lighting", L"LightCycleOn", 1) != 0;
     g_config.lightCycleTime =
         static_cast<float>(_wtof(IniString(ini, L"lighting", L"LightChangeCycleTime", L"600").c_str()));
     g_config.lightCycleStepCount =
