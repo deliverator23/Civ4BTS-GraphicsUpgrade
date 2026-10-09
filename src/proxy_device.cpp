@@ -203,12 +203,17 @@ HRESULT ProxyDevice::Present(CONST RECT* pSourceRect, CONST RECT* pDestRect, HWN
 
     m_trace.FrameDone();
 
-    // Hotkeys: the modifiers plus a key, edge-triggered. A key of 0 is disabled. Effect toggles only where effects
-    // are allowed; traces only when [debug] Traces=1.
+    // Hotkeys: exactly the modifiers plus a key, edge-triggered, only while the game's window is in front. A key of 0
+    // is disabled. Alt is the left Alt only: AltGr (right Alt, which Windows reports as Ctrl+Alt) types characters on
+    // many keyboards. Effect toggles only where effects are allowed; traces only when [debug] Traces=1.
     auto down = [](int vk) { return vk != 0 && (GetAsyncKeyState(vk) & 0x8000) != 0; };
+    DWORD foregroundPid = 0;
+    GetWindowThreadProcessId(GetForegroundWindow(), &foregroundPid);
+    const bool inFront = foregroundPid == GetCurrentProcessId();
+    const bool ctrl = down(VK_CONTROL), shift = down(VK_SHIFT), alt = down(VK_LMENU) && !down(VK_RMENU);
     auto combo = [&](UINT key, bool& wasDown) {
-        bool isDown = down(static_cast<int>(key)) && (!g_config.keyCtrl || down(VK_CONTROL)) &&
-                      (!g_config.keyShift || down(VK_SHIFT)) && (!g_config.keyAlt || down(VK_MENU));
+        bool isDown = inFront && down(static_cast<int>(key)) && ctrl == g_config.keyCtrl &&
+                      shift == g_config.keyShift && alt == g_config.keyAlt;
         bool pressed = isDown && !wasDown;
         wasDown = isDown;
         return pressed;

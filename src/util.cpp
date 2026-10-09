@@ -307,8 +307,7 @@ void LoadConfig()
     g_config.dumpShaders = IniInt(ini, L"debug", L"DumpShaders", 0) != 0;
     g_config.tracesEnabled = IniInt(ini, L"debug", L"Traces", 0) != 0;
     g_config.traceKey = IniKey(ini, L"trace", L"Key", VK_F11);
-    // Hotkey modifiers: [general] Modifiers, or [trace] Modifiers.
-    std::wstring mods = IniString(ini, L"general", L"Modifiers", IniString(ini, L"trace", L"Modifiers", L"ctrl+shift").c_str());
+    std::wstring mods = IniString(ini, L"general", L"KeyModifiers", L"ctrl+alt+shift");
     for (auto& c : mods)
         c = static_cast<wchar_t>(towlower(c));
     g_config.keyCtrl = mods.find(L"ctrl") != std::wstring::npos;

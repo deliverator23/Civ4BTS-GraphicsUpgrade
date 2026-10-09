@@ -58,15 +58,15 @@ If the folder already has a `d3d9.dll` (ReShade, DXVK...), read [Using with ReSh
 
 ## In game
 
-| Keys | Switches on and off |
-|---|---|
-| Ctrl+Shift+W | The water, to compare with BtS's |
-| Ctrl+Shift+S | Sun shadows |
-| Ctrl+Shift+L | Lighting |
-| Ctrl+Shift+P | Pauses and resumes the day–night cycle |
+| Keys | Switches on and off                          |
+|---|----------------------------------------------|
+| Ctrl+Alt+Shift+W | The water, to compare with BtS default water |
+| Ctrl+Alt+Shift+S | Sun shadows                                  |
+| Ctrl+Alt+Shift+L | Lighting                                     |
+| Ctrl+Alt+Shift+P | Pauses and resumes the day–night cycle       |
 
 To use other keys, change `ToggleKey` in that section of `GraphicsUpgrade.ini`. It can be a letter, a key name such as `F11` or
-`Numpad5`, or `none`. `Modifiers` in `[general]` sets the Ctrl+Shift part.
+`Numpad5`, or `none`. `KeyModifiers` in `[general]` sets the Ctrl+Alt+Shift part.
 
 ## Settings
 
