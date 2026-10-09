@@ -35,7 +35,7 @@ part can be turned off in the settings. Shadows fall on the terrain, rivers, roa
 
 1. Download [GraphicsUpgrade.zip](https://github.com/deliverator23/Civ4BTS-GraphicsUpgrade/releases/latest/download/GraphicsUpgrade.zip)
    from the latest release (all versions are on the [Releases](../../releases) page).
-2. Copy everything inside it into your **Beyond the Sword** folder, the one with `Civ4BeyondSword.exe` in it:
+2. Copy these from it into your **Beyond the Sword** folder, the one with `Civ4BeyondSword.exe` in it:
 
    ```
    d3d9.dll
@@ -43,6 +43,8 @@ part can be turned off in the settings. Shadows fall on the terrain, rivers, roa
    GraphicsUpgrade\      (the folder, with water_001.dds and water_env.dds)
    presets\              (optional lighting presets)
    ```
+
+   The zip also has this guide, as `GraphicsUpgrade.md`.
 
    For Steam, that's usually:
 

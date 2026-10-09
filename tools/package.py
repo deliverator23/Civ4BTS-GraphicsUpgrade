@@ -7,6 +7,7 @@ files, in a GraphicsUpgrade-<version> folder; the zip's name stays the same so t
 
   d3d9.dll               the proxy
   GraphicsUpgrade.ini    settings
+  GraphicsUpgrade.md     README.md: what it does, how to install it and the settings
   presets/               [lighting] sections for BtS's, Colonization's and Civilization VI's lighting
   GraphicsUpgrade/       Colonization's water textures: water_001.dds (normal map), water_env.dds (environment cube)
 
@@ -48,6 +49,7 @@ def main():
 
     shutil.copyfile(ROOT / 'build' / 'd3d9.dll', pkg / 'd3d9.dll')
     shutil.copyfile(ROOT / 'GraphicsUpgrade.ini', pkg / 'GraphicsUpgrade.ini')
+    shutil.copyfile(ROOT / 'README.md', pkg / 'GraphicsUpgrade.md')
     for p in sorted((ROOT / 'presets').glob('*.ini')):
         shutil.copyfile(p, pkg / 'presets' / p.name)
     for fn in WATER_TEXTURES:
