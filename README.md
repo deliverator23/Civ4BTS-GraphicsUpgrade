@@ -20,7 +20,7 @@ cast shadows. These apply only while that mod is running. See [For modders](#for
 | **Unit, ship and tree shadows** | Round blobs under units; nothing for trees | Real shadows cast by the sun, weapons and rigging included |
 | **Hill and peak shadows** | None | Hills and peaks shade the ground behind them |
 | **Building shadows** | Painted on, always pointing the same way | Real shadows from buildings, improvements and resources |
-| **Lighting** | BtS's white sun and grey shade | Your own colours for units, ships, trees, buildings, terrain and rivers |
+| **Lighting** | BtS's white sun and grey shade | A warm sun and cool blue shade, as in Colonization; colours adjustable for units, ships, trees, buildings, terrain and rivers |
 | **Day and night** | None | The light changes colour and the sun circles the sky, with shadows turning to follow it |
 
 Everything is on by default. Water, shadows and lighting can be switched off in game (see the hotkeys below), and every
@@ -33,7 +33,8 @@ part can be turned off in the settings. Shadows fall on the terrain, rivers, roa
 
 ## Install
 
-1. Download the latest `GraphicsUpgrade-<version>.zip` from the [Releases](../../releases) page.
+1. Download [GraphicsUpgrade.zip](https://github.com/deliverator23/Civ4BTS-GraphicsUpgrade/releases/latest/download/GraphicsUpgrade.zip)
+   from the latest release (all versions are on the [Releases](../../releases) page).
 2. Copy everything inside it into your **Beyond the Sword** folder, the one with `Civ4BeyondSword.exe` in it:
 
    ```
@@ -81,12 +82,12 @@ The ones you're most likely to want:
 | `[shadows] WaterShadow` | How much shadow falls on the water's surface |
 | `[water] UnderwaterDepth` | How deep you can see into the water (0 = not at all) |
 | `[reflection] Size` | Reflection sharpness: 512, or 1024 for sharper |
-| `[lighting] Enabled` | Your own light colours on (1) or off (0) |
+| `[lighting] Enabled` | GraphicsUpgrade's lighting (1), or BtS's own (0) |
 | `[lighting] LightCycleOn` | The day–night cycle on (1) or off (0) |
 
 ### Lighting and day–night
 
-Colours are written as Red,Green,Blue from 0 to 255. You can give each group its own: units, ships and machines,
+Colours are written as Red,Green,Blue from 0 to 255. You can give each group its own: units, ships and vehicles,
 terrain, rivers, trees, buildings, and the sun on the water. The `presets` folder has complete `[lighting]` sections to
 paste in place of the one in `GraphicsUpgrade.ini`:
 

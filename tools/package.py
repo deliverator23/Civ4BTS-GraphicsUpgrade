@@ -2,7 +2,8 @@
 
   uv run tools/package.py
 
-Builds the proxy (build.bat), then writes dist/GraphicsUpgrade-<version>/ and dist/GraphicsUpgrade-<version>.zip:
+Builds the proxy (build.bat), then writes dist/GraphicsUpgrade-<version>/ and dist/GraphicsUpgrade.zip (the same
+files, in a GraphicsUpgrade-<version> folder; the zip's name stays the same so the latest release's link never changes):
 
   d3d9.dll               the proxy
   GraphicsUpgrade.ini    settings
@@ -53,7 +54,7 @@ def main():
         shutil.copyfile(ROOT / 'textures' / fn, pkg / 'GraphicsUpgrade' / fn)
 
     files = sorted(p for p in pkg.rglob('*') if p.is_file())
-    zip_path = dist / f'{name}.zip'
+    zip_path = dist / 'GraphicsUpgrade.zip'
     with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as z:
         for p in files:
             z.write(p, Path(name) / p.relative_to(pkg))

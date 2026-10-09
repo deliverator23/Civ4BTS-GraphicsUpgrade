@@ -11,7 +11,7 @@
 #include <string>
 #include <vector>
 
-#define GRAPHICSUPGRADE_VERSION "0.1.0"
+#define GRAPHICSUPGRADE_VERSION "1.0.0"
 
 // What BtS lights with which light (Lighting).
 enum LightGroup
