@@ -34,7 +34,8 @@ float4 f4Relight : register(c15);      // x = 1: re-light the lightmap with c13/
 float4 f4LightNew : register(c16);     // xyz: towards the INI sun (unit)
 float4 f4LightBaked : register(c17);   // xyz: towards the sun BtS baked with (unit)
 float4 f4NormalMap : register(c18);    // x = 1 / (spacing x cells), y = 0.5 / cells, z = 1: use the normal map,
-                                       // w = 1: hill shadows (s6, same grid)
+                                       // w = 1: hill shadows (s6)
+float4 f4HillGrid : register(c19);     // world xy -> hill mask uv: x = scale, yz = offset
 sampler2D TerrainNormals : register(s5);  // rgb = normal x 0.5 + 0.5, a = 1 where known
 sampler2D HillShadows : register(s6);     // a = shaded by hills (0..1)
 
@@ -80,6 +81,6 @@ float4 PSMain(float2 base : TEXCOORD0, float2 fow : TEXCOORD1, float2 lightmap :
     float3 lit = saturate(tex2D(TerrainFOWar, fow).rgb * colour);
     // Objects' shadows and hills' shadows: the darker of the two (no double darkening where they overlap).
     float objects = lerp(1, tex2Dproj(ShadowMap, shadow).r, f4Shadow.z);
-    float hills = 1 - f4Shadow.x * f4NormalMap.w * tex2D(HillShadows, grid).a;
+    float hills = 1 - f4Shadow.x * f4NormalMap.w * tex2D(HillShadows, worldXY * f4HillGrid.x + f4HillGrid.yz).a;
     return float4(lit * min(objects, hills), b.a);
 }

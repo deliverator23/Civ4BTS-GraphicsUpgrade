@@ -1,5 +1,6 @@
 #include "water.h"
 #include "assets.h"
+#include "camera.h"
 #include "shadows.h"
 #include "water_ps.h"
 #include "water_vs.h"
@@ -202,7 +203,7 @@ bool Water::DrawSubmerged(const ShaderInfo* vs, float h, const std::function<voi
     if (clipSpace)
     {
         float vp[16];
-        if (FAILED(m_dev->GetVertexShaderConstantF(static_cast<UINT>(vs->viewProj), vp, 4)) || !mat::Invert(vp, inv))
+        if (!Camera::UnitWorldToClip(m_dev, *vs, vp) || !mat::Invert(vp, inv))
             return false;
     }
     auto toDevice = [&](const float* world, float* out) {

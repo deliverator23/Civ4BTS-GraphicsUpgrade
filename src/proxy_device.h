@@ -110,6 +110,14 @@ private:
     float m_terrainLight[32] = {};  // Lighting::TerrainConstants for the shadows' terrain draws
     bool m_lightKeyWasDown = false;
     bool m_lightCycleKeyWasDown = false;
+    // Comparison screenshots (CompareKey): step 1 copies the next frame as it is ("on"), then switches every effect
+    // off for one frame; step 2 copies that frame ("off", plain BtS), switches the effects back and only then writes
+    // both PNGs, so the two frames are one frame apart.
+    int m_compareStep = 0;
+    bool m_compareKeyWasDown = false;
+    bool m_compareSaved[4] = {};  // reflection, water, shadows, lighting as they were
+    IDirect3DSurface9* m_compareShots[2] = {};  // on, off
+    std::wstring m_comparePath;    // <output>\screenshots\<time>, + "_on.png" / "_off.png"
     std::unordered_set<uint64_t> m_loggedLights;  // fixed-function lights and ambients seen (logged once each)
     std::wstring m_lightmapSavedFor;  // trace folder the terrain lightmap was last saved into
     bool m_reflKeyWasDown = false, m_overlayKeyWasDown = false, m_waterKeyWasDown = false;

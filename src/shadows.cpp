@@ -1,4 +1,5 @@
 #include "shadows.h"
+#include "camera.h"
 #include "matrix.h"
 #include "overlay.h"
 
@@ -22,8 +23,9 @@ namespace
 const float kDepthRange = 4000.0f;  // sun camera depth half-range, world units
 // BtS's River.fx River_Shader passes (floodplain P0, river P1), by shader hash: our copies assume their exact code,
 // including a light-vector register that isn't in their constant tables (see river_shadow.hlsl).
-const uint64_t kRiverFloodVs = 0x140246271c1a123bull, kRiverFloodPs = 0x579d9dd87d7f3783ull;
-const uint64_t kRiverVs = 0x4cbc89303161e055ull, kRiverPs = 0x1c78680e17f6d324ull;
+// (Instruction-only fingerprints, ShaderInfo::codeHash: the same in Steam's and older builds of BtS.)
+const uint64_t kRiverFloodVs = 0x9caa1986734d37b6ull, kRiverFloodPs = 0x0c6eae0ce4d270c9ull;
+const uint64_t kRiverVs = 0xface9d16cea625ceull, kRiverPs = 0xcda08ea717944639ull;
 // Shadow texture outside the shadowed area: light factor 1 (colour), coverage 0 (alpha).
 const D3DCOLOR kNoShadow = 0x00FFFFFF;
 
@@ -196,7 +198,7 @@ void Shadows::NewFrame()
 bool Shadows::MainViewProj(const ShaderInfo* vs, bool fixedFunction, float* vp)
 {
     if (vs && vs->viewProj >= 0)
-        return SUCCEEDED(m_dev->GetVertexShaderConstantF(vs->viewProj, vp, 4));
+        return Camera::UnitWorldToClip(m_dev, *vs, vp);
     int wvpReg = -1, worldReg = -1;
     if (vs && vs->tree)
         wvpReg = vs->Reg("WorldViewProj", 2), worldReg = vs->Reg("World", 2);
@@ -327,6 +329,14 @@ void Shadows::SetupFrame(const float* vp)
     m[11] = 0.5f - cf / (2.0f * kDepthRange);
     m[15] = 1;
     mat::TextureProjection(m_lightVP, m_curShadowTex);
+    // The footprint as a square on the ground, for the hill shadow mask (TerrainNormals::UpdateHills).
+    float glo[2] = {1e30f, 1e30f}, ghi[2] = {-1e30f, -1e30f};
+    for (int i = 0; i < n; ++i)
+        for (int k = 0; k < 2; ++k)
+            glo[k] = (std::min)(glo[k], pts[i][k]), ghi[k] = (std::max)(ghi[k], pts[i][k]);
+    viewGround[0] = (glo[0] + ghi[0]) * 0.5f;
+    viewGround[1] = (glo[1] + ghi[1]) * 0.5f;
+    viewGround[2] = (std::max)(ghi[0] - glo[0], ghi[1] - glo[1]) * 0.5f;
 
     SavedTarget saved;
     saved.Save(m_dev);
@@ -483,6 +493,34 @@ bool Shadows::NoShadowTexture()
     return listed;
 }
 
+bool Shadows::TreeGround(const ShaderInfo& vs, const float* world, float& ground)
+{
+    // fHeightOffset0 (one per tree of the patch, local z): the height of a standing tree's spot; a hidden tree's is
+    // -200, and one growing or shrinking is between the two. The patch's ground is the lowest standing tree's (on
+    // a slope, uphill trees still slide a little); remembered per patch for when none is standing.
+    const int reg = vs.Reg("fHeightOffset0", 2);
+    if (reg < 0)
+        return false;
+    float offsets[64 * 4];
+    m_dev->GetVertexShaderConstantF(static_cast<UINT>(reg), offsets, 64);
+    float lowest = 1e30f;
+    for (int i = 0; i < 64; ++i)
+        if (offsets[i * 4] > -40.0f)
+            lowest = (std::min)(lowest, offsets[i * 4]);
+    const int64_t key = (static_cast<int64_t>(std::lround(world[3])) << 32) ^ (std::lround(world[7]) & 0xFFFFFFFF);
+    if (lowest < 1e30f)
+        m_treeGround[key] = lowest;
+    else
+    {
+        auto it = m_treeGround.find(key);
+        if (it == m_treeGround.end())
+            return false;
+        lowest = it->second;
+    }
+    ground = world[10] * lowest + world[11];  // world z of the local point (0, 0, lowest)
+    return true;
+}
+
 bool Shadows::RigidUnitPart(DWORD fvf)
 {
     // Weapons, shields, catapult parts...: fixed-function, not skinned, lit (normals), writing depth, and placed
@@ -500,7 +538,7 @@ bool Shadows::RigidUnitPart(DWORD fvf)
 
 bool Shadows::MaybeReceiver(const ShaderInfo& vs)
 {
-    return vs.btsTerrain || vs.hash == kRiverFloodVs || vs.hash == kRiverVs;
+    return vs.btsTerrain || vs.codeHash == kRiverFloodVs || vs.codeHash == kRiverVs;
 }
 
 bool Shadows::DrawReceiver(const ShaderInfo& vs, const ShaderInfo* ps, const std::function<HRESULT()>& draw,
@@ -513,14 +551,15 @@ bool Shadows::DrawReceiver(const ShaderInfo& vs, const ShaderInfo* ps, const std
     IDirect3DPixelShader9** ourPs = nullptr;
     bool terrain = false;
     if (vs.btsTerrain && vs.Reg("mtxWorldViewProj", 2) == 0 && vs.world == 4 && vs.Reg("mtxFOW", 2) == 7 &&
-        vs.Reg("mtxLightmap", 2) == 9 && vs.Reg("fDetailTexScaling", 2) == 11 && ps->Reg("TerrainBase", 3) == 0 &&
+        vs.Reg("mtxLightmap", 2) == 9 && vs.Reg("fDetailTexScaling", 2) == 11 &&
+        (ps->Reg("TerrainBase", 3) == 0 || ps->Reg("TerrainBase0", 3) == 0) &&  // the older builds' name
         ps->Reg("TerrainFOWar", 3) == 1 && ps->Reg("TerrainLightmap", 3) == 2 && ps->Reg("TerrainDetail", 3) == 3)
         ourVs = &m_terrainVs, ourPs = &m_terrainPs, terrain = true;
     else if (!enabled)
         return false;  // lighting alone: only the terrain needs our shader (the rivers' colours are constants)
-    else if (vs.hash == kRiverFloodVs && ps->hash == kRiverFloodPs)
+    else if (vs.codeHash == kRiverFloodVs && ps->codeHash == kRiverFloodPs)
         ourVs = &m_riverFloodVs, ourPs = &m_riverFloodPs;
-    else if (vs.hash == kRiverVs && ps->hash == kRiverPs)
+    else if (vs.codeHash == kRiverVs && ps->codeHash == kRiverPs)
         ourVs = &m_riverVs, ourPs = &m_riverPs;
     else
         return false;
@@ -619,6 +658,8 @@ HRESULT Shadows::DrawShadowed(IDirect3DVertexShader9* vs, IDirect3DPixelShader9*
             light[28] = terrainGrid[0], light[29] = terrainGrid[1];
         light[31] = shadowed && hillShadows ? 1.0f : 0.0f;
         m_dev->SetPixelShaderConstantF(11, light, 8);  // c15.x = 0: lightmap as baked
+        const float hill[4] = {hillGrid[0], hillGrid[1], hillGrid[2], 0};
+        m_dev->SetPixelShaderConstantF(19, hill, 1);
         // Normal map: bilinear, wrapping like the map; no mips.
         m_dev->SetTexture(5, terrainNormals);
         const DWORD values[8] = {D3DTADDRESS_WRAP, D3DTADDRESS_WRAP, D3DTADDRESS_WRAP, 0,
@@ -628,14 +669,14 @@ HRESULT Shadows::DrawShadowed(IDirect3DVertexShader9* vs, IDirect3DPixelShader9*
     }
     else
     {
-        const float grid[4] = {terrainGrid[0], terrainGrid[1], 0, shadowed && hillShadows ? 1.0f : 0.0f};
+        const float grid[4] = {hillGrid[0], hillGrid[1], hillGrid[2], shadowed && hillShadows ? 1.0f : 0.0f};
         m_dev->SetPixelShaderConstantF(11, grid, 1);
     }
     {
-        // Hill shadow mask: bilinear, wrapping like the map; no mips.
+        // Hill shadow mask: bilinear, no mips; outside the ground it covers, no shadow (border: alpha 0, white).
         m_dev->SetTexture(6, shadowed ? hillShadows : nullptr);
-        const DWORD values[8] = {D3DTADDRESS_WRAP, D3DTADDRESS_WRAP, D3DTADDRESS_WRAP, 0,
-                                 D3DTEXF_LINEAR,   D3DTEXF_LINEAR,   D3DTEXF_NONE,     FALSE};
+        const DWORD values[8] = {D3DTADDRESS_BORDER, D3DTADDRESS_BORDER, D3DTADDRESS_BORDER, 0x00FFFFFF,
+                                 D3DTEXF_LINEAR,     D3DTEXF_LINEAR,     D3DTEXF_NONE,       FALSE};
         for (int k = 0; k < 8; ++k)
             m_dev->SetSamplerState(6, kShadowSamplerStates[k], values[k]);
     }
@@ -792,13 +833,13 @@ bool Shadows::DrawDecal(const std::function<HRESULT()>& draw, HRESULT& hr)
     mat::Mul(invView, shadowRows, texMat);
     // Hill shadows too, on the next stage if there's one: same coordinates generation, matrix VIEW^-1 x (world xy ->
     // grid uv), the mask's colour = its light factor.
-    const bool hill = hillShadows && terrainGrid[0] > 0 && stage + 1 < m_maxStages;
+    const bool hill = hillShadows && hillGrid[0] > 0 && stage + 1 < m_maxStages;
     float hillMat[16] = {};
     if (hill)
     {
         float grid[16] = {};
-        grid[0] = grid[5] = terrainGrid[0];  // u = x * scale + offset, v = y * scale + offset (row-vector form)
-        grid[12] = grid[13] = terrainGrid[1];
+        grid[0] = grid[5] = hillGrid[0];  // u = x * scale + x offset, v = y * scale + y offset (row-vector form)
+        grid[12] = hillGrid[1], grid[13] = hillGrid[2];
         grid[15] = 1;
         mat::Mul(invView, grid, hillMat);
     }
@@ -851,10 +892,7 @@ bool Shadows::DrawDecal(const std::function<HRESULT()>& draw, HRESULT& hr)
     if (hill)
     {
         multiply(stage + 1, hillShadows, hillMat);
-        const DWORD values[8] = {D3DTADDRESS_WRAP, D3DTADDRESS_WRAP, D3DTADDRESS_WRAP, 0,
-                                 D3DTEXF_LINEAR,   D3DTEXF_LINEAR,   D3DTEXF_NONE,     FALSE};
-        for (int k = 0; k < 8; ++k)
-            m_dev->SetSamplerState(stage + 1, kShadowSamplerStates[k], values[k]);
+        SetShadowSampler(m_dev, stage + 1);  // outside the area the mask covers: no hill shadow
     }
     if (next)
     {
@@ -943,13 +981,16 @@ bool Shadows::AfterDraw(const ShaderInfo* vs, bool fixedFunction, const std::fun
 
     if (unit)
     {
-        // World-space bones, then mtxViewProj: swap in the sun camera.
+        // Swap in the sun camera.
         UINT reg = static_cast<UINT>(vs->viewProj);
-        float old[16];
+        float old[16], sun[16];
         m_dev->GetVertexShaderConstantF(reg, old, 4);
-        m_dev->SetVertexShaderConstantF(reg, m_lightVP, 4);
-        redraw();
-        m_dev->SetVertexShaderConstantF(reg, old, 4);
+        if (Camera::UnitViewProj(m_dev, *vs, m_lightVP, sun))
+        {
+            m_dev->SetVertexShaderConstantF(reg, sun, 4);
+            redraw();
+            m_dev->SetVertexShaderConstantF(reg, old, 4);
+        }
     }
     else if (tree)
     {
@@ -961,7 +1002,25 @@ bool Shadows::AfterDraw(const ShaderInfo* vs, bool fixedFunction, const std::fun
         WorldFromRows(rows, world);
         mat::Mul(m_lightVP, world, wvp);
         m_dev->SetVertexShaderConstantF(wvpReg, wvp, 4);
+        // BtS shows and hides trees by sliding them up out of the ground and down into it. The coverage has no depth,
+        // so a tree's underground part would still cast, and its shadow would slide across the ground: clip the
+        // redraw at the ground (clip planes are in clip space with a vertex shader: the world plane z >= ground,
+        // through the inverse of the sun camera).
+        float ground = 0, inv[16], oldPlane[4];
+        const bool clip = TreeGround(*vs, world, ground) && mat::Invert(m_lightVP, inv);
+        if (clip)
+        {
+            const float p[4] = {0, 0, 1, -(ground - 2.0f)};
+            float plane[4];
+            for (int c = 0; c < 4; ++c)
+                plane[c] = inv[c] * p[0] + inv[4 + c] * p[1] + inv[8 + c] * p[2] + inv[12 + c] * p[3];
+            m_dev->GetClipPlane(0, oldPlane);
+            m_dev->SetClipPlane(0, plane);
+            m_dev->SetRenderState(D3DRS_CLIPPLANEENABLE, D3DCLIPPLANE0);
+        }
         redraw();
+        if (clip)
+            m_dev->SetClipPlane(0, oldPlane);
         m_dev->SetVertexShaderConstantF(wvpReg, old, 4);
     }
     else

@@ -13,10 +13,17 @@
 struct ShaderInfo
 {
     uint64_t hash = 0;
+    // The same without the comments after the version token (constant table, compiler name): equal for the same
+    // shader built by different compiler versions, as BtS's Steam and older builds are.
+    uint64_t codeHash = 0;
     std::string version;  // e.g. "vs_1_1"
     // Float registers of named constants, from the shader's constant table (CTAB); -1 if absent.
-    int viewProj = -1;     // mtxViewProj (4 registers): units and ships, bones are in world space
-    int worldBones = -1;   // mtxWorldBones (skinning palette)
+    // Units and ships: a bone palette (4x3 each) and the camera in 4 registers. Steam's BtS shaders have world-space
+    // bones (mtxWorldBones) and the camera alone (mtxViewProj); older builds the model's own bones (mtxBones) and the
+    // camera times the model's placement (SkinWorldViewProj), in the same registers.
+    int viewProj = -1;
+    int worldBones = -1;
+    bool skinWorldViewProj = false;  // viewProj holds SkinWorldViewProj (see UnitViewProj, camera.h)
     int world = -1;        // mtxWorld
     bool water = false;    // water plane shader (BtS mtxWaterTextureMat, Col mtxWaterTexture1)
     bool btsWater = false; // BtS's own water shader (mtxWaterTextureMat): the one the water replaces

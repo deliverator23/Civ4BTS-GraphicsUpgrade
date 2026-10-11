@@ -157,9 +157,9 @@ void ParseConstantTable(const DWORD* function, size_t sizeBytes, ShaderInfo& inf
                 info.table.push_back({name, set, reg, regs});
                 if (set == 2 && name == "mtxWaterTextureMat")
                     info.btsWater = true;
-                if (set == 2 && name == "mtxViewProj")
-                    info.viewProj = reg;
-                if (set == 2 && name == "mtxWorldBones")
+                if (set == 2 && (name == "mtxViewProj" || name == "SkinWorldViewProj"))
+                    info.viewProj = reg, info.skinWorldViewProj = name == "SkinWorldViewProj";
+                if (set == 2 && (name == "mtxWorldBones" || name == "mtxBones"))
                     info.worldBones = reg;
                 if (set == 2 && name == "mtxWorld")
                     info.world = reg;

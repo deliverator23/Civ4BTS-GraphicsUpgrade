@@ -110,6 +110,41 @@ bool SaveTextureBmp(IDirect3DBaseTexture9* base, const std::wstring& path)
     return ok;
 }
 
+IDirect3DSurface9* CopyBackBuffer(IDirect3DDevice9* dev)
+{
+    IDirect3DSurface9* back = nullptr;
+    if (FAILED(dev->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &back)))
+        return nullptr;
+    D3DSURFACE_DESC d = {};
+    back->GetDesc(&d);
+    // A multisampled back buffer can't be read directly: resolve it into a plain render target first.
+    IDirect3DSurface9 *resolved = nullptr, *sys = nullptr, *src = back;
+    if (d.MultiSampleType != D3DMULTISAMPLE_NONE &&
+        SUCCEEDED(dev->CreateRenderTarget(d.Width, d.Height, d.Format, D3DMULTISAMPLE_NONE, 0, FALSE, &resolved, nullptr)) &&
+        SUCCEEDED(dev->StretchRect(back, nullptr, resolved, nullptr, D3DTEXF_NONE)))
+        src = resolved;
+    if (SUCCEEDED(dev->CreateOffscreenPlainSurface(d.Width, d.Height, d.Format, D3DPOOL_SYSTEMMEM, &sys, nullptr)) &&
+        FAILED(dev->GetRenderTargetData(src, sys)))
+    {
+        sys->Release();
+        sys = nullptr;
+    }
+    if (resolved)
+        resolved->Release();
+    back->Release();
+    return sys;
+}
+
+bool SavePng(IDirect3DSurface9* surface, const std::wstring& path)
+{
+    using SaveFn = HRESULT(WINAPI*)(LPCWSTR, DWORD, IDirect3DSurface9*, const PALETTEENTRY*, const RECT*);
+    HMODULE d3dx = GetModuleHandleW(L"d3dx9_33.dll");
+    if (!d3dx)
+        d3dx = LoadLibraryW(L"d3dx9_33.dll");
+    auto save = d3dx ? reinterpret_cast<SaveFn>(GetProcAddress(d3dx, "D3DXSaveSurfaceToFileW")) : nullptr;
+    return surface && save && SUCCEEDED(save(path.c_str(), 3 /* D3DXIFF_PNG */, surface, nullptr, nullptr));
+}
+
 bool SaveSurfaceBmp(IDirect3DDevice9* dev, IDirect3DSurface9* surface, const std::wstring& path)
 {
     if (!surface)

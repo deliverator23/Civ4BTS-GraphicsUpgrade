@@ -11,7 +11,7 @@
 #include <string>
 #include <vector>
 
-#define GRAPHICSUPGRADE_VERSION "1.0.1"
+#define GRAPHICSUPGRADE_VERSION "1.0.2"
 
 // What BtS lights with which light (Lighting).
 enum LightGroup
@@ -35,8 +35,9 @@ struct Config
     std::wstring games = L"bts";  // game ids the effects run in ("bts", "col", exe name without .exe, or "*")
     bool dumpShaders = false;   // debug: save every shader the game creates
     bool tracesEnabled = false; // debug: frame traces (hotkey, trigger file, AutoFrame)
-    UINT traceKey = VK_F11;     // modifiers + traceKey traces the next frame(s)
+    UINT traceKey = '9';     // modifiers + traceKey traces the next frame(s)
     bool keyCtrl = true, keyShift = true, keyAlt = false;  // the modifiers every hotkey needs
+    UINT compareKey = VK_OEM_2;  // modifiers + compareKey saves a GraphicsUpgrade on/off pair of screenshots
     int traceFrames = 1;        // frames per trace
     int autoTraceFrame = 0;     // also trace this frame number automatically (0 = off)
     bool hashTextures = true;   // content-hash lockable textures in traces
@@ -44,19 +45,19 @@ struct Config
     // Debug: redraw every unit and ship shifted by ghostOffset (world units), so a "ghost" appears next to each one.
     bool ghostEnabled = false;
     float ghostOffset[3] = {90.0f, 0.0f, 0.0f};  // half a plot (180 units) to the east
-    UINT ghostKey = 'G';
+    UINT ghostKey = '8';
     // Reflection: ships drawn before the water are redrawn mirrored about the water plane into a texture (cleared to
     // alpha 0 each frame) that the water shader reads.
     bool reflectionEnabled = false;
     UINT reflectionSize = 512;
     float waterHeight = 49.5f;          // updated from the water draw's mtxWorld each frame; this is the start value
-    UINT reflectionKey = 'R';
+    UINT reflectionKey = 0;
     bool overlayEnabled = false;        // debug: show the reflection texture (colour and alpha) in a screen corner
-    UINT overlayKey = 'O';
+    UINT overlayKey = 0;
     // Water: BtS's water drawn with the reflective, dynamic water shader and Colonization's textures, the reflection
     // and a screen-copy refraction.
     bool waterEnabled = false;
-    UINT waterKey = 'W';
+    UINT waterKey = '1';
     // The running mod's GraphicsUpgrade folder (Mods\<name>\GraphicsUpgrade), if it has one: its GraphicsUpgrade.ini
     // overrides the game folder's setting by setting, and its water textures come first. Empty: no mod, or none.
     std::wstring modDir;  // the mod's folder (Mods\<name>), empty with no mod
@@ -73,7 +74,7 @@ struct Config
     // Sun shadows: units, ships, trees and buildings drawn from the sun into a coverage texture, blurred, and applied
     // to the ground, rivers, roads and water.
     bool shadowsEnabled = false;
-    UINT shadowsKey = 'S';
+    UINT shadowsKey = '2';
     UINT shadowSize = 2048;           // shadow texture size in pixels
     float shadowMaxRadius = 2000.0f;  // the shadowed area fits the ground in view, up to this half-width (plot = 180)
     float shadowSoftness = 0.5f;      // blur tap offset in shadow texels (0 = hard edges)
@@ -86,14 +87,15 @@ struct Config
     float buildingDarkness = 0.68f;   // their shadows' darkness (BtS's painted building shadows: about 0.67)
     bool hillShadows = true;          // hills and peaks shade the terrain behind them (from the terrain's heights)
     float hillShadowSoftness = 8.0f;  // world units the terrain must rise above the sunbeam for full shadow
+    float hillShadowLength = 1.64f;    // hill shadows' length as a multiple of the terrain's true heights
     float waterShadow = 0.6f;         // how much of a shadow the water's surface takes (0 = none, 1 = like the ground)
     bool shadowOverlay = false;       // debug: show the shadow textures
     UINT shadowOverlayKey = 0;
     // Lighting: light colours instead of BtS's light files, per LightGroup. Colours are 0..1 here, 0..255 in the INI.
     // A colour that isn't set (no group key and no SunColour/AmbientColour) keeps the game's own.
     bool lightingEnabled = false;
-    UINT lightingKey = 'L';
-    UINT lightCycleKey = 'P';  // modifiers + key pauses and resumes the light cycle
+    UINT lightingKey = '3';
+    UINT lightCycleKey = '4';  // modifiers + key pauses and resumes the light cycle
     float lightSun[kLightGroups][3] = {};
     float lightAmbient[kLightGroups][3] = {};
     bool lightSunSet[kLightGroups] = {}, lightAmbientSet[kLightGroups] = {};

@@ -21,7 +21,7 @@ float4x4 mtxShadow : register(c20);
 float3 f3SunLightDiffuse : register(c0);  // P1 pixel shader
 float3 f3SunAmbientColor : register(c1);
 float4 f4Shadow : register(c10);  // x = darkness for hill shadows, z = 1: objects' shadows on (s4)
-float4 f4HillGrid : register(c11); // x = 1 / (spacing x cells), y = 0.5 / cells, w = 1: hill shadows (s6)
+float4 f4HillGrid : register(c11); // world xy -> hill mask uv: x = scale, yz = offset; w = 1: hill shadows (s6)
 
 sampler2D RiverNormalSampler : register(s0);  // P1
 sampler2D RiverFOWSampler : register(s1);
@@ -65,7 +65,7 @@ struct RiverOut
 
 float Light(float4 shadow, float2 worldXY)
 {
-    float hill = f4HillGrid.w * tex2D(HillShadows, worldXY * f4HillGrid.x + f4HillGrid.y).a;
+    float hill = f4HillGrid.w * tex2D(HillShadows, worldXY * f4HillGrid.x + f4HillGrid.yz).a;
     return min(lerp(1, tex2Dproj(ShadowMap, shadow).r, f4Shadow.z), 1 - f4Shadow.x * hill);
 }
 

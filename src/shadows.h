@@ -41,6 +41,9 @@ public:
     IDirect3DTexture9* terrainNormals = nullptr;  // TerrainNormals' map for per-pixel terrain lighting (s5), or null
     IDirect3DTexture9* hillShadows = nullptr;     // TerrainNormals' hill shadow mask (s6), or null
     float terrainGrid[2] = {};                    // world xy -> grid uv: scale, offset
+    float hillGrid[3] = {};                       // world xy -> hill mask uv: scale, x offset, y offset
+    // The ground in view, as the last sun camera fitted it: centre x, y and half-width (world units; 0 = none yet).
+    float viewGround[3] = {};
 
     void NewFrame();  // after Present
     void EndFrame();  // before Present: blur this frame's coverage into the texture the next frame's terrain uses
@@ -90,14 +93,17 @@ public:
     uint32_t FrameCasters() const { return m_frameCasters; }
     uint32_t FrameReceivers() const { return m_frameReceivers; }
 
+    // View-projection (register form) of the main camera, from the current draw.
+    bool MainViewProj(const ShaderInfo* vs, bool fixedFunction, float* vp);
+
 private:
     bool EnsureResources();
     bool EnsureShaders();
     bool TargetIsBackBuffer();
-    // View-projection (register form) of the main camera, from the current draw.
-    bool MainViewProj(const ShaderInfo* vs, bool fixedFunction, float* vp);
     void SetupFrame(const float* mainViewProj);
     bool RigidUnitPart(DWORD fvf);  // an unskinned fixed-function mesh of the unit whose blob was just drawn
+    // World z of the ground under the tree patch being drawn (world: its World matrix); false if not known yet.
+    bool TreeGround(const ShaderInfo& vs, const float* world, float& ground);
     bool BuildingPart(DWORD fvf);   // a solid lit fixed-function mesh: buildings, improvements (BuildingShadows)
     bool SamplesFogOfWar(DWORD stages);  // one of the first `stages` texture stages holds this frame's fog of war
     HRESULT DrawShadowed(IDirect3DVertexShader9* vs, IDirect3DPixelShader9* ps, const std::function<HRESULT()>& draw,
@@ -135,5 +141,6 @@ private:
     TextureList m_blobTextures;      // BlobShadowTexture
     TextureList m_noShadowTextures;  // NoShadowTextures
     std::unordered_map<const void*, bool> m_paintedTextures;  // texture -> black (a painted shadow)
+    std::unordered_map<int64_t, float> m_treeGround;  // tree patch (origin x, y) -> its ground, local z
     bool m_loggedSetup = false;
 };

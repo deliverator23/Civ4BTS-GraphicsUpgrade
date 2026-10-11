@@ -60,15 +60,22 @@ If the folder already has a `d3d9.dll` (ReShade, DXVK...), read [Using with ReSh
 
 ## In game
 
-| Keys | Switches on and off                          |
+| Keys | What it does                                 |
 |---|----------------------------------------------|
-| Ctrl+Alt+Shift+W | The water, to compare with BtS default water |
-| Ctrl+Alt+Shift+S | Sun shadows                                  |
-| Ctrl+Alt+Shift+L | Lighting                                     |
-| Ctrl+Alt+Shift+P | Pauses and resumes the day–night cycle       |
+| Ctrl+Shift+1 | The water, to compare with BtS default water |
+| Ctrl+Shift+2 | Sun shadows                                  |
+| Ctrl+Shift+3 | Lighting                                     |
+| Ctrl+Shift+4 | Pauses and resumes the day–night cycle       |
+| Ctrl+Shift+/ | Saves a before/after pair of screenshots     |
 
-To use other keys, change `ToggleKey` in that section of `GraphicsUpgrade.ini`. It can be a letter, a key name such as `F11` or
-`Numpad5`, or `none`. `KeyModifiers` in `[general]` sets the Ctrl+Alt+Shift part.
+Ctrl+Shift+/ saves two screenshots from two frames in a row, so every unit, tree and wave is in the same place:
+one with GraphicsUpgrade's effects as you have them (`..._on.png`) and one with none of them, plain BtS
+(`..._off.png`). They go in `%LOCALAPPDATA%\GraphicsUpgrade\bts\screenshots`.
+
+To use other keys, change `ToggleKey` in that section of `GraphicsUpgrade.ini`. It can be a number, a letter, a key name
+such as `F11` or `Numpad5`, or `none`. `KeyModifiers` in `[general]` sets the Ctrl+Shift part. Letters are best
+avoided: many mods' own keys ignore extra modifiers, so a letter can set off a mod's command too. No mod we know of uses
+the number keys or `/`.
 
 ## Settings
 
@@ -83,7 +90,7 @@ The ones you're most likely to want:
 | `[shadows] SunDirection` | Where the sun shines from |
 | `[shadows] WaterShadow` | How much shadow falls on the water's surface |
 | `[water] UnderwaterDepth` | How deep you can see into the water (0 = not at all) |
-| `[reflection] Size` | Reflection sharpness: 512, or 1024 for sharper |
+| `[reflection] Size` | Reflection sharpness: 1024, or 512 to save a little speed |
 | `[lighting] Enabled` | GraphicsUpgrade's lighting (1), or BtS's own (0) |
 | `[lighting] LightCycleOn` | The day–night cycle on (1) or off (0) |
 
@@ -159,6 +166,11 @@ folders. If the game won't start or something looks wrong, remove `d3d9.dll`, an
 GraphicsUpgrade only acts on `Civ4BeyondSword.exe` and the mods it runs; in any other program it passes everything
 straight through.
 
+## Known limitations
+
+- **Civilopedia previews keep BtS's water.** The 3D pictures in the Civilopedia (a ship on its patch of sea, for
+  example) are drawn separately from the map, and GraphicsUpgrade leaves them as BtS draws them.
+
 ## How it works
 
 GraphicsUpgrade sits between the game and Direct3D 9. It changes how BtS's own scene is drawn, frame by frame:
@@ -187,6 +199,12 @@ That builds `build\d3d9.dll`. To build and package a release into `dist\`:
 
 ```bash
 uv run tools/package.py
+```
+
+To run the tests (no game needed; a few use the installed BtS and Colonization files and are skipped without them):
+
+```bash
+uv run tests/run_tests.py
 ```
 
 ## Credits

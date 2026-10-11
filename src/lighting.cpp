@@ -10,7 +10,7 @@
 namespace
 {
 // BtS's ContourShader tree vertex shader, whose copy tree_lit.hlsl is.
-const uint64_t kTreeVs = 0xd550d4da5e297ff4ull;
+const uint64_t kTreeVs = 0x3bdd40e63347e93full;  // instruction-only fingerprint (ShaderInfo::codeHash)
 }
 
 void Lighting::Set(bool vs, int reg, const float* rgb)
@@ -291,7 +291,7 @@ void Lighting::Apply(const ShaderInfo* vs, const ShaderInfo* ps, int ffGroup)
             Set(k == 0, info->lightDir, dir);
     }
     const bool treeColours = enabled && (SunSet(kLightTree) || AmbientSet(kLightTree));
-    if (vs && vs->hash == kTreeVs && (treeColours || hidePaintedTreeShadows) && EnsureTreeShader())
+    if (vs && vs->codeHash == kTreeVs && (treeColours || hidePaintedTreeShadows) && EnsureTreeShader())
     {
         // Unset tree colours (or the lighting off) as BtS: no sun, full ambient (= colour 1).
         static const float kNoSun[3] = {0, 0, 0}, kFull[3] = {1, 1, 1}, kHide[3] = {1, 0, 0}, kShow[3] = {0, 0, 0};

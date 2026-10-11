@@ -1,4 +1,5 @@
 #include "proxy_device.h"
+#include "camera.h"
 #include "proxy_d3d9.h"
 #include "overlay.h"
 
@@ -131,8 +132,9 @@ HRESULT ProxyDevice::QueryInterface(REFIID riid, void** ppvObj)
 ULONG ProxyDevice::Release()
 {
     ULONG refs = m_real->Release();
+    const ULONG shotRefs = (m_compareShots[0] != nullptr) + (m_compareShots[1] != nullptr);  // a capture in progress
     if (refs != 0 && refs == m_refl.InternalRefs() + m_water.InternalRefs() + m_shadows.InternalRefs() + m_deferRefs +
-                                 m_light.InternalRefs() + m_terrain.InternalRefs())
+                                 m_light.InternalRefs() + m_terrain.InternalRefs() + shotRefs)
     {
         // Only our own objects still hold the device: the game has let go, so release them, which destroys the
         // device, and the wrapper with it.
@@ -142,6 +144,9 @@ ULONG ProxyDevice::Release()
         m_shadows.ReleaseAll();
         m_light.ReleaseAll();  // last: these don't read the device's reference count
         m_terrain.ReleaseAll();
+        for (IDirect3DSurface9*& shot : m_compareShots)
+            if (shot)
+                shot->Release(), shot = nullptr;
         refs = 0;
     }
     if (refs == 0)
@@ -166,6 +171,7 @@ HRESULT ProxyDevice::Reset(D3DPRESENT_PARAMETERS* pPresentationParameters)
     LogPresentParameters("Reset", pPresentationParameters);
     m_water.ReleaseDefault();
     m_shadows.ReleaseDefault();
+    m_terrain.ReleaseDefault();
     DropDeferred();  // state blocks must go before Reset
     m_refl.ReleaseResources();  // D3DPOOL_DEFAULT objects and state blocks must be gone before Reset; made again on use
     HRESULT hr = m_real->Reset(pPresentationParameters);
@@ -183,6 +189,11 @@ HRESULT ProxyDevice::Present(CONST RECT* pSourceRect, CONST RECT* pDestRect, HWN
         m_trace.Event("{\"ev\":\"refraction_saved\",\"file\":\"refraction.bmp\"}");
     if (m_trace.Active() && m_shadows.SaveBmps(m_trace.Dir()))
         m_trace.Event("{\"ev\":\"shadows_saved\"}");
+    if (m_compareStep)
+    {
+        m_compareShots[m_compareStep - 1] = CopyBackBuffer(m_real);
+        Log::Write("screenshot: frame %u copied (%s)", m_frame, m_compareStep == 1 ? "on" : "off");
+    }
     m_shadows.EndFrame();
     m_refl.DrawOverlay();
     m_shadows.DrawOverlay();
@@ -195,11 +206,35 @@ HRESULT ProxyDevice::Present(CONST RECT* pSourceRect, CONST RECT* pDestRect, HWN
                    m_frame, m_frameDraws, m_framePrims, m_frameRtSwitches, m_frameGhosts, m_refl.FrameRedraws(),
                    m_frameWaterDraws, m_shadows.FrameCasters(), m_shadows.FrameReceivers(), m_frameBlobsSkipped, m_framePaintedSkipped, m_frameDeferred);
     m_frameDraws = m_frameRtSwitches = m_framePrims = m_frameGhosts = m_frameWaterDraws = m_frameBlobsSkipped = m_framePaintedSkipped = m_frameDeferred = 0;
+    bool* effects[4] = {&m_refl.enabled, &m_water.enabled, &m_shadows.enabled, &m_light.enabled};
+    if (m_compareStep == 1)
+    {
+        for (int i = 0; i < 4; ++i)
+            m_compareSaved[i] = *effects[i], *effects[i] = false;
+        m_compareStep = 2;
+    }
+    else if (m_compareStep == 2)
+    {
+        for (int i = 0; i < 4; ++i)
+            *effects[i] = m_compareSaved[i];
+        m_compareStep = 0;
+        for (int i = 0; i < 2; ++i)
+        {
+            const std::wstring path = m_comparePath + (i == 0 ? L"_on.png" : L"_off.png");
+            Log::Write("screenshot %ls: %s", path.c_str(), SavePng(m_compareShots[i], path) ? "saved" : "failed");
+            if (m_compareShots[i])
+                m_compareShots[i]->Release();
+            m_compareShots[i] = nullptr;
+        }
+    }
     m_refl.NewFrame();
     m_water.NewFrame();
     m_shadows.NewFrame();
-    m_terrain.NewFrame();
+    Camera::NewFrame();
     NewLightFrame();
+    if (m_shadows.enabled && g_config.hillShadows)
+        m_terrain.UpdateHills(m_light.SunDirection(), g_config.shadowDarkness * m_light.ShadowScale(),
+                              m_shadows.viewGround);
 
     m_trace.FrameDone();
 
@@ -261,6 +296,16 @@ HRESULT ProxyDevice::Present(CONST RECT* pSourceRect, CONST RECT* pDestRect, HWN
         m_light.cyclePaused = !m_light.cyclePaused;
         Log::Write("light cycle %s at frame %u (step %.2f)", m_light.cyclePaused ? "paused" : "playing", m_frame,
                    m_light.CyclePos());
+    }
+    if (combo(g_config.compareKey, m_compareKeyWasDown) && m_effects && m_compareStep == 0)
+    {
+        SYSTEMTIME t;
+        GetLocalTime(&t);
+        wchar_t name[64];
+        swprintf(name, 64, L"%04u-%02u-%02u_%02u%02u%02u", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond);
+        EnsureDir(Log::GameDir() + L"\\screenshots");
+        m_comparePath = Log::GameDir() + L"\\screenshots\\GraphicsUpgrade_" + name;
+        m_compareStep = 1;
     }
     if (m_effects && combo(g_config.shadowOverlayKey, m_shadowOverlayKeyWasDown))
     {
@@ -381,7 +426,13 @@ void ProxyDevice::RegisterShader(const char* kind, const void* shader, const DWO
     info.version = function ? ShaderVersion(function[0]) : kind;
     info.hash = size ? Fnv1a(function, size) : 0;
     if (size)
+    {
+        size_t i = 1;
+        while (i * sizeof(DWORD) < size && (function[i] & 0xFFFF) == 0xFFFE)
+            i += 1 + ((function[i] >> 16) & 0x7FFF);
+        info.codeHash = Fnv1a(function + i, size - i * sizeof(DWORD), Fnv1a(function, sizeof(DWORD)));
         ParseConstantTable(function, size, info);
+    }
     m_registry.shaders[shader] = info;
     if (size && g_config.dumpShaders && m_dumpedShaders.insert(info.hash).second)
     {
@@ -585,13 +636,15 @@ void ProxyDevice::Ghost(Redraw redraw)
         if (it == m_registry.shaders.end() || it->second.viewProj < 0 || it->second.worldBones < 0)
             return;
         UINT reg = static_cast<UINT>(it->second.viewProj);
-        float vp[16], shifted[16];
-        if (FAILED(m_real->GetVertexShaderConstantF(reg, vp, 4)))
+        float vp[16], camera[16], shifted[16], regShifted[16];
+        if (FAILED(m_real->GetVertexShaderConstantF(reg, vp, 4)) || !Camera::UnitWorldToClip(m_real, it->second, camera))
             return;
-        memcpy(shifted, vp, sizeof(vp));
+        memcpy(shifted, camera, sizeof(camera));
         for (int r = 0; r < 4; ++r)
-            shifted[r * 4 + 3] += vp[r * 4 + 0] * off[0] + vp[r * 4 + 1] * off[1] + vp[r * 4 + 2] * off[2];
-        m_real->SetVertexShaderConstantF(reg, shifted, 4);
+            shifted[r * 4 + 3] += camera[r * 4 + 0] * off[0] + camera[r * 4 + 1] * off[1] + camera[r * 4 + 2] * off[2];
+        if (!Camera::UnitViewProj(m_real, it->second, shifted, regShifted))
+            return;
+        m_real->SetVertexShaderConstantF(reg, regShifted, 4);
         redraw();
         m_real->SetVertexShaderConstantF(reg, vp, 4);
         if (m_trace.Active())
@@ -665,6 +718,12 @@ HRESULT ProxyDevice::Dispatch(Draw draw)
     }
     if (vs && vs->btsTerrain && m_refl.TargetIsBackBuffer())
         m_light.WorldDrawn();  // the light cycle's clock moves on
+    if (vs && (vs->btsTerrain || vs->tree) && !Camera::Get() && m_refl.TargetIsBackBuffer())
+    {
+        float camera[16];  // the main view's camera, for units whose shaders take it with their placement
+        if (m_shadows.MainViewProj(vs, false, camera))
+            Camera::Set(camera);
+    }
     if ((m_light.enabled || m_light.hidePaintedTreeShadows) && vs)
     {
         const ShaderInfo* ps = CurrentPixelShader();
@@ -689,6 +748,9 @@ HRESULT ProxyDevice::Dispatch(Draw draw)
         if (SaveTextureBmp(lightmap, m_trace.Dir() + L"\\lightmap.bmp"))
             m_trace.Event("{\"ev\":\"lightmap_saved\"}");
         // ...and the terrain normals read so far (cell (x, y) = world (x, y) x spacing, wrapping; spacing in the log)
+        if (m_terrain.SaveHeights(m_trace.Dir() + L"\\terrain_heights.bin"))
+            m_trace.Event("{\"ev\":\"terrain_heights_saved\",\"cells\":" + std::to_string(m_terrain.Cells()) +
+                          ",\"spacing\":" + std::to_string(m_terrain.Spacing()) + "}");
         if (m_terrain.SaveHillBmp(m_trace.Dir() + L"\\hill_shadows.bmp"))
             m_trace.Event("{\"ev\":\"hill_shadows_saved\"}");
         if (m_terrain.SaveBmp(m_trace.Dir() + L"\\terrain_normals.bmp"))
@@ -703,13 +765,14 @@ HRESULT ProxyDevice::Dispatch(Draw draw)
     m_shadows.terrainLight = m_light.enabled ? m_terrainLight : nullptr;
     m_shadows.terrainNormals = normals;
     // (also for fixed-function draws: roads and river foam take the hill shadows through an extra texture stage)
-    m_shadows.hillShadows = hills && (fixedFunction || (vs && Shadows::MaybeReceiver(*vs))) ? m_terrain.HillTexture(m_light.SunDirection(), g_config.shadowDarkness * m_light.ShadowScale())
+    m_shadows.hillShadows = hills && (fixedFunction || (vs && Shadows::MaybeReceiver(*vs))) ? m_terrain.HillTexture()
                                                                                              : nullptr;
     if (m_terrain.Spacing() > 0)
     {
         m_shadows.terrainGrid[0] = 1.0f / (m_terrain.Spacing() * m_terrain.Cells());
         m_shadows.terrainGrid[1] = 0.5f / m_terrain.Cells();
     }
+    memcpy(m_shadows.hillGrid, m_terrain.HillGrid(), sizeof(m_shadows.hillGrid));
     if (m_refl.enabled)
         m_refl.BeforeDraw(vs);
     if (m_water.enabled)

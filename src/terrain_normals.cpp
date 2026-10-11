@@ -1,5 +1,7 @@
 #include "terrain_normals.h"
 #include "overlay.h"
+#include "hill_shadow_ps.h"
+#include "hill_shadow_vs.h"
 
 #include <algorithm>
 #include <cmath>
@@ -92,171 +94,172 @@ void TerrainNormals::Capture(const ShaderInfo& vs)
     if (x1 >= x0)
     {
         UpdateNormals(x0 - 1, y0 - 1, x1 + 1, y1 + 1);
-        // Hill shadows: the new cells, and terrain they shade or are shaded by (up to 64 cells = 1440 units away).
-        const int reach = 64;
-        if (!m_hillPending)
-            m_hillX0 = x0 - reach, m_hillY0 = y0 - reach, m_hillX1 = x1 + reach, m_hillY1 = y1 + reach;
-        else
-            m_hillX0 = (std::min)(m_hillX0, x0 - reach), m_hillY0 = (std::min)(m_hillY0, y0 - reach),
-            m_hillX1 = (std::max)(m_hillX1, x1 + reach), m_hillY1 = (std::max)(m_hillY1, y1 + reach);
-        m_hillPending = true;
+        m_heightsDirty = true;  // hill shadows: the height texture is uploaded again
     }
     vb->Release();
 }
 
-float TerrainNormals::HeightAt(float x, float y)
+bool TerrainNormals::EnsureHillResources()
 {
-    int ix = static_cast<int>(std::floor(x)), iy = static_cast<int>(std::floor(y));
-    float fx = x - ix, fy = y - iy;
-    float a = Height(ix, iy), b = Height(ix + 1, iy), c = Height(ix, iy + 1), d = Height(ix + 1, iy + 1);
-    return (a * (1 - fx) + b * fx) * (1 - fy) + (c * (1 - fx) + d * fx) * fy;  // NaN propagates
-}
-
-void TerrainNormals::UpdateHills(int x0, int y0, int x1, int y1)
-{
-    if (x1 - x0 >= static_cast<int>(kCells))
-        x0 = 0, x1 = kCells - 1;
-    if (y1 - y0 >= static_cast<int>(kCells))
-        y0 = 0, y1 = kCells - 1;
-    // Towards the sun, per half-cell step: across the grid (in cells) and up (world units).
-    float t[3] = {-m_hillSun[0], -m_hillSun[1], -m_hillSun[2]};
-    float hor = std::sqrt(t[0] * t[0] + t[1] * t[1]);
-    const bool overhead = hor < 1e-4f || t[2] <= 0;
-    const float stepX = overhead ? 0 : t[0] / hor * 0.5f, stepY = overhead ? 0 : t[1] / hor * 0.5f;
-    const float rise = overhead ? 0 : t[2] / hor * 0.5f * m_spacing;
-    const float soft = (std::max)(0.01f, m_hillSoftness);
-    const int maxSteps = overhead ? 0 : (std::min)(256, static_cast<int>((m_maxHeight - m_minHeight) / rise) + 2);
-    for (int cy = y0; cy <= y1; ++cy)
-        for (int cx = x0; cx <= x1; ++cx)
-        {
-            float h = Height(cx, cy);
-            float shade = 0;
-            if (!std::isnan(h))
-            {
-                float x = static_cast<float>(cx), y = static_cast<float>(cy), z = h, excess = 0;
-                for (int s = 0; s < maxSteps; ++s)
-                {
-                    x += stepX, y += stepY, z += rise;
-                    if (z > m_maxHeight)
-                        break;
-                    float th = HeightAt(x, y);
-                    if (!std::isnan(th))
-                        excess = (std::max)(excess, th - z);
-                }
-                shade = (std::min)(1.0f, excess / soft);
-            }
-            DWORD a = static_cast<DWORD>(shade * 255 + 0.5f);
-            DWORD l = static_cast<DWORD>((1 - m_hillDarkness * shade) * 255 + 0.5f);
-            m_hill[(cy & (kCells - 1)) * kCells + (cx & (kCells - 1))] = (a << 24) | (l << 16) | (l << 8) | l;
-        }
-    // Upload just these rows (a band of a gradual refresh), unless they wrap round the grid.
-    MarkHillRows(y0, y1);
-}
-
-void TerrainNormals::MarkHillRows(int y0, int y1)
-{
-    if (y0 < 0 || y1 >= static_cast<int>(kCells))
-        y0 = 0, y1 = kCells - 1;
-    if (!m_hillUpload)
-        m_uploadY0 = y0, m_uploadY1 = y1;
-    else
-        m_uploadY0 = (std::min)(m_uploadY0, y0), m_uploadY1 = (std::max)(m_uploadY1, y1);
-    m_hillUpload = true;
-}
-
-void TerrainNormals::RelightHills()
-{
-    for (DWORD& t : m_hill)
+    if (m_hillFailed)
+        return false;
+    if (m_hillTex && m_heightTex && m_hillPs)
+        return true;
+    ULONG before = DeviceRefs(m_dev);
+    auto tokens = [](const BYTE* code, size_t size) {
+        std::vector<DWORD> t(size / sizeof(DWORD));
+        memcpy(t.data(), code, t.size() * sizeof(DWORD));
+        return t;
+    };
+    bool ok = true;
+    if (!m_hillVs)
+        ok = SUCCEEDED(m_dev->CreateVertexShader(tokens(g_hillShadowVS, sizeof(g_hillShadowVS)).data(), &m_hillVs));
+    if (ok && !m_hillPs)
+        ok = SUCCEEDED(m_dev->CreatePixelShader(tokens(g_hillShadowPS, sizeof(g_hillShadowPS)).data(), &m_hillPs));
+    if (ok && !m_heightTex)
     {
-        DWORD a = t >> 24;
-        DWORD l = static_cast<DWORD>((1 - m_hillDarkness * a / 255.0f) * 255 + 0.5f);
-        t = (a << 24) | (l << 16) | (l << 8) | l;
+        ok = SUCCEEDED(m_dev->CreateTexture(kCells, kCells, 1, 0, D3DFMT_R32F, D3DPOOL_MANAGED, &m_heightTex, nullptr));
+        // Bilinear heights where the card can filter R32F (any recent one), else nearest.
+        IDirect3D9* d3d = nullptr;
+        D3DDEVICE_CREATION_PARAMETERS cp = {};
+        D3DDISPLAYMODE mode = {};
+        if (ok && SUCCEEDED(m_dev->GetDirect3D(&d3d)) && SUCCEEDED(m_dev->GetCreationParameters(&cp)) &&
+            SUCCEEDED(m_dev->GetDisplayMode(0, &mode)))
+            m_heightFilter = SUCCEEDED(d3d->CheckDeviceFormat(cp.AdapterOrdinal, cp.DeviceType, mode.Format,
+                                                              D3DUSAGE_QUERY_FILTER, D3DRTYPE_TEXTURE, D3DFMT_R32F));
+        if (d3d)
+            d3d->Release();
+        m_heightsDirty = true;
     }
-    MarkHillRows(0, kCells - 1);
+    if (ok && !m_hillTex)
+        ok = SUCCEEDED(m_dev->CreateTexture(kHillCells, kHillCells, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT,
+                                            &m_hillTex, nullptr)) &&
+             SUCCEEDED(m_hillTex->GetSurfaceLevel(0, &m_hillSurf));
+    if (ok && !m_hillState)
+        ok = SUCCEEDED(m_dev->CreateStateBlock(D3DSBT_ALL, &m_hillState));
+    m_internalRefs += DeviceRefs(m_dev) - before;
+    if (!ok)
+    {
+        m_hillFailed = true;
+        Log::Write("terrain: hill shadows need Shader Model 3 and an R32F texture; creating them failed, so no hill shadows");
+    }
+    return ok;
 }
 
-IDirect3DTexture9* TerrainNormals::HillTexture(const float* sunDirection, float darkness)
+void TerrainNormals::UpdateHills(const float* sunDirection, float darkness, const float* view)
 {
-    if (m_spacing <= 0)
-        return nullptr;
+    if (m_spacing <= 0 || !EnsureHillResources())
+        return;
     float sun[3] = {sunDirection[0], sunDirection[1], sunDirection[2]};
     float len = std::sqrt(sun[0] * sun[0] + sun[1] * sun[1] + sun[2] * sun[2]);
     for (float& v : sun)
         v /= len > 0 ? len : 1;
-    if (m_hill.empty())
-        m_hill.assign(kCells * kCells, 0xFFFFFFFF & 0x00FFFFFF);  // lit, no shadow
-    const bool first = m_hillSoftness < 0;
-    if (first || m_hillSoftness != g_config.hillShadowSoftness)
+    // The area: the ground in view plus a margin, as a square snapped to whole texels (and its size to 64 units) so
+    // panning doesn't make the edges shimmer. Before any view is known, the whole grid.
+    float region[3];
+    if (view[2] > 0)
     {
-        // First time (or softness changed): everything at once.
-        memcpy(m_hillSun, sun, sizeof(sun));
-        m_hillDarkness = darkness;
-        m_hillSoftness = g_config.hillShadowSoftness;
-        UpdateHills(0, 0, kCells - 1, kCells - 1);
-        m_hillPending = false;
-        m_hillRefreshRow = -1;
+        region[2] = std::ceil((view[2] * 1.05f + 200.0f) / 64.0f) * 64.0f;
+        const float texel = 2 * region[2] / kHillCells;
+        region[0] = std::floor(view[0] / texel) * texel;
+        region[1] = std::floor(view[1] / texel) * texel;
     }
     else
-    {
-        // The sun moved (more than about a quarter of a degree): a gradual refresh, a band of rows per frame, so a
-        // moving sun (the light cycle) doesn't stall a frame. A refresh under way restarts with the newest sun.
-        float dot = sun[0] * m_hillSun[0] + sun[1] * m_hillSun[1] + sun[2] * m_hillSun[2];
-        if (dot < 0.99999f && m_hillRefreshRow < 0)
-        {
-            memcpy(m_hillSun, sun, sizeof(sun));
-            m_hillRefreshRow = 0;
-        }
-        // Darkness only changes the light factor (rgb) worked out from the shade (alpha): no march needed. Small
-        // changes wait, so a slowly changing darkness doesn't upload the mask every frame.
-        if (std::fabs(darkness - m_hillDarkness) >= 0.01f)
-        {
-            m_hillDarkness = darkness;
-            RelightHills();
-        }
-        if (m_hillBudget && m_hillRefreshRow >= 0)
-        {
-            const int band = 64;
-            UpdateHills(0, m_hillRefreshRow, kCells - 1, (std::min)(m_hillRefreshRow + band, static_cast<int>(kCells)) - 1);
-            m_hillRefreshRow += band;
-            if (m_hillRefreshRow >= static_cast<int>(kCells))
-                m_hillRefreshRow = -1;
-            m_hillBudget = false;
-        }
-        if (m_hillPending)
-        {
-            UpdateHills(m_hillX0, m_hillY0, m_hillX1, m_hillY1);
-            m_hillPending = false;
-        }
-    }
-    if (!m_hillTex)
-    {
-        ULONG before = DeviceRefs(m_dev);
-        if (FAILED(m_dev->CreateTexture(kCells, kCells, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &m_hillTex, nullptr)))
-            return nullptr;
-        m_internalRefs += DeviceRefs(m_dev) - before;
-        MarkHillRows(0, kCells - 1);
-    }
-    if (m_hillUpload)
+        region[0] = region[1] = region[2] = 0.5f * m_spacing * kCells;
+    if (m_hillReady && !m_heightsDirty && darkness == m_hillDarkness && memcmp(sun, m_hillSun, sizeof(sun)) == 0 &&
+        memcmp(region, m_hillRegion, sizeof(region)) == 0)
+        return;  // nothing changed (the light cycle paused or off, the view still)
+    if (m_heightsDirty)
     {
         D3DLOCKED_RECT lr;
-        const RECT rows = {0, m_uploadY0, static_cast<LONG>(kCells), m_uploadY1 + 1};
-        if (SUCCEEDED(m_hillTex->LockRect(0, &lr, &rows, 0)))
+        if (SUCCEEDED(m_heightTex->LockRect(0, &lr, nullptr, 0)))
         {
-            for (int y = m_uploadY0; y <= m_uploadY1; ++y)
-                memcpy(static_cast<BYTE*>(lr.pBits) + (y - m_uploadY0) * lr.Pitch, &m_hill[y * kCells], kCells * 4);
-            m_hillTex->UnlockRect(0);
+            for (UINT y = 0; y < kCells; ++y)
+            {
+                float* row = reinterpret_cast<float*>(static_cast<BYTE*>(lr.pBits) + y * lr.Pitch);
+                for (UINT x = 0; x < kCells; ++x)
+                {
+                    const float v = m_heights[y * kCells + x];
+                    row[x] = std::isnan(v) ? -10000.0f : v;
+                }
+            }
+            m_heightTex->UnlockRect(0);
         }
-        m_hillUpload = false;
+        m_heightsDirty = false;
     }
-    return m_hillTex;
+    // Half a cell per step towards the sun (so a one-vertex ridge isn't stepped over); the beam rises by the sun's
+    // slope per step, divided by HillShadowLength, over as many steps as it takes to climb the terrain's height
+    // range (at most 192).
+    const float tx = -sun[0], ty = -sun[1], tz = -sun[2];
+    const float hor = std::sqrt(tx * tx + ty * ty);
+    float step[4] = {0, 0, 0, 0};
+    if (hor > 1e-4f && tz > 0)
+    {
+        const float rise = 0.5f * m_spacing * tz / hor / g_config.hillShadowLength;
+        step[0] = 0.5f * tx / hor / kCells, step[1] = 0.5f * ty / hor / kCells, step[2] = rise;
+        step[3] = (std::min)(192.0f, std::ceil((m_maxHeight - m_minHeight) / rise) + 1);
+    }
+    // Soft edges: HillShadowSoftness at the foot of the slope, widening by 3% of the distance from it (a sun's
+    // penumbra), so long shadows fade out at their tips and small bumps only cast faint shade.
+    const float shade[4] = {(std::max)(0.01f, g_config.hillShadowSoftness), darkness, m_maxHeight, 0.015f * m_spacing};
+    const float known[4] = {m_minHeight - 1.0f, 2.0f, 0, 0};
+
+    SavedTarget saved;
+    saved.Save(m_dev);
+    m_hillState->Capture();
+    m_dev->SetRenderTarget(0, m_hillSurf);
+    m_dev->SetDepthStencilSurface(nullptr);
+    if (SUCCEEDED(m_dev->BeginScene()))
+    {
+        m_dev->SetVertexShader(m_hillVs);
+        m_dev->SetPixelShader(m_hillPs);
+        m_dev->SetFVF(D3DFVF_XYZ | D3DFVF_TEX1);
+        const D3DRENDERSTATETYPE off[] = {D3DRS_ZENABLE,       D3DRS_ALPHABLENDENABLE, D3DRS_ALPHATESTENABLE,
+                                          D3DRS_FOGENABLE,     D3DRS_CLIPPLANEENABLE,  D3DRS_SRGBWRITEENABLE,
+                                          D3DRS_STENCILENABLE, D3DRS_SCISSORTESTENABLE};
+        for (D3DRENDERSTATETYPE st : off)
+            m_dev->SetRenderState(st, FALSE);
+        m_dev->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
+        m_dev->SetRenderState(D3DRS_COLORWRITEENABLE, 0xF);
+        m_dev->SetTexture(0, m_heightTex);
+        m_dev->SetSamplerState(0, D3DSAMP_ADDRESSU, D3DTADDRESS_WRAP);
+        m_dev->SetSamplerState(0, D3DSAMP_ADDRESSV, D3DTADDRESS_WRAP);
+        const DWORD filter = m_heightFilter ? D3DTEXF_LINEAR : D3DTEXF_POINT;
+        m_dev->SetSamplerState(0, D3DSAMP_MAGFILTER, filter);
+        m_dev->SetSamplerState(0, D3DSAMP_MINFILTER, filter);
+        m_dev->SetSamplerState(0, D3DSAMP_MIPFILTER, D3DTEXF_NONE);
+        m_dev->SetSamplerState(0, D3DSAMP_SRGBTEXTURE, FALSE);
+        m_dev->SetPixelShaderConstantF(0, step, 1);
+        m_dev->SetPixelShaderConstantF(1, shade, 1);
+        m_dev->SetPixelShaderConstantF(2, known, 1);
+        // Clip space, shifted half a texel so texel centres meet pixel centres; uv 0-1 over the grid.
+        // uv: the heights' uv (grid convention, cell centres at (i + 0.5) / cells) at the area's corners.
+        const float d = 1.0f / kHillCells, gs = 1.0f / (m_spacing * kCells), go = 0.5f / kCells;
+        const float u0 = (region[0] - region[2]) * gs + go, u1 = (region[0] + region[2]) * gs + go;
+        const float v0 = (region[1] - region[2]) * gs + go, v1 = (region[1] + region[2]) * gs + go;
+        struct V
+        {
+            float x, y, z, u, v;
+        } q[4] = {{-1 - d, 1 + d, 0, u0, v0}, {1 - d, 1 + d, 0, u1, v0}, {-1 - d, -1 + d, 0, u0, v1},
+                  {1 - d, -1 + d, 0, u1, v1}};
+        m_dev->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, q, sizeof(V));
+        m_dev->EndScene();
+        memcpy(m_hillSun, sun, sizeof(sun));
+        m_hillDarkness = darkness;
+        m_hillReady = true;
+        memcpy(m_hillRegion, region, sizeof(region));
+        // Receivers: mask uv = (world - area's low corner) / its width.
+        m_hillGrid[0] = 1.0f / (2 * region[2]);
+        m_hillGrid[1] = -(region[0] - region[2]) * m_hillGrid[0];
+        m_hillGrid[2] = -(region[1] - region[2]) * m_hillGrid[0];
+    }
+    m_hillState->Apply();
+    saved.Restore(m_dev);
 }
 
 bool TerrainNormals::SaveHillBmp(const std::wstring& path)
 {
-    // As last drawn (or, before any, as the settings say).
-    IDirect3DTexture9* tex = m_hillSoftness < 0 ? HillTexture(g_config.sunDirection, g_config.shadowDarkness)
-                                                : HillTexture(m_hillSun, m_hillDarkness);
-    return tex && SaveTextureBmp(tex, path);
+    return m_hillReady && m_hillSurf && SaveSurfaceBmp(m_dev, m_hillSurf, path);
 }
 
 void TerrainNormals::UpdateNormals(int x0, int y0, int x1, int y1)
@@ -324,13 +327,37 @@ bool TerrainNormals::SaveBmp(const std::wstring& path)
     return SaveTextureBmp(tex, path);
 }
 
+void TerrainNormals::ReleaseDefault()
+{
+    m_hillReady = false;
+    if (!m_hillTex && !m_hillSurf && !m_hillState)
+        return;
+    ULONG before = DeviceRefs(m_dev);
+    IUnknown* objects[] = {m_hillSurf, m_hillTex, m_hillState};
+    for (IUnknown* o : objects)
+        if (o)
+            o->Release();
+    m_hillSurf = nullptr;
+    m_hillTex = nullptr;
+    m_hillState = nullptr;
+    ULONG after = DeviceRefs(m_dev);
+    m_internalRefs -= (before > after && m_internalRefs >= before - after) ? before - after : 0;
+}
+
 void TerrainNormals::ReleaseAll()
 {
-    if (m_tex)
-        m_tex->Release();  // no reference counting afterwards: this can be the device's last object
+    // No reference counting afterwards: this can be the device's last object.
+    IUnknown* objects[] = {m_tex, m_hillSurf, m_hillTex, m_hillState, m_heightTex, m_hillVs, m_hillPs};
+    for (IUnknown* o : objects)
+        if (o)
+            o->Release();
     m_tex = nullptr;
-    if (m_hillTex)
-        m_hillTex->Release();
+    m_hillSurf = nullptr;
     m_hillTex = nullptr;
+    m_hillState = nullptr;
+    m_heightTex = nullptr;
+    m_hillVs = nullptr;
+    m_hillPs = nullptr;
+    m_hillReady = false;
     m_internalRefs = 0;
 }

@@ -34,6 +34,8 @@ set "FXC=fxc /nologo /O3"
 %FXC% /T ps_2_0 /E PSRiver /Vn g_riverPS /Fh build\shaders\river_ps.h shaders\river_shadow.hlsl >nul || exit /b 1
 %FXC% /T ps_2_0 /E PSMain /Vn g_shadowBlurPS /Fh build\shaders\shadow_blur_ps.h shaders\shadow_blur.hlsl >nul || exit /b 1
 %FXC% /T vs_2_0 /E VSMain /Vn g_treeLitVS /Fh build\shaders\tree_lit_vs.h shaders\tree_lit.hlsl >nul || exit /b 1
+%FXC% /T vs_3_0 /E VSMain /Vn g_hillShadowVS /Fh build\shaders\hill_shadow_vs.h shaders\hill_shadow.hlsl >nul || exit /b 1
+%FXC% /T ps_3_0 /E PSMain /Vn g_hillShadowPS /Fh build\shaders\hill_shadow_ps.h shaders\hill_shadow.hlsl >nul || exit /b 1
 
 cl /nologo /std:c++17 /O2 /MT /EHsc /W4 /DUNICODE /D_UNICODE /Isrc /Ibuild\shaders ^
    /Fobuild\ /Fdbuild\ src\*.cpp ^

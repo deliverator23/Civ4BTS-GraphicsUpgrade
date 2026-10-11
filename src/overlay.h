@@ -16,5 +16,9 @@ void DrawOverlay(IDirect3DDevice9* dev, IDirect3DStateBlock9*& state, ULONG& int
 
 // Saves a render-target surface (A8R8G8B8 or X8R8G8B8, not multisampled) as a 32-bit top-down BMP, alpha kept.
 bool SaveSurfaceBmp(IDirect3DDevice9* dev, IDirect3DSurface9* surface, const std::wstring& path);
+// A system-memory copy of the back buffer (multisampled or not), or null. Quick: for saving later with SavePng.
+IDirect3DSurface9* CopyBackBuffer(IDirect3DDevice9* dev);
+// Saves a surface as a PNG with the game's own d3dx9_33.dll. Slow (a fraction of a second at full screen).
+bool SavePng(IDirect3DSurface9* surface, const std::wstring& path);
 // Same for a lockable (managed or system-memory) A8R8G8B8/X8R8G8B8 texture's top level, e.g. the terrain lightmap.
 bool SaveTextureBmp(IDirect3DBaseTexture9* texture, const std::wstring& path);

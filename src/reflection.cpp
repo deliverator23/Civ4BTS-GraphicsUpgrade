@@ -1,4 +1,5 @@
 #include "reflection.h"
+#include "camera.h"
 #include "matrix.h"
 #include "overlay.h"
 
@@ -140,13 +141,17 @@ bool Reflection::AfterDraw(const ShaderInfo* vs, bool fixedFunction, const std::
 
     if (vs)
     {
-        // Each output component is reg . (x, y, z, 1) with world-space x, y, z. Mirroring about z = h replaces z with
-        // 2h - z: negate the z coefficient and add 2h * (old z coefficient) to w. Negating register 0 as well flips
+        // Each output component of the world -> clip camera is row . (x, y, z, 1). Mirroring about z = h replaces z
+        // with 2h - z: negate the z coefficient and add 2h * (old z coefficient) to w. Negating row 0 as well flips
         // clip-space x, which undoes the mirror's winding flip (Colonization does the same), so culling is unchanged.
         UINT reg = static_cast<UINT>(vs->viewProj);
-        float vp[16], m[16];
+        float vp[16], camera[16], m[16], regMirrored[16];
         m_dev->GetVertexShaderConstantF(reg, vp, 4);
-        mat::MirrorViewProj(vp, h, m);
+        if (!Camera::UnitWorldToClip(m_dev, *vs, camera))
+            return false;
+        mat::MirrorViewProj(camera, h, m);
+        if (!Camera::UnitViewProj(m_dev, *vs, m, regMirrored))
+            return false;
         // Clip plane in clip space (programmable pipeline): keep world points with z >= h, i.e. the part of the ship
         // above the water, which is what appears in a reflection. Plane_clip = Plane_world * inverse(M).
         double inv[16];
@@ -160,7 +165,7 @@ bool Reflection::AfterDraw(const ShaderInfo* vs, bool fixedFunction, const std::
             m_dev->SetClipPlane(0, plane);
             m_dev->SetRenderState(D3DRS_CLIPPLANEENABLE, D3DCLIPPLANE0);
         }
-        m_dev->SetVertexShaderConstantF(reg, m, 4);
+        m_dev->SetVertexShaderConstantF(reg, regMirrored, 4);
         redraw();
         m_dev->SetVertexShaderConstantF(reg, vp, 4);
     }

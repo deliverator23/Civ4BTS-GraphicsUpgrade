@@ -97,6 +97,12 @@ static UINT ParseKey(const std::wstring& raw, const wchar_t* section, const wcha
         return 0;
     if (s.size() == 1 && ((s[0] >= L'A' && s[0] <= L'Z') || (s[0] >= L'0' && s[0] <= L'9')))
         return s[0];  // letters and digits are their own virtual-key codes
+    if (s.size() == 1 && iswpunct(s[0]))
+    {
+        SHORT vk = VkKeyScanW(s[0]);  // the key that types it on this keyboard (/ is VK_OEM_2 on a US one)
+        if (vk != -1)
+            return static_cast<UINT>(vk & 0xFF);
+    }
     if (s.size() >= 2 && s[0] == L'F' && iswdigit(s[1]))
     {
         int n = _wtoi(s.c_str() + 1);
@@ -306,29 +312,30 @@ void LoadConfig()
     g_config.games = IniString(ini, L"general", L"Games", L"bts");
     g_config.dumpShaders = IniInt(ini, L"debug", L"DumpShaders", 0) != 0;
     g_config.tracesEnabled = IniInt(ini, L"debug", L"Traces", 0) != 0;
-    g_config.traceKey = IniKey(ini, L"trace", L"Key", VK_F11);
-    std::wstring mods = IniString(ini, L"general", L"KeyModifiers", L"ctrl+alt+shift");
+    g_config.traceKey = IniKey(ini, L"trace", L"Key", '9');
+    std::wstring mods = IniString(ini, L"general", L"KeyModifiers", L"ctrl+shift");
     for (auto& c : mods)
         c = static_cast<wchar_t>(towlower(c));
     g_config.keyCtrl = mods.find(L"ctrl") != std::wstring::npos;
     g_config.keyShift = mods.find(L"shift") != std::wstring::npos;
     g_config.keyAlt = mods.find(L"alt") != std::wstring::npos;
+    g_config.compareKey = IniKey(ini, L"general", L"CompareKey", VK_OEM_2);
     g_config.traceFrames = IniInt(ini, L"trace", L"Frames", 1);
     g_config.autoTraceFrame = IniInt(ini, L"trace", L"AutoFrame", 0);
     g_config.hashTextures = IniInt(ini, L"trace", L"HashTextures", 1) != 0;
     g_config.clearPureDevice = IniInt(ini, L"device", L"ClearPureDevice", 1) != 0;
     g_config.ghostEnabled = IniInt(ini, L"ghost", L"Enabled", 0) != 0;
-    g_config.ghostKey = IniKey(ini, L"ghost", L"ToggleKey", 'G');
+    g_config.ghostKey = IniKey(ini, L"ghost", L"ToggleKey", '8');
     std::wstring offset = IniString(ini, L"ghost", L"Offset", L"90,0,0");
     swscanf_s(offset.c_str(), L"%f,%f,%f", &g_config.ghostOffset[0], &g_config.ghostOffset[1], &g_config.ghostOffset[2]);
     g_config.reflectionEnabled = IniInt(ini, L"reflection", L"Enabled", 1) != 0;
     g_config.reflectionSize = static_cast<UINT>(IniInt(ini, L"reflection", L"Size", 512));
     g_config.waterHeight = static_cast<float>(_wtof(IniString(ini, L"reflection", L"WaterHeight", L"49.5").c_str()));
-    g_config.reflectionKey = IniKey(ini, L"reflection", L"ToggleKey", 'R');
+    g_config.reflectionKey = IniKey(ini, L"reflection", L"ToggleKey", 0);
     g_config.overlayEnabled = IniInt(ini, L"reflection", L"Overlay", 0) != 0;
-    g_config.overlayKey = IniKey(ini, L"reflection", L"OverlayToggleKey", 'O');
+    g_config.overlayKey = IniKey(ini, L"reflection", L"OverlayToggleKey", 0);
     g_config.waterEnabled = IniInt(ini, L"water", L"Enabled", 1) != 0;
-    g_config.waterKey = IniKey(ini, L"water", L"ToggleKey", 'W');
+    g_config.waterKey = IniKey(ini, L"water", L"ToggleKey", '1');
     std::wstring colDir = IniString(ini, L"water", L"ColonizationDir", L"");
     if (!colDir.empty())
         g_config.colonizationDir = colDir;
@@ -341,7 +348,7 @@ void LoadConfig()
         swscanf_s(wc.c_str(), L"%f,%f,%f,%f", &g_config.waterConstants[0], &g_config.waterConstants[1],
                   &g_config.waterConstants[2], &g_config.waterConstants[3]);
     g_config.shadowsEnabled = IniInt(ini, L"shadows", L"Enabled", 1) != 0;
-    g_config.shadowsKey = IniKey(ini, L"shadows", L"ToggleKey", 'S');
+    g_config.shadowsKey = IniKey(ini, L"shadows", L"ToggleKey", '2');
     g_config.shadowSize = static_cast<UINT>(IniInt(ini, L"shadows", L"Size", 2048));
     g_config.shadowMaxRadius = static_cast<float>(_wtof(IniString(ini, L"shadows", L"MaxRadius", L"2000").c_str()));
     g_config.shadowSoftness = static_cast<float>(_wtof(IniString(ini, L"shadows", L"Softness", L"0.5").c_str()));
@@ -356,6 +363,8 @@ void LoadConfig()
     g_config.hillShadows = IniInt(ini, L"shadows", L"HillShadows", 1) != 0;
     g_config.hillShadowSoftness =
         static_cast<float>(_wtof(IniString(ini, L"shadows", L"HillShadowSoftness", L"8").c_str()));
+    g_config.hillShadowLength =
+        (std::max)(0.1f, static_cast<float>(_wtof(IniString(ini, L"shadows", L"HillShadowLength", L"1.64").c_str())));
     g_config.waterShadow =
         static_cast<float>(_wtof(IniString(ini, L"shadows", L"WaterShadow", L"0.6").c_str()));
     g_config.shadowOverlay = IniInt(ini, L"shadows", L"Overlay", 0) != 0;
@@ -376,8 +385,8 @@ void LoadConfig()
         return true;
     };
     g_config.lightingEnabled = IniInt(ini, L"lighting", L"Enabled", 1) != 0;
-    g_config.lightingKey = IniKey(ini, L"lighting", L"ToggleKey", 'L');
-    g_config.lightCycleKey = IniKey(ini, L"lighting", L"LightCycleToggleKey", 'P');
+    g_config.lightingKey = IniKey(ini, L"lighting", L"ToggleKey", '3');
+    g_config.lightCycleKey = IniKey(ini, L"lighting", L"LightCycleToggleKey", '4');
     g_config.matchShadowDirection = IniInt(ini, L"lighting", L"MatchShadowDirection", 1) != 0;
     std::wstring lightDir = IniString(ini, L"lighting", L"LightDirection", L"");
     g_config.haveLightDirection =
@@ -596,9 +605,12 @@ void Init()
             s_gameId += static_cast<char>(name[i] < 128 ? name[i] : '_');  // exe name without ".exe"
     s_gameDir = g_config.outputDir + L"\\" + Widen(s_gameId);
     EnsureDir(s_gameDir);
-    // Shared, so the log can be read while the game runs and a second game process (e.g. a relaunch while the first
-    // is still exiting) can append to it too. Every line carries the process id.
-    s_file = _wfsopen((s_gameDir + L"\\session.log").c_str(), L"ab", _SH_DENYNO);
+    // A new log each launch; the last one is kept as session.previous.log. If the old log is still open (a relaunch,
+    // e.g. BtS restarting itself to load a mod, while the first process exits) it can't be moved: append to it.
+    // Shared, so the log can be read while the game runs. Every line carries the process id.
+    const std::wstring path = s_gameDir + L"\\session.log";
+    MoveFileExW(path.c_str(), (s_gameDir + L"\\session.previous.log").c_str(), MOVEFILE_REPLACE_EXISTING);
+    s_file = _wfsopen(path.c_str(), L"ab", _SH_DENYNO);
     Write("---- session start: GraphicsUpgrade " GRAPHICSUPGRADE_VERSION ", %ls (game id %s), output %ls", exe, s_gameId.c_str(),
           s_gameDir.c_str());
     for (const std::string& w : g_settingsWarnings)
