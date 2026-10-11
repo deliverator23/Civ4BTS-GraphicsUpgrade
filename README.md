@@ -29,7 +29,8 @@ part can be turned off in the settings. Shadows fall on the terrain, rivers, roa
 ## What you need
 
 - Civilization IV: Beyond the Sword 3.19 on Windows.
-- A graphics card that runs BtS at its higher graphics settings (pixel shader 2.0).
+- A graphics card with Shader Model 3 (any from about 2005 on). Without it, hill and mountain shadows are left out;
+  everything else works.
 
 ## Install
 
@@ -88,6 +89,7 @@ The ones you're most likely to want:
 | `[shadows] Softness` | How soft shadow edges are (0 = hard) |
 | `[shadows] BuildingShadows` | Real building shadows on (1) or off (0) |
 | `[shadows] SunDirection` | Where the sun shines from |
+| `[shadows] HillShadowLength` | How long hill and mountain shadows are (1 = true to the terrain's heights) |
 | `[shadows] WaterShadow` | How much shadow falls on the water's surface |
 | `[water] UnderwaterDepth` | How deep you can see into the water (0 = not at all) |
 | `[reflection] Size` | Reflection sharpness: 1024, or 512 to save a little speed |
