@@ -40,6 +40,7 @@ public:
     float darknessScale = 1.0f;
     IDirect3DTexture9* terrainNormals = nullptr;  // TerrainNormals' map for per-pixel terrain lighting (s5), or null
     IDirect3DTexture9* hillShadows = nullptr;     // TerrainNormals' hill shadow mask (s6), or null
+    const float* decalLight = nullptr;            // unlit ground decals' change of light (Lighting::DecalLight), or null
     float terrainGrid[2] = {};                    // world xy -> grid uv: scale, offset
     float hillGrid[3] = {};                       // world xy -> hill mask uv: scale, x offset, y offset
     // The ground in view, as the last sun camera fitted it: centre x, y and half-width (world units; 0 = none yet).
@@ -50,7 +51,7 @@ public:
     // A fixed-function draw of BtS's blob shadow texture (BlobShadowTexture)? Also remembers where it is (see
     // RigidUnitPart).
     bool BlobShadow();
-    bool NoShadowTexture();  // drawn with one of the NoShadowTextures (stage 0): casts no shadow
+    bool NoShadowTexture();  // drawn with one of the NoShadowTextures (any stage): casts no shadow
     // A blended fixed-function draw of one of BtS's painted shadows (building_shadow.dds, *_shadow.dds,
     // eu_an_shadow.dds, 32dropshadow.dds...): its texture is black, the shadow's shape in the alpha, and like every
     // world decal it samples the fog of war. Hidden while buildings cast real shadows, and never a caster itself.
@@ -70,8 +71,10 @@ public:
     // Draw a BtS terrain or river draw with shadows, through our copies of its shaders. False if it doesn't apply
     // (the caller then draws it as usual).
     bool DrawReceiver(const ShaderInfo& vs, const ShaderInfo* ps, const std::function<HRESULT()>& draw, HRESULT& hr);
-    // Draw a fixed-function ground decal (roads, river foam: blended, sampling the fog of war, drawn before the units)
-    // with shadows: one more texture stage multiplies by the shadow texture. False if the draw isn't one.
+    // Draw a fixed-function ground decal (roads, river foam: blended, depth-tested, sampling the fog of war; not the
+    // yield icons, which skip the depth test) with shadows (drawn before the units: one more texture stage multiplies
+    // by the shadow texture, one more by the hill shadows) and, if it's unlit, the terrain's change of light
+    // (decalLight: a stage multiplying by the texture factor). False if the draw isn't one, or there's nothing to add.
     bool DrawDecal(const std::function<HRESULT()>& draw, HRESULT& hr);
     // Right after a water draw (BtS's water constants in place): draw it again multiplying the screen by the shadow's
     // light factor at the surface ([shadows] WaterShadow), so shadows lie on the water too. True if it did.

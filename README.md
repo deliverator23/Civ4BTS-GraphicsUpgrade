@@ -214,5 +214,6 @@ uv run tests/run_tests.py
 GraphicsUpgrade by Deliverator.
 
 The water shader is reverse engineered from the one in Sid Meier's Civilization IV: Colonization. The water textures
-(`water_001.dds`, `water_env.dds`) are from Colonization, © Firaxis Games / 2K. GraphicsUpgrade is an unofficial fan
+(`water_001.dds`, `water_env.dds`) are from Colonization, © Firaxis Games / 2K; `water_env.dds`'s sun glint has been
+redrawn to remove a seam. GraphicsUpgrade is an unofficial fan
 project, not affiliated with or endorsed by Firaxis Games, 2K or Take-Two Interactive.

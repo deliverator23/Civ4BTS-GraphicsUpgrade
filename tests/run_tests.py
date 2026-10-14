@@ -288,9 +288,10 @@ def main():
     shadow = {}
 
     def shadow_run(label, enabled, overlay='none', extra='', buildings=1, shadows_extra='', flagpole=False,
-                   old=False, game_dir=None):
+                   old=False, game_dir=None, flag_stage=0):
         """Harness 'shadow' scene with shadows on or off; returns its SHADOW values and session log. old: the
-        terrain and unit shaders named as in older BtS builds; game_dir: BtS's tree and river shaders from there."""
+        terrain and unit shaders named as in older BtS builds; game_dir: BtS's tree and river shaders from there;
+        flag_stage: the texture stage the flag texture is on."""
         sdir = os.path.join(TEST, f'shadow_{overlay}_{label}')
         # extra: more INI text (e.g. a [lighting] section)
         sout_dir = os.path.join(sdir, 'out')
@@ -306,7 +307,7 @@ def main():
         env = dict(os.environ, GU_TEST_OLD_SHADERS='1' if old else '0')
         sres = run([os.path.join(TEST, 'test_proxy.exe'), os.path.join(sdir, 'd3d9.dll'), 'shadow',
                     blob_dds if blob_dds and overlay == 'none' else '-', overlay, game_dir or river_dir] +
-                   ([flagpole_dds] if flagpole else []), env=env)
+                   ([flagpole_dds, str(flag_stage)] if flagpole else []), env=env)
         m = re.search(r'^SHADOW (.*)$', sres, re.M)
         values = {k: int(v) for k, v in (kv.split('=') for kv in m.group(1).split())} if m else {}
         values['released'] = 'final refs device 0, d3d 0' in sres
@@ -363,6 +364,7 @@ def main():
     for overlay, name, expect in (('river0', 'river floodplain (River_Shader P0)', 86),
                                   ('river1', 'river (River_Shader P1)', 92),
                                   ('decal', 'fixed-function ground decal (roads: samples the fog of war)', 173),
+                                  ('symbol', 'plot symbol (yield icons: like a road, but not depth-tested)', 173),
                                   ('overlay', 'fixed-function interface overlay on the ground (no fog of war)', 192)):
         if overlay.startswith('river') and not have_rivers:
             continue
@@ -373,7 +375,7 @@ def main():
               f'{name}: drawn as expected without shadows ({off_v.get("lit")}, expected ~{expect})')
         check(abs(on_v.get('lit', 0) - off_v.get('lit', 0)) <= 2 and abs(on_v.get('lit2', 0) - off_v.get('lit', 0)) <= 2,
               f'{name}: unshadowed, our copy matches the original ({on_v.get("lit")} vs {off_v.get("lit")})')
-        if overlay == 'overlay':
+        if overlay in ('overlay', 'symbol'):
             check(on_v.get('shadowed') == on_v.get('lit') == off_v.get('lit'),
                   f'{name}: left alone in the shadow ({on_v.get("shadowed")} = {on_v.get("lit")})')
         else:
@@ -381,6 +383,28 @@ def main():
                   on_v.get('shadowed2', 999) <= on_v.get('lit2', 0) * 0.6,
                   f'{name}: darkened in the shadow ({on_v.get("shadowed")}), also after Reset')
         check(on_v.get('restored') == 1 and on_v['released'], f'{name}: game state restored; device released')
+
+    # BtS draws roads unlit (their texture's colour, whatever the light): they take the terrain's change of light,
+    # the light on flat ground over BtS's baked terrain light. Here the shadows' sun (-1,0,-1: 45 degrees up) and a
+    # night's terrain colours, blue (50 + 90 x 0.707) / (133 + 222 x 0.700) = 0.394 of the decal's 173.
+    night = '[lighting]\nEnabled=1\nTerrainSun=60,70,90\nTerrainAmbient=30,35,50\n'
+    scale = (50 + 90 * 0.70711) / (133 + 222 * 0.700134)
+    for overlay, label, enabled, ini, expect, name in (
+            ('decal', 'night', 0, night, 173 * scale, 'unlit road at night: darkened as the terrain'),
+            ('decal', 'nightsh', 1, night, 173 * scale, 'unlit road at night, shadows on: darkened as the terrain'),
+            ('decal', 'baked', 0, '[lighting]\nEnabled=1\nMatchShadowDirection=0\n', 173,
+             'unlit road with the terrain lit as BtS baked it: unchanged'),
+            ('symbol', 'night', 0, night, 173, 'plot symbol (yield icon) at night: unchanged'),
+            ('symbol', 'nightsh', 1, night, 173, 'plot symbol (yield icon) at night, shadows on: unchanged'),
+            ('overlay', 'night', 0, night, 192, 'interface overlay on the ground at night: unchanged')):
+        v, _ = shadow_run(label, enabled, overlay, ini)
+        check(abs(v.get('lit', 0) - expect) <= 4 and v.get('restored') == 1 and v['released'],
+              f"{name} ({v.get('lit')}, expected {expect:.0f}); game state restored")
+        if enabled and overlay == 'symbol':
+            check(v.get('shadowed') == v.get('lit'), f"{name}: not darkened in the shadow ({v.get('shadowed')})")
+        elif enabled:
+            check(v.get('shadowed', 999) <= v.get('lit', 0) * 0.6,
+                  f"{name}: still darkened in the shadow ({v.get('shadowed')})")
 
     print('lighting:')
 
@@ -653,6 +677,10 @@ def main():
         check(abs(b_flag.get('bld', 0) - b_flag.get('lit', 0)) <= 2 and b_flag['released'],
               f"a unit flag's pole (BtS's Ancient_Flag_Pole.dds on the same mesh) casts no shadow ({b_flag.get('bld')} = "
               f"lit {b_flag.get('lit')}; as a building it's {b_on.get('bld')})")
+        b_cloth, _ = shadow_run('flagcloth', 1, 'building', '', buildings=1, flagpole=True, flag_stage=3)
+        check(abs(b_cloth.get('bld', 0) - b_cloth.get('lit', 0)) <= 2 and b_cloth['released'],
+              f"a unit flag's cloth (its texture on stage 3, as BtS draws it) casts no shadow ({b_cloth.get('bld')} = "
+              f"lit {b_cloth.get('lit')})")
     check(abs(b_off.get('bld', 0) - b_off.get('lit', 0)) <= 2,
           f'BuildingShadows=0: no building shadow ({b_off.get("bld")})')
     # Shadows follow the light cycle's sun: halfway between white (step 6) and black (step 18) is half as bright as

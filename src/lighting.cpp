@@ -189,6 +189,26 @@ const float* Lighting::WaterSun()
     return m_waterSun;
 }
 
+const float* Lighting::DecalLight()
+{
+    if (!enabled)
+        return nullptr;
+    // The terrain's re-light (TerrainConstants): baked ambient, 1 / baked sun, ambient, sun, ..., towards the new sun,
+    // towards the baked sun. Flat ground (z up) gets ambient + sun x the sun's height.
+    float c[32];
+    TerrainConstants(c, 0, 0);
+    const float up = (std::max)(0.0f, c[22]), bakedUp = (std::max)(0.0f, c[26]);
+    bool change = false;
+    for (int i = 0; i < 3; ++i)
+    {
+        const float baked = g_config.bakedTerrainAmbient[i] + g_config.bakedTerrainSun[i] * bakedUp;
+        const float now = c[8 + i] + c[12 + i] * up;
+        m_decalLight[i] = baked > 0.001f ? (std::min)(2.0f, now / baked) : 1.0f;
+        change = change || std::fabs(m_decalLight[i] - 1.0f) > 0.5f / 255;
+    }
+    return change ? m_decalLight : nullptr;
+}
+
 const float* Lighting::SkyLight()
 {
     // Measured against the light the sky is as it is under: the light cycle's own midday ambient while the cycle sets

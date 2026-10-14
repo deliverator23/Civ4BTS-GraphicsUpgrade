@@ -485,12 +485,18 @@ bool Shadows::BuildingPart(DWORD fvf)
 
 bool Shadows::NoShadowTexture()
 {
-    IDirect3DBaseTexture9* base = nullptr;
-    if (FAILED(m_dev->GetTexture(0, &base)) || !base)
-        return false;
-    const bool listed = m_noShadowTextures.Contains(base);
-    base->Release();
-    return listed;
+    // Any stage: a unit flag's cloth has the player's colours on stages 0-2 and its own *_Flag_Base.dds on stage 3.
+    for (DWORD stage = 0; stage < 8; ++stage)
+    {
+        IDirect3DBaseTexture9* base = nullptr;
+        if (FAILED(m_dev->GetTexture(stage, &base)) || !base)
+            continue;
+        const bool listed = m_noShadowTextures.Contains(base);
+        base->Release();
+        if (listed)
+            return true;
+    }
+    return false;
 }
 
 bool Shadows::TreeGround(const ShaderInfo& vs, const float* world, float& ground)
@@ -781,10 +787,14 @@ bool Shadows::ShadeWater(const std::function<HRESULT()>& draw)
 
 bool Shadows::DrawDecal(const std::function<HRESULT()>& draw, HRESULT& hr)
 {
-    // Fixed-function ground decals (roads, river foam): blended, no depth writes, no skinning, drawn before the
-    // frame's first unit (BtS draws its ground decals right after the terrain). Units' own parts are never darkened
+    // Fixed-function ground decals (roads, river foam): blended, no depth writes, no skinning. Shadows only before the
+    // frame's first unit (BtS draws its ground decals right after the terrain): units' own parts are never darkened
     // this way, since their own coverage would shadow them.
-    if (!enabled || !m_havePrev || m_haveAnchor || !m_lit)
+    const bool shade = enabled && m_havePrev && !m_haveAnchor && m_lit;
+    DWORD lighting = TRUE;
+    m_dev->GetRenderState(D3DRS_LIGHTING, &lighting);
+    const bool light = decalLight && !lighting;  // lit ones (paved roads) already get the light through its lights
+    if (!shade && !light)
         return false;
     IDirect3DPixelShader9* ps = nullptr;
     m_dev->GetPixelShader(&ps);
@@ -793,8 +803,9 @@ bool Shadows::DrawDecal(const std::function<HRESULT()>& draw, HRESULT& hr)
         ps->Release();
         return false;
     }
-    DWORD vblend = 0, zwrite = 0, ablend = 0, src = 0, dst = 0, fvf = 0;
+    DWORD vblend = 0, ztest = 0, zwrite = 0, ablend = 0, src = 0, dst = 0, fvf = 0;
     m_dev->GetRenderState(D3DRS_VERTEXBLEND, &vblend);
+    m_dev->GetRenderState(D3DRS_ZENABLE, &ztest);
     m_dev->GetRenderState(D3DRS_ZWRITEENABLE, &zwrite);
     m_dev->GetRenderState(D3DRS_ALPHABLENDENABLE, &ablend);
     m_dev->GetRenderState(D3DRS_SRCBLEND, &src);
@@ -803,12 +814,16 @@ bool Shadows::DrawDecal(const std::function<HRESULT()>& draw, HRESULT& hr)
     // Alpha-blended (roads) or additive (river foam: ONE/ONE); either way the sunlit colour scales with the light.
     bool blendOk = (src == D3DBLEND_SRCALPHA || src == D3DBLEND_ONE) &&
                    (dst == D3DBLEND_INVSRCALPHA || dst == D3DBLEND_ONE);
-    if (vblend != D3DVBF_DISABLE || zwrite || !ablend || !blendOk || (fvf & D3DFVF_POSITION_MASK) != D3DFVF_XYZ ||
-        !TargetIsBackBuffer())
+    // Depth-tested, as everything lying on the terrain is. BtS's plot symbols (the yield icons in the city screen and
+    // with yields shown: Symbols.fx) are otherwise drawn just like roads, fog of war included, but over everything
+    // with the depth test off: interface, not ground.
+    if (vblend != D3DVBF_DISABLE || !ztest || zwrite || !ablend || !blendOk ||
+        (fvf & D3DFVF_POSITION_MASK) != D3DFVF_XYZ || !TargetIsBackBuffer())
         return false;
 
-    // The first unused texture stage multiplies by the shadow texture's light factor (its colour channels). Its
-    // coordinates are generated from the camera-space position: texture matrix = VIEW^-1 x (world -> shadow uv).
+    // From the first unused texture stage on: the shadow (multiplying by the shadow texture's light factor, its
+    // colour channels; coordinates generated from the camera-space position, texture matrix = VIEW^-1 x (world ->
+    // shadow uv)), the change of light, the hill shadows.
     if (!m_maxStages)
     {
         D3DCAPS9 caps = {};
@@ -819,22 +834,25 @@ bool Shadows::DrawDecal(const std::function<HRESULT()>& draw, HRESULT& hr)
     for (DWORD op = 0; stage < m_maxStages; ++stage)
         if (SUCCEEDED(m_dev->GetTextureStageState(stage, D3DTSS_COLOROP, &op)) && op == D3DTOP_DISABLE)
             break;
-    D3DMATRIX view;
-    float invView[16];
-    if (stage >= m_maxStages || FAILED(m_dev->GetTransform(D3DTS_VIEW, &view)) || !mat::Invert(&view._11, invView))
+    if (stage >= m_maxStages)
         return false;
     // Part of the world (roads on stage 1, river foam on stage 2); interface overlays stay as they are.
     if (!SamplesFogOfWar(stage))
         return false;
-    float shadowRows[16], texMat[16];
-    for (int i = 0; i < 4; ++i)
-        for (int j = 0; j < 4; ++j)
-            shadowRows[i * 4 + j] = m_prevShadowTex[j * 4 + i];  // row-vector form
-    mat::Mul(invView, shadowRows, texMat);
-    // Hill shadows too, on the next stage if there's one: same coordinates generation, matrix VIEW^-1 x (world xy ->
-    // grid uv), the mask's colour = its light factor.
-    const bool hill = hillShadows && hillGrid[0] > 0 && stage + 1 < m_maxStages;
-    float hillMat[16] = {};
+    D3DMATRIX view;
+    float invView[16], texMat[16], hillMat[16] = {};
+    const bool shadow = shade && SUCCEEDED(m_dev->GetTransform(D3DTS_VIEW, &view)) && mat::Invert(&view._11, invView);
+    if (shadow)
+    {
+        float shadowRows[16];
+        for (int i = 0; i < 4; ++i)
+            for (int j = 0; j < 4; ++j)
+                shadowRows[i * 4 + j] = m_prevShadowTex[j * 4 + i];  // row-vector form
+        mat::Mul(invView, shadowRows, texMat);
+    }
+    // Hill shadows: same coordinates generation, matrix VIEW^-1 x (world xy -> grid uv), the mask's colour = its
+    // light factor.
+    const bool hill = shadow && hillShadows && hillGrid[0] > 0;
     if (hill)
     {
         float grid[16] = {};
@@ -843,7 +861,18 @@ bool Shadows::DrawDecal(const std::function<HRESULT()>& draw, HRESULT& hr)
         grid[15] = 1;
         mat::Mul(invView, grid, hillMat);
     }
-    const DWORD used = hill ? 2 : 1;
+    // The stages to add, as many as there's room for.
+    enum Role { kShadow, kLight, kHill };
+    Role roles[3] = {};
+    DWORD used = 0;
+    if (shadow)
+        roles[used++] = kShadow;
+    if (light && stage + used < m_maxStages)
+        roles[used++] = kLight;
+    if (hill && stage + used < m_maxStages)
+        roles[used++] = kHill;
+    if (!used)
+        return false;
 
     // Save what the stages we use (and the one after, which we disable) had.
     const D3DTEXTURESTAGESTATETYPE states[9] = {D3DTSS_COLOROP,   D3DTSS_COLORARG1,     D3DTSS_COLORARG2,
@@ -854,8 +883,8 @@ bool Shadows::DrawDecal(const std::function<HRESULT()>& draw, HRESULT& hr)
         DWORD state[9], sampler[8];
         D3DMATRIX matrix;
         IDirect3DBaseTexture9* texture;
-    } saved[2] = {};
-    DWORD oldNextColor = D3DTOP_DISABLE, oldNextAlpha = D3DTOP_DISABLE;
+    } saved[3] = {};
+    DWORD oldNextColor = D3DTOP_DISABLE, oldNextAlpha = D3DTOP_DISABLE, oldFactor = 0;
     const bool next = stage + used < 8;
     for (DWORD u = 0; u < used; ++u)
     {
@@ -872,6 +901,7 @@ bool Shadows::DrawDecal(const std::function<HRESULT()>& draw, HRESULT& hr)
         m_dev->GetTextureStageState(stage + used, D3DTSS_COLOROP, &oldNextColor);
         m_dev->GetTextureStageState(stage + used, D3DTSS_ALPHAOP, &oldNextAlpha);
     }
+    m_dev->GetRenderState(D3DRS_TEXTUREFACTOR, &oldFactor);
 
     auto multiply = [&](DWORD st, IDirect3DBaseTexture9* tex, const float* matrix) {
         m_dev->SetTexture(st, tex);
@@ -886,13 +916,31 @@ bool Shadows::DrawDecal(const std::function<HRESULT()>& draw, HRESULT& hr)
         m_dev->SetTextureStageState(st, D3DTSS_TEXCOORDINDEX, D3DTSS_TCI_CAMERASPACEPOSITION);
         m_dev->SetTextureStageState(st, D3DTSS_RESULTARG, D3DTA_CURRENT);
         m_dev->SetTextureStageState(st, D3DTSS_TEXTURETRANSFORMFLAGS, D3DTTFF_COUNT2);
+        SetShadowSampler(m_dev, st);  // outside the area the texture covers: no shadow
     };
-    multiply(stage, m_lit, texMat);
-    SetShadowSampler(m_dev, stage);
-    if (hill)
+    for (DWORD u = 0; u < used; ++u)
     {
-        multiply(stage + 1, hillShadows, hillMat);
-        SetShadowSampler(m_dev, stage + 1);  // outside the area the mask covers: no hill shadow
+        const DWORD st = stage + u;
+        if (roles[u] == kShadow)
+            multiply(st, m_lit, texMat);
+        else if (roles[u] == kHill)
+            multiply(st, hillShadows, hillMat);
+        else
+        {
+            // The change of light: current x 2 x (factor / 2), so it can brighten too (up to 2).
+            auto half = [](float v) { return static_cast<DWORD>((std::min)(255.0f, v * 127.5f + 0.5f)); };
+            m_dev->SetRenderState(D3DRS_TEXTUREFACTOR,
+                                  D3DCOLOR_ARGB(255, half(decalLight[0]), half(decalLight[1]), half(decalLight[2])));
+            m_dev->SetTexture(st, nullptr);
+            m_dev->SetTextureStageState(st, D3DTSS_COLOROP, D3DTOP_MODULATE2X);
+            m_dev->SetTextureStageState(st, D3DTSS_COLORARG1, D3DTA_TFACTOR);
+            m_dev->SetTextureStageState(st, D3DTSS_COLORARG2, D3DTA_CURRENT);
+            m_dev->SetTextureStageState(st, D3DTSS_ALPHAOP, D3DTOP_SELECTARG1);
+            m_dev->SetTextureStageState(st, D3DTSS_ALPHAARG1, D3DTA_CURRENT);
+            m_dev->SetTextureStageState(st, D3DTSS_ALPHAARG2, D3DTA_CURRENT);
+            m_dev->SetTextureStageState(st, D3DTSS_RESULTARG, D3DTA_CURRENT);
+            m_dev->SetTextureStageState(st, D3DTSS_TEXTURETRANSFORMFLAGS, D3DTTFF_DISABLE);
+        }
     }
     if (next)
     {
@@ -919,6 +967,7 @@ bool Shadows::DrawDecal(const std::function<HRESULT()>& draw, HRESULT& hr)
         m_dev->SetTextureStageState(stage + used, D3DTSS_COLOROP, oldNextColor);
         m_dev->SetTextureStageState(stage + used, D3DTSS_ALPHAOP, oldNextAlpha);
     }
+    m_dev->SetRenderState(D3DRS_TEXTUREFACTOR, oldFactor);
     ++m_frameReceivers;
     return true;
 }

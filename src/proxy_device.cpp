@@ -764,6 +764,7 @@ HRESULT ProxyDevice::Dispatch(Draw draw)
     m_light.TerrainConstants(m_terrainLight, normals ? m_terrain.Spacing() : 0, m_terrain.Cells());
     m_shadows.terrainLight = m_light.enabled ? m_terrainLight : nullptr;
     m_shadows.terrainNormals = normals;
+    m_shadows.decalLight = fixedFunction ? m_light.DecalLight() : nullptr;  // roads are drawn unlit
     // (also for fixed-function draws: roads and river foam take the hill shadows through an extra texture stage)
     m_shadows.hillShadows = hills && (fixedFunction || (vs && Shadows::MaybeReceiver(*vs))) ? m_terrain.HillTexture()
                                                                                              : nullptr;

@@ -77,6 +77,10 @@ public:
     // The water's sun now (for its glint): the Water group's, turning to MoonGlint at night while the light cycle runs.
     // Null: none set (the water keeps Colonization's own).
     const float* WaterSun();
+    // Unlit fixed-function ground decals (roads, cart paths, river foam: BtS draws them at their texture's colour,
+    // whatever the light) take the terrain's change of light: the light on flat ground now over the light BtS baked
+    // into the terrain, per channel (0 to 2). Null: no change (the lighting off, or the terrain lit as baked).
+    const float* DecalLight();
     ULONG InternalRefs() const { return m_internalRefs; }
 
     // A group's sun / ambient colour: the cycle's for groups without their own *Sun / *Ambient key while it runs,
@@ -125,6 +129,7 @@ private:
     float m_brightestSun = -1;  // the brightest sun keyframe's brightness (computed once)
     float m_skyLight[3] = {1, 1, 1};
     float m_waterSun[3] = {};
+    float m_decalLight[3] = {};
     LARGE_INTEGER m_last = {}, m_frequency = {};
     double m_cycleSeconds = 0;  // time the cycle has run (it stands still while paused or with the lighting off)
     bool m_worldThisFrame = false;

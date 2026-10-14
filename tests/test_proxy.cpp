@@ -501,8 +501,10 @@ static int WaterScene(IDirect3DDevice9* dev, int frames)
 // overlay draws one ground decal over the whole screen right after the terrain, so the same two points measure it:
 //   river0 / river1  BtS's own compiled River_Shader pass P0 (floodplain) / P1 (river), loaded from riverDir (the
 //                    game's compiled effects, extracted by run_tests.py), with 1x1 textures (P0 ~86, P1 ~92 unshadowed)
-//   decal            a fixed-function alpha-blended decal, no depth writes, sampling the terrain's fog-of-war texture
-//                    on stage 1, like BtS's roads (blue 192 x 0.9 = 173 unshadowed)
+//   decal            a fixed-function alpha-blended decal, depth-tested, no depth writes, sampling the terrain's
+//                    fog-of-war texture on stage 1, like BtS's roads (blue 192 x 0.9 = 173 unshadowed)
+//   symbol           the same with the depth test off, like BtS's plot symbols (the yield icons, Symbols.fx): never
+//                    shadowed or re-lit
 //   overlay          the same without the fog of war, like an interface overlay on the ground: never shadowed
 //   water            BtS-style water (magenta) over the ground at z = 1: shadows on its surface ([shadows] WaterShadow)
 //   treeshadow       the same patch with uv in the painted-shadow part of BtS's tree atlas: dropped with shadows on
@@ -571,7 +573,7 @@ static bool OldShaders()
 }
 
 static int ShadowScene(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS& pp, int frames, const wchar_t* blobPath,
-                       const wchar_t* overlay, const wchar_t* riverDir, const wchar_t* flagPolePath)
+                       const wchar_t* overlay, const wchar_t* riverDir, const wchar_t* flagPolePath, DWORD flagStage)
 {
     const bool old = OldShaders();
     std::vector<DWORD> tvsCode = Tokens(g_terrainVS, sizeof(g_terrainVS)),
@@ -614,8 +616,8 @@ static int ShadowScene(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS& pp, int fra
         if (!blob)
             return 1;
     }
-    // With flagPolePath (BtS's Ancient_Flag_Pole.dds), the building mesh is drawn with it on stage 0, like a unit
-    // flag's pole: it shouldn't cast.
+    // With flagPolePath (BtS's Ancient_Flag_Pole.dds), the building mesh is drawn with it on stage flagStage: 0 like a
+    // unit flag's pole, 3 like its cloth (the player's colours on the stages before). Either way it shouldn't cast.
     IDirect3DTexture9* flagPole = nullptr;
     if (flagPolePath)
     {
@@ -626,8 +628,8 @@ static int ShadowScene(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS& pp, int fra
 
     // Ground overlay (see above)
     const bool river0 = wcscmp(overlay, L"river0") == 0, river1 = wcscmp(overlay, L"river1") == 0,
-               fowDecal = wcscmp(overlay, L"decal") == 0, uiDecal = wcscmp(overlay, L"overlay") == 0,
-               decal = fowDecal || uiDecal, treeShadow = wcscmp(overlay, L"treeshadow") == 0,
+               symbol = wcscmp(overlay, L"symbol") == 0, fowDecal = wcscmp(overlay, L"decal") == 0 || symbol,
+               uiDecal = wcscmp(overlay, L"overlay") == 0, decal = fowDecal || uiDecal, treeShadow = wcscmp(overlay, L"treeshadow") == 0,
                tree = wcscmp(overlay, L"tree") == 0 || treeShadow,
                building = wcscmp(overlay, L"building") == 0, ridge = wcscmp(overlay, L"ridge") == 0,
                vanish = wcscmp(overlay, L"vanish") == 0, waterOverlay = wcscmp(overlay, L"water") == 0,
@@ -957,12 +959,14 @@ static int ShadowScene(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS& pp, int fra
                 CHECK(dev->SetTextureStageState(1, D3DTSS_COLOROP, D3DTOP_DISABLE));
                 CHECK(dev->SetTextureStageState(1, D3DTSS_ALPHAOP, D3DTOP_DISABLE));
             }
+            CHECK(dev->SetRenderState(D3DRS_ZENABLE, symbol ? FALSE : TRUE));  // the depth buffer is clear: it passes
             CHECK(dev->SetRenderState(D3DRS_ZWRITEENABLE, FALSE));
             CHECK(dev->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE));
             CHECK(dev->SetRenderState(D3DRS_SRCBLEND, D3DBLEND_SRCALPHA));
             CHECK(dev->SetRenderState(D3DRS_DESTBLEND, D3DBLEND_INVSRCALPHA));
             CHECK(dev->DrawPrimitiveUP(D3DPT_TRIANGLELIST, 2, dq, 20));
             CHECK(dev->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE));
+            CHECK(dev->SetRenderState(D3DRS_ZENABLE, FALSE));
             // the first unused stage (where the proxy adds the shadow) must be as it was
             const DWORD free = fowDecal ? 2 : 1;
             DWORD op = 0, tci = 0;
@@ -1011,9 +1015,9 @@ static int ShadowScene(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS& pp, int fra
             CHECK(dev->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_DIFFUSE));
             CHECK(dev->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG1));
             CHECK(dev->SetTextureStageState(0, D3DTSS_ALPHAARG1, D3DTA_DIFFUSE));
-            CHECK(dev->SetTexture(0, flagPole));  // bound but unused by the stage (colour and alpha from diffuse)
+            CHECK(dev->SetTexture(flagStage, flagPole));  // bound but unused (colour and alpha from diffuse)
             CHECK(dev->DrawPrimitiveUP(D3DPT_TRIANGLELIST, 1, mesh, 24));
-            CHECK(dev->SetTexture(0, nullptr));
+            CHECK(dev->SetTexture(flagStage, nullptr));
             // A building's foundations: part of the mesh below its base (here WORLD at (300,300,10), the triangle
             // 50 below that). Hidden by the terrain in the game (here: colour writes off). Unclipped, it would shade
             // the ground on the sunward side, around (340,300).
@@ -1681,11 +1685,12 @@ int wmain(int argc, wchar_t** argv)
     }
     if (argc > 2 && wcscmp(argv[2], L"shadow") == 0)
     {
-        // test_proxy <dll> shadow [blob .dds or -] [overlay: none, river0, river1, decal, overlay, tree, building]
+        // test_proxy <dll> shadow [blob .dds or -] [overlay: none, river0, river1, decal, symbol, overlay, tree,
+        //            building]
         //            [folder of the game's extracted shaders] [flagpole .dds: the building drawn with it]
         const wchar_t* blobArg = argc > 3 && wcscmp(argv[3], L"-") != 0 ? argv[3] : nullptr;
         if (ShadowScene(dev, pp, 6, blobArg, argc > 4 ? argv[4] : L"none", argc > 5 ? argv[5] : nullptr,
-                        argc > 6 ? argv[6] : nullptr) != 0)
+                        argc > 6 ? argv[6] : nullptr, argc > 7 ? static_cast<DWORD>(_wtoi(argv[7])) : 0) != 0)
             return 1;
         ULONG devRefs = dev->Release();
         ULONG d3dRefs = d3d->Release();
