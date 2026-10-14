@@ -41,7 +41,7 @@ part can be turned off in the settings. Shadows fall on the terrain, rivers, roa
    ```
    d3d9.dll
    GraphicsUpgrade.ini
-   GraphicsUpgrade\      (the folder, with water_001.dds and water_env.dds)
+   GraphicsUpgrade\      (the folder, with water_normal.dds and water_env.dds)
    presets\              (optional lighting presets)
    ```
 
@@ -127,7 +127,11 @@ SunColour=255,220,170
 AmbientColour=80,100,90
 ```
 
-That folder can also hold your own water textures (`water_001.dds`, `water_env.dds`).
+**Your own water textures.** Put `water_normal.dds` (the ripples' normal map) and/or `water_env.dds` (the sky the water
+reflects, with the sun's glint in its alpha) in your mod's `Assets\Art\GraphicsUpgrade\`, loose or packed in your
+`.FPK` files. Each one is looked for on its own, so you can ship just the one you change. A `GraphicsUpgrade` folder
+in your mod's folder still works for these too, and there the normal map is also found under its old name,
+`water_001.dds`.
 
 GraphicsUpgrade finds the running mod in two ways:
 - from the game's command line (`mod= "Mods\<your mod>"`, the way BtS starts a mod)
@@ -148,8 +152,20 @@ GraphicsUpgrade looks in your mod's `Assets` first, then the game's (loose files
 recognises the textures in game by their content. If your mod replaces BtS's unit blob shadow
 (`Art\Units\01_UnitShadows\unit_shadows.dds`), your version is picked up automatically.
 
-**Your own terrain lighting.** If your mod replaces BtS's `SunLight.nif`, set the `BakedTerrain*` lines under
-`[lighting]` to the colours and direction of your light. GraphicsUpgrade needs them to re-light the terrain correctly.
+**Water on your models.** `[water] SurfaceTextures` lists textures whose models are water. They keep their own
+look and get the water's ripples, sky reflection and sun glint on top, and cast no shadow. The texture's alpha (times
+the vertex or material alpha) says where the water is. By default this is the oasis' pool. Entries work as in
+`NoShadowTextures`:
+
+```ini
+[water]
+SurfaceTextures=Art\Terrain\Features\Oasis\oasis_water.dds; Art\Effects\Flood\flood_water.dds
+```
+
+**Your own terrain lighting.** BtS bakes the terrain's light from `Art\Terrain\Lights\SunLight.nif`, and
+GraphicsUpgrade needs that light to re-light the terrain and roads correctly. If your mod has its own `SunLight.nif`
+(loose or in an `.FPK`), it is read automatically, and the log notes what was found. The `BakedTerrain*` lines under
+`[lighting]` override it.
 
 ## Using with ReShade or DXVK
 
@@ -178,7 +194,8 @@ straight through.
 GraphicsUpgrade sits between the game and Direct3D 9. It changes how BtS's own scene is drawn, frame by frame:
 
 - **Water:** the ships are redrawn into a mirrored reflection. BtS's own water is then drawn with a new water shader,
-  reverse engineered from Colonization's.
+  reverse engineered from Colonization's. Water on models, such as an oasis' pool, gets the same ripples, sky reflection
+  and sun glint drawn over it.
 - **Shadows:** units, ships, trees and buildings are redrawn from the sun's point of view into a shadow map. Hill
   shadows come from the terrain's own heights. The ground is then drawn with BtS's own shading plus both.
 - **Lighting:** BtS's light colours are swapped as each thing is drawn. The terrain's lighting is re-coloured to match,
@@ -214,6 +231,6 @@ uv run tests/run_tests.py
 GraphicsUpgrade by Deliverator.
 
 The water shader is reverse engineered from the one in Sid Meier's Civilization IV: Colonization. The water textures
-(`water_001.dds`, `water_env.dds`) are from Colonization, © Firaxis Games / 2K; `water_env.dds`'s sun glint has been
-redrawn to remove a seam. GraphicsUpgrade is an unofficial fan
-project, not affiliated with or endorsed by Firaxis Games, 2K or Take-Two Interactive.
+(`water_normal.dds`, which is Colonization's `water_001.dds`, and `water_env.dds`) are from Colonization, © Firaxis
+Games / 2K; `water_env.dds`'s sun glint has been redrawn to remove a seam. GraphicsUpgrade is an unofficial fan project,
+not affiliated with or endorsed by Firaxis Games, 2K or Take-Two Interactive.

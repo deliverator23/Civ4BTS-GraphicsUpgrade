@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <cwctype>
@@ -122,6 +123,234 @@ std::vector<std::wstring> FilesIn(const std::wstring& dir, const wchar_t* patter
     FindClose(h);
     return files;
 }
+
+// Little-endian values from a file in memory; reading past its end makes ok false (and gives zeros).
+struct Reader
+{
+    const std::vector<uint8_t>& d;
+    size_t at = 0;
+    bool ok = true;
+
+    void Bytes(void* out, size_t n)
+    {
+        if (!ok || n > d.size() - at)
+        {
+            ok = false;
+            memset(out, 0, n);
+            return;
+        }
+        memcpy(out, d.data() + at, n);
+        at += n;
+    }
+    uint8_t U8()
+    {
+        uint8_t v;
+        Bytes(&v, 1);
+        return v;
+    }
+    uint16_t U16()
+    {
+        uint16_t v;
+        Bytes(&v, 2);
+        return v;
+    }
+    uint32_t U32()
+    {
+        uint32_t v;
+        Bytes(&v, 4);
+        return v;
+    }
+    float F32()
+    {
+        float v;
+        Bytes(&v, 4);
+        return v;
+    }
+    void Skip(size_t n)
+    {
+        if (!ok || n > d.size() - at)
+            ok = false;
+        else
+            at += n;
+    }
+    std::string SizedString()  // u32 length, then the characters
+    {
+        uint32_t n = U32();
+        if (n > d.size() - at)
+        {
+            ok = false;
+            return {};
+        }
+        std::string s(reinterpret_cast<const char*>(d.data() + at), n);
+        at += n;
+        return s;
+    }
+    std::vector<uint32_t> Refs()  // u32 count, then that many block references
+    {
+        uint32_t n = U32();
+        std::vector<uint32_t> refs;
+        if (n > (d.size() - at) / 4)
+            ok = false;
+        else
+            for (uint32_t i = 0; i < n; ++i)
+                refs.push_back(U32());
+        return refs;
+    }
+};
+}
+
+bool ReadAsset(const std::wstring& name, std::vector<uint8_t>& out, std::wstring& from, bool modOnly)
+{
+    std::wstring path = name;
+    std::replace(path.begin(), path.end(), L'/', L'\\');
+    std::string packed;
+    for (wchar_t c : path)
+        packed += static_cast<char>(towlower(c));
+    std::vector<std::wstring> dirs = AssetDirs();
+    if (modOnly)
+        dirs.resize(g_config.modDir.empty() ? 0 : 1);
+    for (const std::wstring& dir : dirs)
+    {
+        if (ReadFileBytes(dir + L"\\" + path, out))
+        {
+            from = dir + L"\\" + path;
+            return true;
+        }
+        for (const std::wstring& fpk : FilesIn(dir, L"*.fpk"))
+            if (ReadFromFpk(fpk, packed, out))
+            {
+                from = fpk;
+                return true;
+            }
+    }
+    return false;
+}
+
+bool ReadNifLights(const std::vector<uint8_t>& nif, float sun[3], float ambient[3], float direction[3])
+{
+    // Header: a text line, the version, (20.0.0.3 on) the byte order, the user version, the blocks' types.
+    Reader r{nif};
+    const uint8_t* end = static_cast<const uint8_t*>(memchr(nif.data(), '\n', (std::min)(nif.size(), size_t(64))));
+    if (!end || nif.size() < 20 || memcmp(nif.data(), "Gamebryo File Format", 20) != 0)
+        return false;
+    r.at = end - nif.data() + 1;
+    const uint32_t version = r.U32();
+    if (version < 0x0A010000 || version > 0x14000005)
+        return false;
+    if (version >= 0x14000003 && r.U8() != 1)  // big-endian
+        return false;
+    if (r.U32() >= 10)  // user version: 10 and up are Bethesda's, with more header fields
+        return false;
+    const uint32_t blockCount = r.U32();
+    std::vector<std::string> types(r.U16());
+    for (std::string& type : types)
+        type = r.SizedString();
+    std::vector<uint16_t> blockTypes(blockCount);
+    for (uint16_t& t : blockTypes)
+        t = r.U16();
+    for (uint32_t groups = r.U32(); groups && r.ok; --groups)
+        r.U32();
+
+    // The blocks: only what a light rig has.
+    struct Block
+    {
+        float rotation[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};  // row-major; applied as R x v
+        int parent = -1;
+        bool directional = false, light = false;
+        float dimmer = 0, ambient[3] = {}, diffuse[3] = {};
+    };
+    std::vector<Block> blocks(blockCount);
+    for (uint32_t b = 0; b < blockCount && r.ok; ++b)
+    {
+        if (version <= 0x0A01006A)
+            r.U32();  // a zero before each block
+        if (blockTypes[b] >= types.size())
+            return false;
+        const std::string& type = types[blockTypes[b]];
+        // NiObjectNET: name, extra data, controller
+        r.SizedString();
+        r.Refs();
+        r.U32();
+        Block& block = blocks[b];
+        const bool node = type == "NiNode";
+        block.directional = type == "NiDirectionalLight";
+        block.light = block.directional || type == "NiAmbientLight";
+        if (node || block.light)
+        {
+            // NiAVObject: flags, translation, rotation, scale, properties, collision object
+            r.U16();
+            r.Skip(12);
+            for (float& m : block.rotation)
+                m = r.F32();
+            r.F32();
+            r.Refs();
+            r.U32();
+            if (node)
+            {
+                for (uint32_t child : r.Refs())
+                    if (child < blockCount)
+                        blocks[child].parent = static_cast<int>(b);
+                r.Refs();  // effects
+            }
+            else
+            {
+                // NiDynamicEffect: switch state (10.1.0.106 on), affected nodes; NiLight: dimmer, colours
+                if (version >= 0x0A01006A)
+                    r.U8();
+                r.Refs();
+                block.dimmer = r.F32();
+                for (float& c : block.ambient)
+                    c = r.F32();
+                for (float& c : block.diffuse)
+                    c = r.F32();
+                r.Skip(12);  // specular
+            }
+        }
+        else if (type == "NiZBufferProperty")
+            r.U16(), r.U32();  // flags, function
+        else if (type == "NiVertexColorProperty")
+            r.U16(), r.U32(), r.U32();  // flags, vertex mode, lighting mode
+        else
+            return false;
+    }
+    // Footer: the roots. Ending exactly there confirms the blocks were read right.
+    r.Refs();
+    if (!r.ok || r.at != nif.size())
+        return false;
+
+    int sunBlock = -1;
+    for (int c = 0; c < 3; ++c)
+        ambient[c] = 0;
+    for (uint32_t b = 0; b < blockCount; ++b)
+    {
+        if (!blocks[b].light)
+            continue;
+        for (int c = 0; c < 3; ++c)
+            ambient[c] += blocks[b].ambient[c] * blocks[b].dimmer;
+        if (blocks[b].directional && sunBlock < 0)
+            sunBlock = static_cast<int>(b);
+    }
+    if (sunBlock < 0)
+        return false;
+    for (int c = 0; c < 3; ++c)
+        sun[c] = blocks[sunBlock].diffuse[c] * blocks[sunBlock].dimmer;
+    // A directional light shines along its x axis: the first column of its rotation in the scene (each node's
+    // rotation applied after its children's).
+    float d[3] = {blocks[sunBlock].rotation[0], blocks[sunBlock].rotation[3], blocks[sunBlock].rotation[6]};
+    int depth = 0;
+    for (int p = blocks[sunBlock].parent; p >= 0 && depth < static_cast<int>(blockCount); p = blocks[p].parent, ++depth)
+    {
+        const float* m = blocks[p].rotation;
+        const float v[3] = {d[0], d[1], d[2]};
+        for (int i = 0; i < 3; ++i)
+            d[i] = m[i * 3] * v[0] + m[i * 3 + 1] * v[1] + m[i * 3 + 2] * v[2];
+    }
+    const float length = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+    if (length < 1e-6f)
+        return false;
+    for (int i = 0; i < 3; ++i)
+        direction[i] = d[i] / length;
+    return true;
 }
 
 void TextureList::Load(const std::wstring& entries, const char* setting)

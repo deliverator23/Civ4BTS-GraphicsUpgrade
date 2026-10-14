@@ -1321,6 +1321,97 @@ static int LightScene(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS& pp, bool ff)
 // view direction at every vertex. Prints "WATERCMP max=. differing=. pixels=. colours=." (the largest difference in
 // any channel, how many pixels differ at all, and how many distinct colours the original drew, to show the picture
 // isn't flat).
+// Water on models, run with [water] SurfaceTextures listing surfacePath: a fixed-function quad like an oasis' pool
+// (xyz, diffuse, one 2D texture coordinate; unlit, alpha-blended, depth writes) textured with surfacePath, at z = 0
+// under a top-down orthographic camera (500 world units = half the screen), over a black screen, three frames. Prints
+// "SURFACE pixel=. restored=." (the centre pixel; restored = no shaders bound and the draw's own render states and
+// texture back after it).
+static int SurfaceScene(IDirect3DDevice9* dev, const wchar_t* surfacePath)
+{
+    IDirect3DTexture9* tex = LoadDdsTop(dev, surfacePath);
+    if (!tex)
+        return 1;
+    IDirect3DSurface9 *bb = nullptr, *sys = nullptr;
+    CHECK(dev->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &bb));
+    D3DSURFACE_DESC bd;
+    bb->GetDesc(&bd);
+    CHECK(dev->CreateOffscreenPlainSurface(bd.Width, bd.Height, bd.Format, D3DPOOL_SYSTEMMEM, &sys, nullptr));
+    // The camera 1000 above the origin looking down; depth 0..2000 -> 0..1.
+    D3DMATRIX view = {}, proj = {}, world = {};
+    view._11 = view._22 = 1, view._33 = -1, view._43 = 1000, view._44 = 1;
+    proj._11 = proj._22 = 1.0f / 500, proj._33 = 1.0f / 2000, proj._44 = 1;
+    world._11 = world._22 = world._33 = world._44 = 1;
+    struct Vertex
+    {
+        float x, y, z;
+        DWORD colour;
+        float u, v;
+    };
+    const Vertex quad[6] = {{-400, -400, 0, 0xFFFFFFFF, 0, 1}, {-400, 400, 0, 0xFFFFFFFF, 0, 0},
+                            {400, 400, 0, 0xFFFFFFFF, 1, 0},   {-400, -400, 0, 0xFFFFFFFF, 0, 1},
+                            {400, 400, 0, 0xFFFFFFFF, 1, 0},   {400, -400, 0, 0xFFFFFFFF, 1, 1}};
+    DWORD pixel = 0;
+    int restored = 1;
+    for (int frame = 0; frame < 3; ++frame)
+    {
+        CHECK(dev->BeginScene());
+        CHECK(dev->Clear(0, nullptr, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER, 0xFF000000, 1.0f, 0));
+        CHECK(dev->SetVertexShader(nullptr));
+        CHECK(dev->SetPixelShader(nullptr));
+        CHECK(dev->SetFVF(D3DFVF_XYZ | D3DFVF_DIFFUSE | D3DFVF_TEX1));
+        CHECK(dev->SetTransform(D3DTS_WORLD, &world));
+        CHECK(dev->SetTransform(D3DTS_VIEW, &view));
+        CHECK(dev->SetTransform(D3DTS_PROJECTION, &proj));
+        CHECK(dev->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE));
+        CHECK(dev->SetRenderState(D3DRS_LIGHTING, FALSE));
+        CHECK(dev->SetRenderState(D3DRS_ZENABLE, D3DZB_TRUE));
+        CHECK(dev->SetRenderState(D3DRS_ZWRITEENABLE, TRUE));
+        CHECK(dev->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE));
+        CHECK(dev->SetRenderState(D3DRS_SRCBLEND, D3DBLEND_SRCALPHA));
+        CHECK(dev->SetRenderState(D3DRS_DESTBLEND, D3DBLEND_INVSRCALPHA));
+        CHECK(dev->SetTexture(0, tex));
+        CHECK(dev->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_MODULATE));
+        CHECK(dev->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_TEXTURE));
+        CHECK(dev->SetTextureStageState(0, D3DTSS_COLORARG2, D3DTA_DIFFUSE));
+        CHECK(dev->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_MODULATE));
+        CHECK(dev->SetTextureStageState(0, D3DTSS_ALPHAARG1, D3DTA_TEXTURE));
+        CHECK(dev->SetTextureStageState(0, D3DTSS_ALPHAARG2, D3DTA_DIFFUSE));
+        CHECK(dev->SetTextureStageState(1, D3DTSS_COLOROP, D3DTOP_DISABLE));
+        CHECK(dev->DrawPrimitiveUP(D3DPT_TRIANGLELIST, 2, quad, sizeof(Vertex)));
+        // the game's state as it set it
+        IDirect3DVertexShader9* vs = nullptr;
+        IDirect3DPixelShader9* ps = nullptr;
+        IDirect3DBaseTexture9* t0 = nullptr;
+        DWORD src = 0, dst = 0, zwrite = 0, bias = 1;
+        dev->GetVertexShader(&vs);
+        dev->GetPixelShader(&ps);
+        dev->GetTexture(0, &t0);
+        dev->GetRenderState(D3DRS_SRCBLEND, &src);
+        dev->GetRenderState(D3DRS_DESTBLEND, &dst);
+        dev->GetRenderState(D3DRS_ZWRITEENABLE, &zwrite);
+        dev->GetRenderState(D3DRS_DEPTHBIAS, &bias);
+        if (vs || ps || t0 != tex || src != D3DBLEND_SRCALPHA || dst != D3DBLEND_INVSRCALPHA || !zwrite || bias != 0)
+            restored = 0;
+        for (IUnknown* o : {static_cast<IUnknown*>(vs), static_cast<IUnknown*>(ps), static_cast<IUnknown*>(t0)})
+            if (o)
+                o->Release();
+        CHECK(dev->SetTexture(0, nullptr));
+        CHECK(dev->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE));
+        CHECK(dev->EndScene());
+        CHECK(dev->GetRenderTargetData(bb, sys));
+        D3DLOCKED_RECT lr;
+        CHECK(sys->LockRect(&lr, nullptr, D3DLOCK_READONLY));
+        pixel = reinterpret_cast<const DWORD*>(static_cast<const BYTE*>(lr.pBits) + (bd.Height / 2) * lr.Pitch)[bd.Width / 2];
+        sys->UnlockRect();
+        CHECK(dev->Present(nullptr, nullptr, nullptr, nullptr));
+    }
+    printf("SURFACE pixel=%08lx restored=%d\n", static_cast<unsigned long>(pixel), restored);
+    sys->Release();
+    bb->Release();
+    tex->Release();
+    return 0;
+}
+
 static int WaterCompareScene(IDirect3DDevice9* dev, const std::wstring& colDir)
 {
     std::vector<DWORD> vsOrig, psOrig;
@@ -1565,6 +1656,9 @@ static int WaterCompareScene(IDirect3DDevice9* dev, const std::wstring& colDir)
 
 int wmain(int argc, wchar_t** argv)
 {
+    // A trailing mod=<folder> is for the proxy, which reads the command line itself (the way BtS is started with a mod)
+    while (argc > 2 && _wcsnicmp(argv[argc - 1], L"mod=", 4) == 0)
+        --argc;
     if (argc < 2)
     {
         printf("usage: test_proxy <path to proxy d3d9.dll> [frames]\n");
@@ -1671,6 +1765,17 @@ int wmain(int argc, wchar_t** argv)
         ULONG d3dRefs = d3d->Release();
         DestroyWindow(wnd);
         printf("OK: water, final refs device %lu, d3d %lu\n", devRefs, d3dRefs);
+        return 0;
+    }
+    if (argc > 3 && wcscmp(argv[2], L"surface") == 0)
+    {
+        // test_proxy <dll> surface <.dds listed in [water] SurfaceTextures>
+        if (SurfaceScene(dev, argv[3]) != 0)
+            return 1;
+        ULONG devRefs = dev->Release();
+        ULONG d3dRefs = d3d->Release();
+        DestroyWindow(wnd);
+        printf("OK: surface, final refs device %lu, d3d %lu\n", devRefs, d3dRefs);
         return 0;
     }
     if (argc > 2 && wcscmp(argv[2], L"light") == 0)

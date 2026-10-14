@@ -51,7 +51,11 @@ public:
     // A fixed-function draw of BtS's blob shadow texture (BlobShadowTexture)? Also remembers where it is (see
     // RigidUnitPart).
     bool BlobShadow();
-    bool NoShadowTexture();  // drawn with one of the NoShadowTextures (any stage): casts no shadow
+    // Drawn with one of the NoShadowTextures or a water surface's (SurfaceTextures; any stage): casts no shadow
+    bool NoShadowTexture();
+    // Drawn with one of [water] SurfaceTextures on stage 0: water on a model (Water::DrawSurface). The list lives here
+    // because such water also casts no shadow.
+    bool WaterSurface();
     // A blended fixed-function draw of one of BtS's painted shadows (building_shadow.dds, *_shadow.dds,
     // eu_an_shadow.dds, 32dropshadow.dds...): its texture is black, the shadow's shape in the alpha, and like every
     // world decal it samples the fog of war. Hidden while buildings cast real shadows, and never a caster itself.
@@ -62,6 +66,7 @@ public:
     {
         m_blobTextures.Forget(texture);
         m_noShadowTextures.Forget(texture);
+        m_surfaceTextures.Forget(texture);
         m_paintedTextures.erase(texture);
     }
     // A fixed-function mesh at the last blob shadow: part of that unit (weapons, shields)?
@@ -143,6 +148,7 @@ private:
     uint32_t m_frameCasters = 0, m_frameReceivers = 0;
     TextureList m_blobTextures;      // BlobShadowTexture
     TextureList m_noShadowTextures;  // NoShadowTextures
+    TextureList m_surfaceTextures;   // [water] SurfaceTextures: water on models casts no shadow either
     std::unordered_map<const void*, bool> m_paintedTextures;  // texture -> black (a painted shadow)
     std::unordered_map<int64_t, float> m_treeGround;  // tree patch (origin x, y) -> its ground, local z
     bool m_loggedSetup = false;

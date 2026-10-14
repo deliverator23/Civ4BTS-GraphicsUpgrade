@@ -69,6 +69,8 @@ ProxyDevice::ProxyDevice(IDirect3DDevice9* real, ProxyD3D9* parent)
     m_shadows.enabled = m_effects && g_config.shadowsEnabled;
     m_shadows.overlay = m_effects && g_config.shadowOverlay;
     m_light.enabled = m_effects && g_config.lightingEnabled;
+    if (m_effects)
+        LoadBakedTerrainLight();  // the terrain's re-light needs it, also once the lighting is switched on in game
     if (m_light.enabled)
     {
         const float* s = g_config.lightSun[kLightUnit];
@@ -844,6 +846,16 @@ HRESULT ProxyDevice::Dispatch(Draw draw)
     HRESULT hr = draw();
     if (vs && vs->btsWater)
         m_shadows.ShadeWater([&] { return draw(); });  // BtS's own water (Colonization's off): shadows on it too
+    // Water on models (an oasis' pool): the water's ripples, sky and glint on top of BtS's own picture of it.
+    if (fixedFunction && m_water.enabled && m_refl.TargetIsBackBuffer() && m_shadows.WaterSurface() && m_water.Ready())
+    {
+        m_water.shadowTexture = m_shadows.LitTexture();
+        m_water.shadowMatrix = m_shadows.LitMatrix();
+        m_water.shadowDarkness = m_shadows.Darkness();
+        m_water.skyLight = m_light.SkyLight();
+        if (m_water.DrawSurface([&] { return draw(); }) && m_trace.Active())
+            m_trace.Event("{\"ev\":\"water_surface\"}");
+    }
     Ghost(draw);
     if (m_refl.enabled && (vs || fixedFunction) && m_refl.AfterDraw(vs, fixedFunction, [&] { draw(); }) &&
         m_trace.Active())

@@ -24,6 +24,8 @@ rem Shaders, compiled into headers the DLL embeds.
 set "FXC=fxc /nologo /O3"
 %FXC% /T vs_1_1 /E VSMain /Vn g_waterVS /Fh build\shaders\water_vs.h shaders\water.hlsl >nul || exit /b 1
 %FXC% /T ps_2_0 /E PSMain /Vn g_waterPS /Fh build\shaders\water_ps.h shaders\water.hlsl >nul || exit /b 1
+%FXC% /T vs_2_0 /E VSMain /Vn g_waterSurfaceVS /Fh build\shaders\water_surface_vs.h shaders\water_surface.hlsl >nul || exit /b 1
+%FXC% /T ps_2_0 /E PSMain /Vn g_waterSurfacePS /Fh build\shaders\water_surface_ps.h shaders\water_surface.hlsl >nul || exit /b 1
 %FXC% /T vs_2_0 /E VSMain /Vn g_waterShadowVS /Fh build\shaders\water_shadow_vs.h shaders\water_shadow.hlsl >nul || exit /b 1
 %FXC% /T ps_2_0 /E PSMain /Vn g_waterShadowPS /Fh build\shaders\water_shadow_ps.h shaders\water_shadow.hlsl >nul || exit /b 1
 %FXC% /T vs_2_0 /E VSMain /Vn g_terrainShadowVS /Fh build\shaders\terrain_shadow_vs.h shaders\terrain_shadow.hlsl >nul || exit /b 1

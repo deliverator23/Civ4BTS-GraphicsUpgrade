@@ -11,7 +11,7 @@
 #include <string>
 #include <vector>
 
-#define GRAPHICSUPGRADE_VERSION "1.0.2"
+#define GRAPHICSUPGRADE_VERSION "1.0.3"
 
 // What BtS lights with which light (Lighting).
 enum LightGroup
@@ -62,6 +62,9 @@ struct Config
     // overrides the game folder's setting by setting, and its water textures come first. Empty: no mod, or none.
     std::wstring modDir;  // the mod's folder (Mods\<name>), empty with no mod
     std::wstring modGraphicsDir;
+    // Water on models (an oasis' pool): fixed-function draws with one of these textures (TextureList entries) get the
+    // water's ripples, sky reflection and sun glint on top, and cast no shadow.
+    std::wstring waterSurfaceTextures;
     std::wstring colonizationDir = L"C:\\Program Files (x86)\\Steam\\steamapps\\common\\Civilization IV Colonization";
     float waterConstants[4] = {0.22995f, 0.238738f, 0.0954951f, 0.7f};  // Colonization's f4WaterConstants
     float waterTexScale = 0.0020822511f;                              // CIV4WaterPlaneInfos.xml TextureScaling
@@ -133,16 +136,20 @@ struct Config
     bool matchShadowDirection = true;  // light units and ships from the shadows' sun direction
     bool haveLightDirection = false;   // LightDirection set: light units and ships from it instead
     float lightDirection[3] = {0, 0, -1};  // direction the light travels, like SunDirection
-    // What BtS baked the terrain lightmap with (its SunLight.nif); the lightmap stores it at half strength.
+    // What the game baked the terrain lightmap with (its SunLight.nif); the lightmap stores it at half strength. These
+    // are BtS's own; LoadBakedTerrainLight replaces the ones the INI doesn't set (*Set) with the running game's.
     float bakedTerrainSun[3] = {246 / 255.0f, 239 / 255.0f, 222 / 255.0f};
     float bakedTerrainAmbient[3] = {89 / 255.0f, 103 / 255.0f, 133 / 255.0f};
     float bakedTerrainDirection[3] = {-0.567005f, 0.433955f, -0.700134f};  // ...and its direction (light travel)
+    bool bakedTerrainSunSet = false, bakedTerrainAmbientSet = false, bakedTerrainDirectionSet = false;
 };
 
 extern Config g_config;
 extern HMODULE g_self;
 
 void LoadConfig();
+// The Baked* light the INI leaves out, from the SunLight.nif the game uses (the running mod's first); logs it. Once.
+void LoadBakedTerrainLight();
 // Folder the proxy DLL was loaded from (the game folder), without a trailing backslash.
 std::wstring ProxyDir();
 // True if the effects should run in this game (Config::games); otherwise the proxy only passes calls through and logs.

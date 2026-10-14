@@ -1,5 +1,6 @@
 // Config loading, logging and small helpers.
 #include "common.h"
+#include "assets.h"
 
 #include <share.h>
 
@@ -339,6 +340,8 @@ void LoadConfig()
     std::wstring colDir = IniString(ini, L"water", L"ColonizationDir", L"");
     if (!colDir.empty())
         g_config.colonizationDir = colDir;
+    g_config.waterSurfaceTextures =
+        IniString(ini, L"water", L"SurfaceTextures", L"Art\\Terrain\\Features\\Oasis\\oasis_water.dds");
     g_config.underwaterDepth = static_cast<float>(_wtof(IniString(ini, L"water", L"UnderwaterDepth", L"25").c_str()));
     g_config.underwaterVisibility =
         static_cast<float>(_wtof(IniString(ini, L"water", L"UnderwaterVisibility", L"0.7").c_str()));
@@ -409,7 +412,7 @@ void LoadConfig()
         if (!g_config.lightAmbientSet[g] && haveAmbient)
             memcpy(g_config.lightAmbient[g], ambientAll, sizeof(ambientAll)), g_config.lightAmbientSet[g] = true;
     }
-    rgb(L"BakedTerrainSun", g_config.bakedTerrainSun);
+    g_config.bakedTerrainSunSet = rgb(L"BakedTerrainSun", g_config.bakedTerrainSun);
     // Light colour cycle: LightCycleSteps (sun) and LightCycleAmbientSteps = step,R,G,B;step,R,G,B;... (steps from 0
     // to LightChangeStepCount, colours 0..255), blended in a loop over LightChangeCycleTime seconds.
     g_config.lightCycleOn = IniInt(ini, L"lighting", L"LightCycleOn", 1) != 0;
@@ -485,10 +488,52 @@ void LoadConfig()
         g_config.lightCycleOn = false;
     }
     std::wstring bakedDir = IniString(ini, L"lighting", L"BakedTerrainDirection", L"");
-    if (!bakedDir.empty())
-        swscanf_s(bakedDir.c_str(), L"%f,%f,%f", &g_config.bakedTerrainDirection[0], &g_config.bakedTerrainDirection[1],
-                  &g_config.bakedTerrainDirection[2]);
-    rgb(L"BakedTerrainAmbient", g_config.bakedTerrainAmbient);
+    g_config.bakedTerrainDirectionSet =
+        !bakedDir.empty() && swscanf_s(bakedDir.c_str(), L"%f,%f,%f", &g_config.bakedTerrainDirection[0],
+                                       &g_config.bakedTerrainDirection[1], &g_config.bakedTerrainDirection[2]) == 3;
+    g_config.bakedTerrainAmbientSet = rgb(L"BakedTerrainAmbient", g_config.bakedTerrainAmbient);
+}
+
+void LoadBakedTerrainLight()
+{
+    static bool loaded = false;
+    if (loaded)
+        return;
+    loaded = true;
+    if (g_config.bakedTerrainSunSet && g_config.bakedTerrainAmbientSet && g_config.bakedTerrainDirectionSet)
+    {
+        Log::Write("lighting: baked terrain light from the settings (BakedTerrainSun, BakedTerrainAmbient, "
+                   "BakedTerrainDirection)");
+        return;
+    }
+    const wchar_t* const kSunLight = L"Art\\Terrain\\Lights\\SunLight.nif";
+    std::vector<uint8_t> nif;
+    std::wstring from;
+    float sun[3], ambient[3], direction[3];
+    if (!ReadAsset(kSunLight, nif, from))
+        Log::Write("lighting: %ls not found; baked terrain light as BtS's", kSunLight);
+    else if (!ReadNifLights(nif, sun, ambient, direction))
+        Log::Write("lighting: %ls (%ls) isn't a light rig GraphicsUpgrade can read; baked terrain light as BtS's",
+                   kSunLight, from.c_str());
+    else
+    {
+        if (!g_config.bakedTerrainSunSet)
+            memcpy(g_config.bakedTerrainSun, sun, sizeof(sun));
+        if (!g_config.bakedTerrainAmbientSet)
+            memcpy(g_config.bakedTerrainAmbient, ambient, sizeof(ambient));
+        if (!g_config.bakedTerrainDirectionSet)
+            memcpy(g_config.bakedTerrainDirection, direction, sizeof(direction));
+        Log::Write("lighting: %ls (%ls): sun %.0f,%.0f,%.0f, ambient %.0f,%.0f,%.0f, direction %.3f,%.3f,%.3f", kSunLight,
+                   from.c_str(), sun[0] * 255, sun[1] * 255, sun[2] * 255, ambient[0] * 255, ambient[1] * 255,
+                   ambient[2] * 255, direction[0], direction[1], direction[2]);
+    }
+    const float* s = g_config.bakedTerrainSun;
+    const float* a = g_config.bakedTerrainAmbient;
+    const float* d = g_config.bakedTerrainDirection;
+    Log::Write("lighting: baked terrain light: sun %.0f,%.0f,%.0f%s, ambient %.0f,%.0f,%.0f%s, direction %.3f,%.3f,%.3f%s",
+               s[0] * 255, s[1] * 255, s[2] * 255, g_config.bakedTerrainSunSet ? " (settings)" : "", a[0] * 255,
+               a[1] * 255, a[2] * 255, g_config.bakedTerrainAmbientSet ? " (settings)" : "", d[0], d[1], d[2],
+               g_config.bakedTerrainDirectionSet ? " (settings)" : "");
 }
 
 std::wstring ProxyDir()

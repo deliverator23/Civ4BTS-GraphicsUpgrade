@@ -75,6 +75,7 @@ Shadows::Shadows(IDirect3DDevice9* device) : m_dev(device)
 {
     m_blobTextures.Load(g_config.blobShadowTexture, "[shadows] BlobShadowTexture");
     m_noShadowTextures.Load(g_config.noShadowTextures, "[shadows] NoShadowTextures");
+    m_surfaceTextures.Load(g_config.waterSurfaceTextures, "[water] SurfaceTextures");
 }
 
 bool Shadows::EnsureShaders()
@@ -170,6 +171,7 @@ void Shadows::ReleaseAll()
     m_internalRefs = 0;
     m_blobTextures.Clear();
     m_noShadowTextures.Clear();
+    m_surfaceTextures.Clear();
     m_paintedTextures.clear();
 }
 
@@ -491,12 +493,22 @@ bool Shadows::NoShadowTexture()
         IDirect3DBaseTexture9* base = nullptr;
         if (FAILED(m_dev->GetTexture(stage, &base)) || !base)
             continue;
-        const bool listed = m_noShadowTextures.Contains(base);
+        const bool listed = m_noShadowTextures.Contains(base) || m_surfaceTextures.Contains(base);
         base->Release();
         if (listed)
             return true;
     }
     return false;
+}
+
+bool Shadows::WaterSurface()
+{
+    IDirect3DBaseTexture9* base = nullptr;
+    if (FAILED(m_dev->GetTexture(0, &base)) || !base)
+        return false;
+    const bool listed = m_surfaceTextures.Contains(base);
+    base->Release();
+    return listed;
 }
 
 bool Shadows::TreeGround(const ShaderInfo& vs, const float* world, float& ground)

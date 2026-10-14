@@ -60,6 +60,65 @@ def read_fpk(fpk, wanted):
     return None
 
 
+def fpk_bytes(files):
+    """An FPK archive (the layout read_fpk reads) holding files: {name under Assets: bytes}."""
+    def stored(name):
+        b = bytes((c + 1) & 0xFF for c in name.lower().encode('latin-1'))
+        return struct.pack('<I', len(b)) + b + b'\0' * ((4 - len(b) % 4) % 4)
+
+    offset = 13 + sum(len(stored(name)) + 16 for name in files)
+    entries, data = b'', b''
+    for name, content in files.items():
+        entries += stored(name) + struct.pack('<QII', 0, len(content), offset + len(data))
+        data += content
+    return struct.pack('<I', 4) + b'FPK_' + b'\0' + struct.pack('<I', len(files)) + entries + data
+
+
+def surface_dds(alpha):
+    """An 8x8 DXT3 .dds of one colour (green) and one alpha (0..15): a texture for water on models."""
+    head = struct.pack('<4sIIIIIII44x', b'DDS ', 124, 0x1007, 8, 8, 0, 0, 1)
+    head += struct.pack('<II4s20x', 32, 0x4, b'DXT3') + struct.pack('<I16x', 0x1000)
+    block = bytes([alpha * 17] * 8) + struct.pack('<HHI', 0x07E0, 0x07E0, 0)  # 4-bit alphas, then colour (565)
+    return head + block * 4
+
+
+def light_rig_nif(sun, ambient, direction, dimmer=0.999):
+    """A SunLight.nif like Warlords' (NIF 20.0.0.4): a root node with z-buffer and vertex colour properties, a node
+    turning a directional light (sun: diffuse 0..1, times dimmer) to shine along direction, and an ambient light."""
+    def sized(text):
+        return struct.pack('<I', len(text)) + text.encode('latin-1')
+
+    def refs(*items):
+        return struct.pack('<I', len(items)) + b''.join(struct.pack('<i', r) for r in items)
+
+    def av(name, rotation, props=()):
+        return sized(name) + refs() + struct.pack('<i', -1) + struct.pack('<H', 16) + struct.pack('<3f', 0, 0, 0) + \
+            struct.pack('<9f', *rotation) + struct.pack('<f', 1) + refs(*props) + struct.pack('<i', -1)
+
+    def light(amb, dif):
+        return av('', (1, 0, 0, 0, 1, 0, 0, 0, 1)) + b'\1' + refs() + struct.pack('<f', dimmer) + \
+            struct.pack('<3f', *amb) + struct.pack('<3f', *dif) + struct.pack('<3f', *dif)
+
+    # The node's rotation: its first column (the light's x axis, which it shines along) is the direction.
+    x = [c / sum(v * v for v in direction) ** 0.5 for c in direction]
+    up = (0, 0, 1) if abs(x[2]) < 0.9 else (1, 0, 0)
+    y = [up[1] * x[2] - up[2] * x[1], up[2] * x[0] - up[0] * x[2], up[0] * x[1] - up[1] * x[0]]
+    y = [v / sum(w * w for w in y) ** 0.5 for v in y]
+    z = [x[1] * y[2] - x[2] * y[1], x[2] * y[0] - x[0] * y[2], x[0] * y[1] - x[1] * y[0]]
+    turn = (x[0], y[0], z[0], x[1], y[1], z[1], x[2], y[2], z[2])  # row-major, columns x, y, z
+    types = ['NiNode', 'NiZBufferProperty', 'NiVertexColorProperty', 'NiDirectionalLight', 'NiAmbientLight']
+    blocks = [(0, av('Scene Root', (1, 0, 0, 0, 1, 0, 0, 0, 1), (1, 2)) + refs(3, 5) + refs(4, 5)),
+              (1, sized('') + refs() + struct.pack('<i', -1) + struct.pack('<HI', 3, 3)),
+              (2, sized('') + refs() + struct.pack('<i', -1) + struct.pack('<HII', 0, 0, 1)),
+              (0, av('SunLightDir', turn) + refs(4) + refs()),
+              (3, light((0, 0, 0), sun)),
+              (4, light(ambient, (0, 0, 0)))]
+    head = b'Gamebryo File Format, Version 20.0.0.4\n' + struct.pack('<IBII', 0x14000004, 1, 0, len(blocks))
+    head += struct.pack('<H', len(types)) + b''.join(sized(t) for t in types)
+    head += b''.join(struct.pack('<H', t) for t, _ in blocks) + struct.pack('<I', 0)
+    return head + b''.join(b for _, b in blocks) + refs(0)
+
+
 def bts_shaders(reader, shader_dir, out_dir):
     """BtS's tree and river shaders from a Shaders folder, saved by role (tree_vs.bin, river0_ps.bin...) for the
     harness."""
@@ -288,10 +347,11 @@ def main():
     shadow = {}
 
     def shadow_run(label, enabled, overlay='none', extra='', buildings=1, shadows_extra='', flagpole=False,
-                   old=False, game_dir=None, flag_stage=0):
+                   old=False, game_dir=None, flag_stage=0, mod_files=None, flag_dds=None):
         """Harness 'shadow' scene with shadows on or off; returns its SHADOW values and session log. old: the
         terrain and unit shaders named as in older BtS builds; game_dir: BtS's tree and river shaders from there;
-        flag_stage: the texture stage the flag texture is on."""
+        flag_stage: the texture stage the flag texture is on (flag_dds: another texture there); mod_files: {path in a
+        mod folder: bytes}, run with mod= that folder."""
         sdir = os.path.join(TEST, f'shadow_{overlay}_{label}')
         # extra: more INI text (e.g. a [lighting] section)
         sout_dir = os.path.join(sdir, 'out')
@@ -304,10 +364,18 @@ def main():
                     f'[shadows]\nEnabled={enabled}\nSunDirection=-1,0,-1\nDarkness=0.5\nOverlay=1\nBuildingShadows={buildings}\n'
                     f'HillShadowLength=1\n{textures_ini}{shadows_extra}'
                     f'{extra}')
+        mod_arg = []
+        if mod_files is not None:
+            mod = os.path.join(sdir, 'Mods', 'TestMod')
+            for rel, content in mod_files.items():
+                os.makedirs(os.path.dirname(os.path.join(mod, rel)), exist_ok=True)
+                with open(os.path.join(mod, rel), 'wb') as f:
+                    f.write(content)
+            mod_arg = ['mod=' + mod]
         env = dict(os.environ, GU_TEST_OLD_SHADERS='1' if old else '0')
         sres = run([os.path.join(TEST, 'test_proxy.exe'), os.path.join(sdir, 'd3d9.dll'), 'shadow',
                     blob_dds if blob_dds and overlay == 'none' else '-', overlay, game_dir or river_dir] +
-                   ([flagpole_dds, str(flag_stage)] if flagpole else []), env=env)
+                   ([flag_dds or flagpole_dds, str(flag_stage)] if flagpole else []) + mod_arg, env=env)
         m = re.search(r'^SHADOW (.*)$', sres, re.M)
         values = {k: int(v) for k, v in (kv.split('=') for kv in m.group(1).split())} if m else {}
         values['released'] = 'final refs device 0, d3d 0' in sres
@@ -405,6 +473,49 @@ def main():
         elif enabled:
             check(v.get('shadowed', 999) <= v.get('lit', 0) * 0.6,
                   f"{name}: still darkened in the shadow ({v.get('shadowed')})")
+
+    # The baked terrain light comes from the SunLight.nif the game uses (the running mod's first) for the BakedTerrain*
+    # settings left out. Here a mod's light like Realism Invictus's (sun 255,235,188) from a direction 0.8 up: the
+    # night road above is then (50 + 90 x 0.707) / (133 + 0.999 x 188 x 0.8) of 173.
+    print('baked terrain light:')
+    sunlight = 'Assets/Art/Terrain/Lights/SunLight.nif'
+    rig = light_rig_nif((1.0, 235 / 255, 100 / 255), (89 / 255, 103 / 255, 133 / 255), (-0.6, 0, -0.8))
+    rig_log = 'sun 255,235,100, ambient 89,103,133, direction -0.600,0.000,-0.800'
+    rig_expect = 173 * (50 + 90 * 0.70711) / (133 + 0.999 * 100 * 0.8)
+    _, rlog = shadow_run('night', 0, 'decal', night)
+    check("SunLight.nif not found; baked terrain light as BtS's" in rlog and
+          'baked terrain light: sun 246,239,222, ambient 89,103,133, direction -0.567,0.434,-0.700' in rlog,
+          "no SunLight.nif anywhere: BtS's baked light, logged")
+    for label, files, where in (
+            ('rigloose', {sunlight: rig}, 'SunLight.nif)'),
+            ('rigfpk', {'Assets/Mod0.FPK': fpk_bytes({'art\\other.dds': b'x', 'art\\terrain\\lights\\sunlight.nif': rig})},
+             'Mod0.FPK)')):
+        v, rlog = shadow_run(label, 0, 'decal', night, mod_files=files)
+        check(f'{where}: {rig_log}' in rlog and abs(v.get('lit', 0) - rig_expect) <= 4,
+              f"a mod's own SunLight.nif ({'in an FPK' if label == 'rigfpk' else 'loose'}) sets the baked light "
+              f"({rig_log}); unlit road at night re-lit from it ({v.get('lit')}, expected {rig_expect:.0f})")
+    v, rlog = shadow_run('rigset', 0, 'decal', night + 'BakedTerrainSun=255,255,30\n', mod_files={sunlight: rig})
+    expect = 173 * (50 + 90 * 0.70711) / (133 + 30 * 0.8)
+    check('baked terrain light: sun 255,255,30 (settings), ambient 89,103,133, direction -0.600,0.000,-0.800' in rlog and
+          abs(v.get('lit', 0) - expect) <= 4,
+          f"BakedTerrainSun in the settings wins over the mod's SunLight.nif, the rest comes from it ({v.get('lit')}, "
+          f"expected {expect:.0f})")
+    v, rlog = shadow_run('rigbad', 0, 'decal', night, mod_files={sunlight: rig[:-3]})
+    check("isn't a light rig GraphicsUpgrade can read; baked terrain light as BtS's" in rlog and
+          abs(v.get('lit', 0) - 173 * scale) <= 4, f"a truncated SunLight.nif: BtS's baked light ({v.get('lit')})")
+    # The games' own: Warlords' (NIF 20.0.0.4, the one BtS uses) and Civilization IV's (NIF 10.1, in Art0.FPK).
+    warlords = os.path.join(BTS, 'Warlords', 'Assets', 'Art', 'Terrain', 'Lights', 'SunLight.nif')
+    art0 = os.path.join(BTS, 'Assets', 'Art0.FPK')
+    for label, data, expect_log in (
+            ('rigwarlords', open(warlords, 'rb').read() if os.path.exists(warlords) else None,
+             'sun 246,239,222, ambient 89,103,133, direction -0.567,0.434,-0.700'),
+            ('rigciv4', read_fpk(art0, 'art\\terrain\\lights\\sunlight.nif') if os.path.exists(art0) else None,
+             'sun 255,255,255, ambient 63,60,77, direction -0.643,0.246,-0.725')):
+        if not data:
+            print(f"  skip  {label}: the game's SunLight.nif not found under {BTS}")
+            continue
+        _, rlog = shadow_run(label, 0, 'decal', night, mod_files={sunlight: data})
+        check(expect_log in rlog, f"the game's own SunLight.nif read ({label[3:]}): {expect_log}")
 
     print('lighting:')
 
@@ -683,6 +794,17 @@ def main():
               f"lit {b_cloth.get('lit')})")
     check(abs(b_off.get('bld', 0) - b_off.get('lit', 0)) <= 2,
           f'BuildingShadows=0: no building shadow ({b_off.get("bld")})')
+    # Water on models (an oasis' pool) is drawn like a building, but casts no shadow.
+    pool_dds = os.path.join(TEST, 'pool.dds')
+    with open(pool_dds, 'wb') as f:
+        f.write(surface_dds(15))
+    b_pool, _ = shadow_run('pool', 1, 'building', f'[water]\nSurfaceTextures={pool_dds}\n', buildings=1,
+                           flagpole=True, flag_dds=pool_dds)
+    b_notpool, _ = shadow_run('notpool', 1, 'building', '[water]\nSurfaceTextures=\n', buildings=1, flagpole=True,
+                              flag_dds=pool_dds)
+    check(abs(b_pool.get('bld', 0) - b_pool.get('lit', 0)) <= 2 and b_notpool.get('bld', 999) < b_notpool.get('lit', 0) * 0.5,
+          f"a mesh drawn with one of [water] SurfaceTextures casts no shadow ({b_pool.get('bld')} = lit "
+          f"{b_pool.get('lit')}); not listed, the same mesh does ({b_notpool.get('bld')})")
     # Shadows follow the light cycle's sun: halfway between white (step 6) and black (step 18) is half as bright as
     # the brightest keyframe, so shadows are half as dark (unit Darkness 0.5 -> 0.25, BuildingDarkness 0.68 -> 0.34).
     fade = ('[lighting]\nEnabled=1\nLightCycleOn=1\nLightChangeCycleTime=100000\nLightChangeStepCount=24\nLightCycleStartStep=0\n'
@@ -743,10 +865,10 @@ def main():
     water_assets = os.path.join(ROOT, 'textures')
     col_dir = 'C:\\nowhere'
 
-    def install_water(folder):
+    def install_water(folder, normal_name='water_normal.dds'):
         os.makedirs(os.path.join(folder, 'GraphicsUpgrade'), exist_ok=True)
-        for fn in ('water_001.dds', 'water_env.dds'):
-            shutil.copyfile(os.path.join(water_assets, fn), os.path.join(folder, 'GraphicsUpgrade', fn))
+        for fn, to in (('water_normal.dds', normal_name), ('water_env.dds', 'water_env.dds')):
+            shutil.copyfile(os.path.join(water_assets, fn), os.path.join(folder, 'GraphicsUpgrade', to))
 
     if not os.path.exists(os.path.join(water_assets, 'water_env.dds')):
         print(f'  skip  water textures not in {water_assets}')
@@ -876,7 +998,7 @@ def main():
 
         # Bundled files only (as in the release package: a GraphicsUpgrade folder next to the DLL), with ColonizationDir
         # pointing nowhere: the water must still be Colonization's. Then neither: BtS water left alone.
-        for label, bundle in (('bundled', True), ('none', False)):
+        for label, bundle in (('bundled', True), ('oldname', True), ('none', False)):
             bdir = os.path.join(TEST, 'water_' + label)
             bout = os.path.join(bdir, 'out')
             if os.path.isdir(bdir):
@@ -884,20 +1006,74 @@ def main():
             os.makedirs(os.path.join(bdir, 'GraphicsUpgrade'))
             shutil.copyfile(DLL, os.path.join(bdir, 'd3d9.dll'))
             if bundle:
-                install_water(bdir)
+                install_water(bdir, 'water_001.dds' if label == 'oldname' else 'water_normal.dds')
             with TestIni(os.path.join(bdir, 'GraphicsUpgrade.ini')) as f:
                 f.write(f'[general]\nOutputDir={bout}\nGames=*\n[water]\nEnabled=1\nColonizationDir=C:\\nowhere\n')
             bres = run([os.path.join(TEST, 'test_proxy.exe'), os.path.join(bdir, 'd3d9.dll'), 'water'])
             blog = open(os.path.join(bout, 'test_proxy', 'session.log'), encoding='latin-1').read()
             mb = re.search(r'WATER pixel=([0-9a-f]{8})', bres)
             magenta = bool(mb) and (int(mb.group(1), 16) & 0xFFFFFF) == 0xFF00FF
-            if bundle:
-                check(not magenta and 'water: textures from ' + os.path.join(bdir, 'GraphicsUpgrade') in blog,
+            if label == 'oldname':
+                check(not magenta and 'water: textures from ' + os.path.join(bdir, 'GraphicsUpgrade', 'water_001.dds') in blog,
+                      'a 1.0.x GraphicsUpgrade folder (the normal map under its old name, water_001.dds) still works')
+            elif bundle:
+                check(not magenta and 'water: textures from ' + os.path.join(bdir, 'GraphicsUpgrade', 'water_normal.dds') in blog,
                       'bundled GraphicsUpgrade folder used when Colonization is absent (as in the release package)')
             else:
                 check(magenta and 'water: textures not found' in blog,
                       'no bundled files and no Colonization: BtS water left alone, logged')
             check('final refs device 0, d3d 0' in bres, f'device and Direct3D fully released ({label})')
+
+        # Water on models ([water] SurfaceTextures): a pool-like fixed-function quad (green, the texture's alpha)
+        # gets the water's sky and glint on top; not listed, with the water off, or where the texture is clear, BtS's
+        # picture stands.
+        def surface_run(label, alpha, ini, mod_files=None):
+            sdir = os.path.join(TEST, 'surface_' + label)
+            if os.path.isdir(sdir):
+                shutil.rmtree(sdir)
+            os.makedirs(sdir)
+            shutil.copyfile(DLL, os.path.join(sdir, 'd3d9.dll'))
+            install_water(sdir)
+            dds = os.path.join(sdir, 'pool.dds')
+            with open(dds, 'wb') as f:
+                f.write(surface_dds(alpha))
+            mod_arg = []
+            if mod_files is not None:
+                mod = os.path.join(sdir, 'Mods', 'TestMod')
+                for rel, content in mod_files.items():
+                    os.makedirs(os.path.dirname(os.path.join(mod, rel)), exist_ok=True)
+                    with open(os.path.join(mod, rel), 'wb') as f:
+                        f.write(content)
+                mod_arg = ['mod=' + mod]
+            with TestIni(os.path.join(sdir, 'GraphicsUpgrade.ini')) as f:
+                f.write(f'[general]\nOutputDir={os.path.join(sdir, "out")}\nGames=*\n[water]\nColonizationDir=C:\\nowhere\n'
+                        + ini.replace('{dds}', dds))
+            res = run([os.path.join(TEST, 'test_proxy.exe'), os.path.join(sdir, 'd3d9.dll'), 'surface', dds] + mod_arg)
+            m = re.search(r'SURFACE pixel=([0-9a-f]{8}) restored=(\d)', res)
+            rgb = tuple(int(m.group(1)[i:i + 2], 16) for i in (2, 4, 6)) if m else None
+            slog = open(os.path.join(sdir, 'out', 'test_proxy', 'session.log'), encoding='latin-1').read()
+            return rgb, bool(m) and m.group(2) == '1' and 'final refs device 0, d3d 0' in res, slog
+
+        listed = 'Enabled=1\nSurfaceTextures={dds}\n'
+        on, on_ok, on_log = surface_run('on', 15, listed)
+        off, off_ok, _ = surface_run('off', 15, 'Enabled=0\nSurfaceTextures={dds}\n')
+        unlisted, unlisted_ok, _ = surface_run('unlisted', 15, 'Enabled=1\nSurfaceTextures=\n')
+        clear, clear_ok, _ = surface_run('clear', 0, listed)
+        check(off == (0, 255, 0) and unlisted == (0, 255, 0) and off_ok and unlisted_ok,
+              f'water on models: with the water off ({off}) or the texture not listed ({unlisted}), BtS draws it as is')
+        check(on is not None and on_ok and on[1] < 250 and on[0] > 5 and on[2] > 5 and
+              'water: water on a model (SurfaceTextures) drawn with the surface water (fvf 0x142, vertex alpha)' in on_log,
+              f'water on models: a listed texture gets the sky reflected on top ({on}, from green); game state restored')
+        check(clear == (0, 0, 0) and clear_ok, f'water on models: nothing where the texture is clear ({clear})')
+
+        # A mod's own water textures, each on its own: water_env.dds packed in an FPK under Assets\Art\GraphicsUpgrade,
+        # water_normal.dds from the bundled folder.
+        env = open(os.path.join(water_assets, 'water_env.dds'), 'rb').read()
+        _, ok, mlog = surface_run('modart', 15, listed, mod_files={
+            'Assets/Mod0.FPK': fpk_bytes({'art\\graphicsupgrade\\water_env.dds': env})})
+        check(ok and re.search(r'water: textures from .*surface_modart\\GraphicsUpgrade\\water_normal\.dds, '
+                               r'.*surface_modart\\Mods\\TestMod\\Assets\\Mod0\.FPK', mlog) is not None,
+              "a mod's water_env.dds from its Assets\\Art\\GraphicsUpgrade (in an FPK) with the bundled water_normal.dds")
 
         # The shipped GraphicsUpgrade.ini as is (only OutputDir redirected): effects run in BtS only, so in the harness the
         # water must stay as drawn (magenta) and no debug output may appear.

@@ -8,8 +8,8 @@
 //   mtxReflection                texture projection of the mirrored view-projection (as the reflection pass)
 //   mtxRefraction                texture projection of the view-projection (a screen-space lookup)
 //   mtxWaterTexture1/2           normal-map scale and scroll from Colonization's CIV4WaterPlaneInfos.xml
-// Textures: Colonization's normal map and environment cube (GraphicsUpgrade\water_001.dds and water_env.dds, or read
-// from a Colonization install's Art0.FPK; loaded with the game's own d3dx9_33.dll), BtS's coast fade and fog of war,
+// Textures: Colonization's normal map and environment cube (GraphicsUpgrade\water_normal.dds and water_env.dds, or
+// read from a Colonization install's Art0.FPK; loaded with the game's own d3dx9_33.dll), BtS's coast fade and fog of war,
 // the reflection, and a refraction texture copied from the back buffer just before the ships are drawn (BtS has drawn
 // the sea floor by then).
 #pragma once
@@ -50,6 +50,11 @@ public:
     // BtS's state. reflection may be null (then the water reflects only the sky).
     HRESULT Draw(const ShaderInfo& btsVs, const ShaderInfo* btsPs, IDirect3DTexture9* reflection, float waterHeight,
                  const std::function<HRESULT()>& draw);
+    // Right after BtS's fixed-function draw of water on a model (an oasis' pool: Shadows::WaterSurface), with its
+    // state still set: draw it again on top with the water's ripples, sky reflection and sun glint
+    // (water_surface.hlsl). False if the mesh isn't one it can redraw (no xyz positions or 2D texture coordinates for
+    // stage 0, or its texture coordinates generated or projected); BtS's draw then stands as it is.
+    bool DrawSurface(const std::function<HRESULT()>& draw);
 
     void ReleaseDefault();  // before Reset: the refraction render target (made again on use)
     void ReleaseAll();
@@ -65,6 +70,9 @@ private:
     IDirect3DVertexShader9* m_vs = nullptr;
     IDirect3DPixelShader9* m_ps = nullptr;
     ShaderInfo m_vsInfo, m_psInfo;
+    IDirect3DVertexShader9* m_surfaceVs = nullptr;  // water_surface.hlsl
+    IDirect3DPixelShader9* m_surfacePs = nullptr;
+    bool m_loggedSurface = false;
     IDirect3DTexture9* m_normal = nullptr;
     IDirect3DCubeTexture9* m_env = nullptr;
     IDirect3DTexture9* m_black = nullptr;  // grid (off) and refraction fallback
