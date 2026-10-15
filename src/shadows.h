@@ -47,7 +47,8 @@ public:
     float viewGround[3] = {};
 
     void NewFrame();  // after Present
-    void EndFrame();  // before Present: blur this frame's coverage into the texture the next frame's terrain uses
+    // Before Present: blur this frame's coverage into the texture the next frame's terrain uses. True if it did.
+    bool EndFrame();
     // A fixed-function draw of BtS's blob shadow texture (BlobShadowTexture)? Also remembers where it is (see
     // RigidUnitPart).
     bool BlobShadow();

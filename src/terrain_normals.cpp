@@ -146,10 +146,10 @@ bool TerrainNormals::EnsureHillResources()
     return ok;
 }
 
-void TerrainNormals::UpdateHills(const float* sunDirection, float darkness, const float* view)
+bool TerrainNormals::UpdateHills(const float* sunDirection, float darkness, const float* view)
 {
     if (m_spacing <= 0 || !EnsureHillResources())
-        return;
+        return false;
     float sun[3] = {sunDirection[0], sunDirection[1], sunDirection[2]};
     float len = std::sqrt(sun[0] * sun[0] + sun[1] * sun[1] + sun[2] * sun[2]);
     for (float& v : sun)
@@ -166,9 +166,14 @@ void TerrainNormals::UpdateHills(const float* sunDirection, float darkness, cons
     }
     else
         region[0] = region[1] = region[2] = 0.5f * m_spacing * kCells;
-    if (m_hillReady && !m_heightsDirty && darkness == m_hillDarkness && memcmp(sun, m_hillSun, sizeof(sun)) == 0 &&
+    // Nothing to see changed: the view still, and the sun within 0.1 degrees and the darkness within half a colour step
+    // of the mask's (the light cycle moves both a little every frame; a 0.1 degree turn moves even a long hill
+    // shadow's tip by well under a texel). The cycle at its default speed then makes a new mask a few times a second.
+    const float kSunStill = 0.99999848f;  // cos 0.1 degrees
+    if (m_hillReady && !m_heightsDirty && std::fabs(darkness - m_hillDarkness) < 0.5f / 255 &&
+        sun[0] * m_hillSun[0] + sun[1] * m_hillSun[1] + sun[2] * m_hillSun[2] > kSunStill &&
         memcmp(region, m_hillRegion, sizeof(region)) == 0)
-        return;  // nothing changed (the light cycle paused or off, the view still)
+        return false;
     if (m_heightsDirty)
     {
         D3DLOCKED_RECT lr;
@@ -255,6 +260,7 @@ void TerrainNormals::UpdateHills(const float* sunDirection, float darkness, cons
     }
     m_hillState->Apply();
     saved.Restore(m_dev);
+    return true;
 }
 
 bool TerrainNormals::SaveHillBmp(const std::wstring& path)

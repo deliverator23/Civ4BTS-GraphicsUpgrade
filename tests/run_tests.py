@@ -788,6 +788,26 @@ def main():
           f"({h_on.get('lit')})")
     check(no_hill is not None and abs(no_hill - 161) <= 2, f'HillShadows=0: no hill shadow ({no_hill})')
 
+    # The hill shadow mask is made again only when the sun has moved enough to see (0.1 degrees), the darkness has
+    # changed, or the view has. With the light cycle crawling (100000 s a cycle) that's hardly ever; racing (2 s a
+    # cycle), every frame. The timing line logged as the device goes says how often, and what it cost.
+    def hill_builds(log):
+        m = re.search(r'hill shadow mask made (\d+) times', log)
+        return int(m.group(1)) if m else None
+
+    cycle = ('[lighting]\nEnabled=1\nLightCycleOn=1\nLightChangeStepCount=24\nLightCycleStartStep=9\n'
+             'SunMiddayFrom=SSE\nLightChangeCycleTime={}\n')
+    _, slow_log = shadow_run('hillslow', 1, 'ridge', cycle.format(100000))
+    _, fast_log = shadow_run('hillfast', 1, 'ridge', cycle.format(2))
+    slow, fast = hill_builds(slow_log), hill_builds(fast_log)
+    check(slow is not None and fast is not None and slow <= 2 and fast >= slow + 3,
+          f'hill shadow mask made again only when the sun has moved enough to see: {slow} times with the cycle '
+          f'crawling, {fast} with it racing')
+    timing = re.search(r'timing over \d+ frames: .*', hlog)
+    check(timing is not None and 'GraphicsUpgrade CPU' in timing.group(0) and
+          ('GPU hill shadow mask' in timing.group(0) or 'no timestamp queries' in hlog),
+          f"timing logged as the device goes: {timing.group(0) if timing else None}")
+
     # Building shadows: a lit, depth-writing fixed-function mesh casts with BuildingShadows=1, not with 0.
     b_on, _ = shadow_run('on', 1, 'building', '', buildings=1)
     b_off, _ = shadow_run('on', 1, 'building', '', buildings=0)

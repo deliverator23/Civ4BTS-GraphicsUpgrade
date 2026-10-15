@@ -137,4 +137,10 @@ private:
     int m_loggedStep = -1;   // the last whole step logged
     double m_cyclePos = 0;   // where the cycle is, 0 .. step count
     std::unordered_set<const void*> m_checked;
+    void TerrainLight() const;  // m_terrainBase and the flags below, for the light now
+    // TerrainConstants' part that depends only on the light, worked out once per frame (NewFrame) and lighting state.
+    uint32_t m_frame = 0;
+    mutable uint32_t m_terrainFrame = ~0u;
+    mutable bool m_terrainEnabled = false, m_terrainSame = false, m_terrainTurned = false;
+    mutable float m_terrainBase[32] = {};
 };

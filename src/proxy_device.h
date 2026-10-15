@@ -6,6 +6,7 @@
 #include "water.h"
 #include "reflection.h"
 #include "lighting.h"
+#include "perf.h"
 #include "shadows.h"
 #include "terrain_normals.h"
 #include "trace.h"
@@ -107,6 +108,7 @@ private:
     Shadows m_shadows;
     Lighting m_light;
     TerrainNormals m_terrain;  // heights and normals read from the terrain's vertex buffers (per-pixel lighting)
+    Perf m_perf;               // timing for the log
     float m_terrainLight[32] = {};  // Lighting::TerrainConstants for the shadows' terrain draws
     bool m_lightKeyWasDown = false;
     bool m_lightCycleKeyWasDown = false;

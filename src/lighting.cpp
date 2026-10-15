@@ -89,6 +89,7 @@ void Lighting::NewFrame()
 {
     // The cycle's own clock: it moves on only while the cycle runs and the world is on screen, so pausing it,
     // turning the lighting off, menus and loading screens leave the light where it is.
+    ++m_frame;  // TerrainConstants works its light out again
     LARGE_INTEGER now;
     QueryPerformanceCounter(&now);
     if (!m_frequency.QuadPart)
@@ -388,8 +389,30 @@ void Lighting::Restore()
     m_lightCount = 0;
 }
 
-void Lighting::TerrainConstants(float* c, float normalSpacing, UINT normalCells) const
+void Lighting::TerrainConstants(float* out, float normalSpacing, UINT normalCells) const
 {
+    // The light's part: once per frame (and again if the lighting was switched on or off since).
+    if (m_terrainFrame != m_frame || m_terrainEnabled != enabled)
+    {
+        m_terrainFrame = m_frame;
+        m_terrainEnabled = enabled;
+        TerrainLight();
+    }
+    memcpy(out, m_terrainBase, sizeof(m_terrainBase));
+    // The draw's part: per-pixel lighting where the sun has turned from the baked one and a normal map is given.
+    const bool perPixel = m_terrainTurned && normalSpacing > 0 && normalCells > 0;
+    if (perPixel)
+    {
+        out[28] = 1.0f / (normalSpacing * normalCells);
+        out[29] = 0.5f / normalCells;
+        out[30] = 1.0f;
+    }
+    out[16] = enabled && (!m_terrainSame || perPixel) ? 1.0f : 0.0f;
+}
+
+void Lighting::TerrainLight() const
+{
+    float* c = m_terrainBase;
     memset(c, 0, 32 * sizeof(float));
     const float* bakedAmbient = g_config.bakedTerrainAmbient;
     const float* bakedSun = g_config.bakedTerrainSun;
@@ -412,22 +435,14 @@ void Lighting::TerrainConstants(float* c, float normalSpacing, UINT normalCells)
                                                           : g_config.bakedTerrainDirection;
     towards(newDir, c + 20);
     towards(g_config.bakedTerrainDirection, c + 24);
-    bool turned = false;
+    m_terrainTurned = false;
     for (int i = 0; i < 3; ++i)
-        turned = turned || std::fabs(c[20 + i] - c[24 + i]) > 1e-4f;
-    const bool perPixel = turned && normalSpacing > 0 && normalCells > 0;
-    if (perPixel)
-    {
-        c[28] = 1.0f / (normalSpacing * normalCells);
-        c[29] = 0.5f / normalCells;
-        c[30] = 1.0f;
-    }
+        m_terrainTurned = m_terrainTurned || std::fabs(c[20 + i] - c[24 + i]) > 1e-4f;
     // Colours equal to the baked ones and the sun where BtS baked it: exactly as baked.
-    bool same = true;
+    m_terrainSame = true;
     for (int i = 0; i < 3; ++i)
-        same = same && std::fabs(c[8 + i] - bakedAmbient[i]) < 0.5f / 255 &&
-               std::fabs(c[12 + i] - bakedSun[i]) < 0.5f / 255;
-    c[16] = enabled && (!same || perPixel) ? 1.0f : 0.0f;
+        m_terrainSame = m_terrainSame && std::fabs(c[8 + i] - bakedAmbient[i]) < 0.5f / 255 &&
+                        std::fabs(c[12 + i] - bakedSun[i]) < 0.5f / 255;
 }
 
 void Lighting::CheckLightmap(IDirect3DBaseTexture9* base)

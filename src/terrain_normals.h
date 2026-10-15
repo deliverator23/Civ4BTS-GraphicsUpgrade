@@ -6,7 +6,8 @@
 // are read once and their world heights recorded in a grid; normals come from the heights of neighbouring cells, and
 // live in a texture (world-aligned, wrapping) that a terrain shader can sample per pixel.
 //
-// The heights also give hill shadows, worked out on the GPU every frame (shaders\hill_shadow.hlsl) from a height
+// The heights also give hill shadows, worked out on the GPU when the sun, the darkness or the view has changed
+// enough to see (shaders\hill_shadow.hlsl) from a height
 // texture on the same grid, into a mask texture (a = shadow, rgb = the light factor 1 - darkness x shadow) that the
 // terrain, rivers and ground decals are darkened by. Needs Shader Model 3.
 #pragma once
@@ -30,9 +31,10 @@ public:
     // size in texels; null until something was captured.
     IDirect3DTexture9* Texture();
     // Once per frame, outside a scene: draw the hill shadow mask for this sun (travel direction) and darkness over
-    // the ground in view (centre x, y and half-width in world units), if anything changed. HillTexture: the mask, or
+    // the ground in view (centre x, y and half-width in world units), if they changed enough to see (true if it did).
+    // HillTexture: the mask, or
     // null (no terrain read yet, or no Shader Model 3); HillGrid: world xy -> its uv (scale, x offset, y offset).
-    void UpdateHills(const float* sunDirection, float darkness, const float* view);
+    bool UpdateHills(const float* sunDirection, float darkness, const float* view);
     IDirect3DTexture9* HillTexture() const { return m_hillReady ? m_hillTex : nullptr; }
     const float* HillGrid() const { return m_hillGrid; }
     float Spacing() const { return m_spacing; }

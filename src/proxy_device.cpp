@@ -60,7 +60,7 @@ std::string Rect(const RECT* r)
 }
 
 ProxyDevice::ProxyDevice(IDirect3DDevice9* real, ProxyD3D9* parent)
-    : Device9Forward(real), m_parent(parent), m_trace(m_registry), m_refl(real), m_water(real), m_shadows(real), m_light(real), m_terrain(real)
+    : Device9Forward(real), m_parent(parent), m_trace(m_registry), m_refl(real), m_water(real), m_shadows(real), m_light(real), m_terrain(real), m_perf(real)
 {
     m_effects = EffectsAllowed();
     m_refl.enabled = m_effects && g_config.reflectionEnabled;
@@ -135,17 +135,23 @@ ULONG ProxyDevice::Release()
 {
     ULONG refs = m_real->Release();
     const ULONG shotRefs = (m_compareShots[0] != nullptr) + (m_compareShots[1] != nullptr);  // a capture in progress
+    bool timed = false;  // the frames since the log's last timing line, logged
     if (refs != 0 && refs == m_refl.InternalRefs() + m_water.InternalRefs() + m_shadows.InternalRefs() + m_deferRefs +
-                                 m_light.InternalRefs() + m_terrain.InternalRefs() + shotRefs)
+                                 m_light.InternalRefs() + m_terrain.InternalRefs() + m_perf.InternalRefs() + shotRefs)
     {
         // Only our own objects still hold the device: the game has let go, so release them, which destroys the
         // device, and the wrapper with it.
+        m_perf.EndFrame();
+        m_perf.Flush();
+        Log::Write("%s", m_perf.Summary().c_str());
+        timed = true;
         DropDeferred();  // first: it reads the device's reference count, so the device must still be alive
         m_refl.ReleaseResources();
         m_water.ReleaseAll();
         m_shadows.ReleaseAll();
         m_light.ReleaseAll();  // last: these don't read the device's reference count
         m_terrain.ReleaseAll();
+        m_perf.ReleaseAll();
         for (IDirect3DSurface9*& shot : m_compareShots)
             if (shot)
                 shot->Release(), shot = nullptr;
@@ -153,6 +159,8 @@ ULONG ProxyDevice::Release()
     }
     if (refs == 0)
     {
+        if (!timed)
+            Log::Write("%s", m_perf.Summary().c_str());
         Log::Write("device released after %u frames", m_frame);
         delete this;
     }
@@ -174,6 +182,9 @@ HRESULT ProxyDevice::Reset(D3DPRESENT_PARAMETERS* pPresentationParameters)
     m_water.ReleaseDefault();
     m_shadows.ReleaseDefault();
     m_terrain.ReleaseDefault();
+    m_perf.EndFrame();
+    m_perf.Flush();
+    m_perf.ReleaseAll();  // queries: made again after the Reset
     DropDeferred();  // state blocks must go before Reset
     m_refl.ReleaseResources();  // D3DPOOL_DEFAULT objects and state blocks must be gone before Reset; made again on use
     HRESULT hr = m_real->Reset(pPresentationParameters);
@@ -185,6 +196,7 @@ HRESULT ProxyDevice::Present(CONST RECT* pSourceRect, CONST RECT* pDestRect, HWN
                              CONST RGNDATA* pDirtyRegion)
 {
     GU_FIRST_CALL("IDirect3DDevice9::Present");
+    const double presentStart = Perf::Now();
     if (m_trace.Active() && m_refl.SaveBmp(m_trace.Dir() + L"\\reflection.bmp"))
         m_trace.Event("{\"ev\":\"reflection_saved\",\"file\":\"reflection.bmp\"}");
     if (m_trace.Active() && m_water.SaveRefractionBmp(m_trace.Dir() + L"\\refraction.bmp"))
@@ -196,10 +208,18 @@ HRESULT ProxyDevice::Present(CONST RECT* pSourceRect, CONST RECT* pDestRect, HWN
         m_compareShots[m_compareStep - 1] = CopyBackBuffer(m_real);
         Log::Write("screenshot: frame %u copied (%s)", m_frame, m_compareStep == 1 ? "on" : "off");
     }
-    m_shadows.EndFrame();
+    m_perf.Begin(Perf::kShadowBlur);
+    if (!m_shadows.EndFrame())
+        m_perf.Cancel(Perf::kShadowBlur);
+    else
+        m_perf.End(Perf::kShadowBlur);
     m_refl.DrawOverlay();
     m_shadows.DrawOverlay();
+    m_perf.EndFrame();
+    const double gamePresentStart = Perf::Now();
     HRESULT hr = m_real->Present(pSourceRect, pDestRect, hDestWindowOverride, pDirtyRegion);
+    const double gamePresentEnd = Perf::Now();
+    m_perf.StartFrame();
     ++m_frame;
     if (m_frame % 1000 == 0)
         Log::Write("frame %u: %u draws, %u primitives, %u render-target switches, %u ghost redraws, %u reflection "
@@ -207,6 +227,8 @@ HRESULT ProxyDevice::Present(CONST RECT* pSourceRect, CONST RECT* pDestRect, HWN
                    "shadows skipped, %u painted shadows skipped, %u selection decals moved above the water",
                    m_frame, m_frameDraws, m_framePrims, m_frameRtSwitches, m_frameGhosts, m_refl.FrameRedraws(),
                    m_frameWaterDraws, m_shadows.FrameCasters(), m_shadows.FrameReceivers(), m_frameBlobsSkipped, m_framePaintedSkipped, m_frameDeferred);
+    if (m_frame % 1000 == 0)
+        Log::Write("%s", m_perf.Summary().c_str());
     m_frameDraws = m_frameRtSwitches = m_framePrims = m_frameGhosts = m_frameWaterDraws = m_frameBlobsSkipped = m_framePaintedSkipped = m_frameDeferred = 0;
     bool* effects[4] = {&m_refl.enabled, &m_water.enabled, &m_shadows.enabled, &m_light.enabled};
     if (m_compareStep == 1)
@@ -235,8 +257,14 @@ HRESULT ProxyDevice::Present(CONST RECT* pSourceRect, CONST RECT* pDestRect, HWN
     Camera::NewFrame();
     NewLightFrame();
     if (m_shadows.enabled && g_config.hillShadows)
-        m_terrain.UpdateHills(m_light.SunDirection(), g_config.shadowDarkness * m_light.ShadowScale(),
-                              m_shadows.viewGround);
+    {
+        m_perf.Begin(Perf::kHillMask);
+        if (m_terrain.UpdateHills(m_light.SunDirection(), g_config.shadowDarkness * m_light.ShadowScale(),
+                                  m_shadows.viewGround))
+            m_perf.End(Perf::kHillMask), m_perf.CountHillBuild();
+        else
+            m_perf.Cancel(Perf::kHillMask);
+    }
 
     m_trace.FrameDone();
 
@@ -338,6 +366,7 @@ HRESULT ProxyDevice::Present(CONST RECT* pSourceRect, CONST RECT* pDestRect, HWN
             Log::Write("trace: lighting %s%s", m_light.enabled ? "on" : "off",
                        g_config.lightCycleOn ? " (the light colour cycle isn't applied)" : "");
     }
+    m_perf.AddPresent((gamePresentStart - presentStart) + (Perf::Now() - gamePresentEnd));
     return hr;
 }
 
@@ -682,6 +711,13 @@ void ProxyDevice::Ghost(Redraw redraw)
 template <class Draw>
 HRESULT ProxyDevice::Dispatch(Draw draw)
 {
+    // Timing: all of this draw's handling (the game's own plain draw is taken off below).
+    struct DrawTimer
+    {
+        Perf& perf;
+        double start = Perf::Now();
+        ~DrawTimer() { perf.AddDraw(Perf::Now() - start); }
+    } drawTimer{m_perf};
     // Water detection must happen before the water draw itself; the ghost and reflection redraws reuse the game's
     // state right after its draw.
     const ShaderInfo* vs = nullptr;
@@ -710,7 +746,8 @@ HRESULT ProxyDevice::Dispatch(Draw draw)
     } lightScope{m_light};
     // Only the map: the interface's 3D views (the unit in the lower-left corner, its flag, the Civilopedia's models)
     // are drawn into textures of their own and keep the game's light, whatever the time of day on the map.
-    const bool mainView = m_refl.TargetIsBackBuffer();
+    const MainViewScope mainViewScope(m_real);  // every TargetIsMainView for this draw answered from it
+    const bool mainView = mainViewScope.Main();
     if (m_light.enabled && fixedFunction && mainView)
     {
         // Ships' fixed-function parts are vertex-blended; units' rigid parts sit at their blob shadow; the rest of
@@ -846,7 +883,9 @@ HRESULT ProxyDevice::Dispatch(Draw draw)
             return hr;
         }
     }
+    const double gameDrawStart = Perf::Now();
     HRESULT hr = draw();
+    m_perf.AddGameDraw(Perf::Now() - gameDrawStart);
     if (vs && vs->btsWater)
         m_shadows.ShadeWater([&] { return draw(); });  // BtS's own water (Colonization's off): shadows on it too
     // Water on models (an oasis' pool): the water's ripples, sky and glint on top of BtS's own picture of it.

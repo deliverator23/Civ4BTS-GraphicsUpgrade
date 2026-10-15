@@ -1170,18 +1170,18 @@ bool Shadows::AfterDraw(const ShaderInfo* vs, bool fixedFunction, const std::fun
     return true;
 }
 
-void Shadows::EndFrame()
+bool Shadows::EndFrame()
 {
     // No new shadows this frame (shadows off, or nothing on the ground: a full-screen menu or screen): the last ones
     // are out of date, so the next frame draws none rather than those, fixed where they were.
     m_havePrev = false;
     if (!enabled || !m_frameSetup || !EnsureShaders())
-        return;
+        return false;
     if (!m_blurState)
     {
         ULONG before = DeviceRefs(m_dev);
         if (FAILED(m_dev->CreateStateBlock(D3DSBT_ALL, &m_blurState)))
-            return;
+            return false;
         m_internalRefs += DeviceRefs(m_dev) - before;
     }
     SavedTarget saved;
@@ -1234,6 +1234,7 @@ void Shadows::EndFrame()
     }
     m_blurState->Apply();
     saved.Restore(m_dev);
+    return m_havePrev;
 }
 
 bool Shadows::SaveBmps(const std::wstring& dir)

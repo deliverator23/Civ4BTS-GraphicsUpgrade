@@ -541,7 +541,13 @@ std::wstring ProxyDir()
     return ModuleDir(g_self);
 }
 
-bool TargetIsMainView(IDirect3DDevice9* dev)
+namespace
+{
+// The draw being handled, if any (MainViewScope): its device and answer.
+IDirect3DDevice9* g_mainViewDev = nullptr;
+bool g_mainView = false;
+
+bool WorkOutMainView(IDirect3DDevice9* dev)
 {
     IDirect3DSurface9 *rt = nullptr, *bb = nullptr;
     dev->GetRenderTarget(0, &rt);
@@ -555,6 +561,25 @@ bool TargetIsMainView(IDirect3DDevice9* dev)
     if (bb)
         bb->Release();
     return main;
+}
+}
+
+bool TargetIsMainView(IDirect3DDevice9* dev)
+{
+    return dev == g_mainViewDev ? g_mainView : WorkOutMainView(dev);
+}
+
+MainViewScope::MainViewScope(IDirect3DDevice9* dev)
+    : m_prevDev(g_mainViewDev), m_prevMain(g_mainView), m_main(WorkOutMainView(dev))
+{
+    g_mainViewDev = dev;
+    g_mainView = m_main;
+}
+
+MainViewScope::~MainViewScope()
+{
+    g_mainViewDev = m_prevDev;
+    g_mainView = m_prevMain;
 }
 
 bool EffectsAllowed()

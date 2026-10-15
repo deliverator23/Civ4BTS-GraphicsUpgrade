@@ -159,6 +159,20 @@ bool EffectsAllowed();
 // (the unit in the lower-left corner, its flag, the minimap, the Civilopedia's models) go into small textures of their
 // own and don't count.
 bool TargetIsMainView(IDirect3DDevice9* dev);
+// While one of the game's draws is handled (ProxyDevice::Dispatch): TargetIsMainView worked out once, at the start,
+// and answered from that for the rest of the draw (GraphicsUpgrade's own passes put back any render target they
+// switch to before going on). Nests.
+class MainViewScope
+{
+public:
+    explicit MainViewScope(IDirect3DDevice9* dev);
+    ~MainViewScope();
+    bool Main() const { return m_main; }
+
+private:
+    IDirect3DDevice9* m_prevDev;
+    bool m_prevMain, m_main;
+};
 // A hotkey's name as the INI writes it (W, F11, PrintScreen, 0x..., none).
 std::string KeyName(UINT vk);
 
