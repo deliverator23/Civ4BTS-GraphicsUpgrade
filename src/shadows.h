@@ -107,7 +107,7 @@ public:
 private:
     bool EnsureResources();
     bool EnsureShaders();
-    bool TargetIsBackBuffer();
+    bool TargetIsBackBuffer();  // where the map is drawn (TargetIsMainView)
     void SetupFrame(const float* mainViewProj);
     bool RigidUnitPart(DWORD fvf);  // an unskinned fixed-function mesh of the unit whose blob was just drawn
     // World z of the ground under the tree patch being drawn (world: its World matrix); false if not known yet.

@@ -708,7 +708,10 @@ HRESULT ProxyDevice::Dispatch(Draw draw)
         Lighting& light;
         ~LightScope() { light.Restore(); }
     } lightScope{m_light};
-    if (m_light.enabled && fixedFunction)
+    // Only the map: the interface's 3D views (the unit in the lower-left corner, its flag, the Civilopedia's models)
+    // are drawn into textures of their own and keep the game's light, whatever the time of day on the map.
+    const bool mainView = m_refl.TargetIsBackBuffer();
+    if (m_light.enabled && fixedFunction && mainView)
     {
         // Ships' fixed-function parts are vertex-blended; units' rigid parts sit at their blob shadow; the rest of
         // the lit fixed-function meshes are buildings and improvements.
@@ -718,15 +721,15 @@ HRESULT ProxyDevice::Dispatch(Draw draw)
         int group = blend != D3DVBF_DISABLE ? kLightMech : m_shadows.UnitPart(fvf) ? kLightUnit : kLightBuilding;
         m_light.Apply(nullptr, nullptr, group);
     }
-    if (vs && vs->btsTerrain && m_refl.TargetIsBackBuffer())
+    if (vs && vs->btsTerrain && mainView)
         m_light.WorldDrawn();  // the light cycle's clock moves on
-    if (vs && (vs->btsTerrain || vs->tree) && !Camera::Get() && m_refl.TargetIsBackBuffer())
+    if (vs && (vs->btsTerrain || vs->tree) && !Camera::Get() && mainView)
     {
         float camera[16];  // the main view's camera, for units whose shaders take it with their placement
         if (m_shadows.MainViewProj(vs, false, camera))
             Camera::Set(camera);
     }
-    if ((m_light.enabled || m_light.hidePaintedTreeShadows) && vs)
+    if ((m_light.enabled || m_light.hidePaintedTreeShadows) && vs && mainView)
     {
         const ShaderInfo* ps = CurrentPixelShader();
         m_light.Apply(vs, ps, -1);

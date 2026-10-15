@@ -40,7 +40,8 @@ public:
     ULONG InternalRefs() const { return m_internalRefs; }
     float WaterHeight() const { return m_height; }
     IDirect3DTexture9* Texture() const { return m_tex; }
-    // True when render target 0 is the swap chain's back buffer (the main scene, not e.g. the HUD unit portrait).
+    // True when render target 0 is where the map is drawn (TargetIsMainView): the back buffer, or a screen-sized
+    // texture; not e.g. the HUD unit portrait.
     bool TargetIsBackBuffer();
     uint32_t FrameRedraws() const { return m_frameRedraws; }
 

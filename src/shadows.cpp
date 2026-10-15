@@ -177,15 +177,7 @@ void Shadows::ReleaseAll()
 
 bool Shadows::TargetIsBackBuffer()
 {
-    IDirect3DSurface9 *rt = nullptr, *bb = nullptr;
-    m_dev->GetRenderTarget(0, &rt);
-    m_dev->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &bb);
-    bool same = rt && rt == bb;
-    if (rt)
-        rt->Release();
-    if (bb)
-        bb->Release();
-    return same;
+    return TargetIsMainView(m_dev);
 }
 
 void Shadows::NewFrame()

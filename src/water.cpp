@@ -199,11 +199,12 @@ void Water::SnapshotRefraction()
     if (m_snapshotTaken || !Ready() || !EnsureRefraction())
         return;
     m_snapshotTaken = true;  // once per frame, even if the copy fails
-    IDirect3DSurface9* bb = nullptr;
-    if (FAILED(m_dev->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &bb)) || !bb)
+    // What the map is being drawn into: the back buffer, or the screen-sized texture behind the Civilopedia.
+    IDirect3DSurface9* target = nullptr;
+    if (FAILED(m_dev->GetRenderTarget(0, &target)) || !target)
         return;
-    HRESULT hr = m_dev->StretchRect(bb, nullptr, m_refrSurf, nullptr, D3DTEXF_LINEAR);
-    bb->Release();
+    HRESULT hr = m_dev->StretchRect(target, nullptr, m_refrSurf, nullptr, D3DTEXF_LINEAR);
+    target->Release();
     static bool logged = false;
     if (FAILED(hr) && !logged)
     {

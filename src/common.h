@@ -154,6 +154,11 @@ void LoadBakedTerrainLight();
 std::wstring ProxyDir();
 // True if the effects should run in this game (Config::games); otherwise the proxy only passes calls through and logs.
 bool EffectsAllowed();
+// True when render target 0 is where the map is drawn: the swap chain's back buffer, or a render target the size of
+// the screen (as the Civilopedia opens, BtS draws the map once into one, to show behind it). The interface's 3D views
+// (the unit in the lower-left corner, its flag, the minimap, the Civilopedia's models) go into small textures of their
+// own and don't count.
+bool TargetIsMainView(IDirect3DDevice9* dev);
 // A hotkey's name as the INI writes it (W, F11, PrintScreen, 0x..., none).
 std::string KeyName(UINT vk);
 

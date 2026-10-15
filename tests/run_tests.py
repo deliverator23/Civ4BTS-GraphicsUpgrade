@@ -519,8 +519,10 @@ def main():
 
     print('lighting:')
 
-    def light_run(label, ini, ff=False, mod_ini=None):
-        """mod_ini: a mod's GraphicsUpgrade.ini (a GraphicsUpgrade folder in Mods\\TestMod, run with mod=...)."""
+    def light_run(label, ini, ff=False, mod_ini=None, rt=False):
+        """mod_ini: a mod's GraphicsUpgrade.ini (a GraphicsUpgrade folder in Mods\\TestMod, run with mod=...); rt: drawn
+        into a render-target texture, like the interface's 3D views ('screen': one the size of the screen, like the map
+        behind the Civilopedia)."""
         ldir = os.path.join(TEST, 'light_' + label)
         if os.path.isdir(ldir):
             shutil.rmtree(ldir)
@@ -537,7 +539,7 @@ def main():
                     f.write(mod_ini)
             extra = ['mod=' + os.path.join(ldir, 'Mods', 'TestMod')]
         res = run([os.path.join(TEST, 'test_proxy.exe'), os.path.join(ldir, 'd3d9.dll'), 'light'] + (['ff'] if ff else []) +
-                  extra)
+                  ([rt if isinstance(rt, str) else 'rt'] if rt else []) + extra)
         m = re.search(r'LIGHT pixel=([0-9a-f]{8}) restored=(\d)', res)
         rgb = tuple(int(m.group(1)[i:i + 2], 16) for i in (2, 4, 6)) if m else None
         return rgb, bool(m) and m.group(2) == '1' and 'final refs device 0, d3d 0' in res
@@ -658,6 +660,22 @@ def main():
              'a building is left alone when only the Unit colours are set (unset groups keep the game\'s light)')):
         rgb, ok = light_run(label, ini, ff=True)
         check(near(rgb, expect) and ok, f'{what} -> {rgb}, expected {expect}; light and ambient restored')
+
+    # The interface's 3D views (the unit in the lower-left corner, the Civilopedia's models) are drawn into textures of
+    # their own: they keep the game's light, whatever the INI and the time of day on the map.
+    building = '[lighting]\nEnabled=1\nBuildingSun=200,100,50\nBuildingAmbient=20,40,60\nMatchShadowDirection=0\n'
+    for label, ini, ff, expect, what in (('rt_unit', lit + 'MatchShadowDirection=0\n', False, (153, 178, 204), 'a unit'),
+                                         ('rt_building', building, True, (144, 160, 176), 'a building')):
+        rgb, ok = light_run(label, ini, ff=ff, rt=True)
+        check(near(rgb, expect) and ok, f"{what} drawn into a texture (an interface 3D view) keeps the game's light "
+              f"-> {rgb}, expected {expect}")
+    # ...but a texture the size of the screen is the map: BtS draws the map into one as the Civilopedia opens, to show
+    # behind it, and it gets everything the map does.
+    for label, ini, ff, expect, what in (('screen_unit', lit + 'MatchShadowDirection=0\n', False, (220, 140, 110), 'a unit'),
+                                         ('screen_building', building, True, (236, 172, 158), 'a building')):
+        rgb, ok = light_run(label, ini, ff=ff, rt='screen')
+        check(near(rgb, expect) and ok, f"{what} drawn into a screen-sized texture (the map behind the Civilopedia) "
+              f"takes the INI light -> {rgb}, expected {expect}")
 
     # The preset files as shipped: the DLL reads the colours they give (logged at device creation).
     for preset, unit in (('lighting-bts.ini', 'unit sun 204,204,176, ambient 88,88,72'),

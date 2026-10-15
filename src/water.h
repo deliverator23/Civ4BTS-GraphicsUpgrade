@@ -38,7 +38,8 @@ public:
     // caller then leaves BtS's water alone.
     bool Ready();
     void NewFrame() { m_snapshotTaken = false; }
-    // Copy the back buffer into the refraction texture, once per frame. Call before the first ship or water draw.
+    // Copy what the map is being drawn into (the back buffer, or the screen-sized texture behind the Civilopedia) into
+    // the refraction texture, once per frame. Call before the first ship or water draw.
     void SnapshotRefraction();
     bool SnapshotTaken() const { return m_snapshotTaken; }
     // After a ship's or submarine's draw (before the water): its part below the surface into the refraction, so it

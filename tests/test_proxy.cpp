@@ -1221,8 +1221,12 @@ static int ShadowScene(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS& pp, int fra
 // With ff: the triangle is fixed function instead, like a building: lit by a directional light in slot 11 (BtS's
 // slots are 9 and up; diffuse 0.5, straight down) and D3DRS_AMBIENT (16,32,48), so BtS's colour is (144,160,176);
 // restored = light 11 and the ambient back.
-static int LightScene(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS& pp, bool ff)
+// With rt: drawn into a 64x64 render-target texture instead of the back buffer, as BtS draws the interface's 3D views
+// (the unit in the lower-left corner, the Civilopedia's models); pixel is its centre. With screen: the same into a
+// texture the size of the back buffer, as BtS draws the map behind the Civilopedia.
+static int LightScene(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS& pp, bool ff, bool rt, bool screen)
 {
+    rt = rt || screen;
     std::vector<DWORD> code = Tokens(g_litVS, sizeof(g_litVS));
     IDirect3DVertexShader9* vs = nullptr;
     CHECK(dev->CreateVertexShader(code.data(), &vs));
@@ -1233,8 +1237,19 @@ static int LightScene(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS& pp, bool ff)
     CHECK(dev->CreateVertexDeclaration(elems, &decl));
     IDirect3DSurface9 *bb = nullptr, *sys = nullptr;
     CHECK(dev->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &bb));
-    CHECK(dev->CreateOffscreenPlainSurface(pp.BackBufferWidth, pp.BackBufferHeight, pp.BackBufferFormat,
-                                          D3DPOOL_SYSTEMMEM, &sys, nullptr));
+    IDirect3DTexture9* view = nullptr;
+    IDirect3DSurface9* viewSurf = nullptr;
+    UINT width = pp.BackBufferWidth, height = pp.BackBufferHeight;
+    D3DFORMAT format = pp.BackBufferFormat;
+    if (rt)
+    {
+        width = screen ? pp.BackBufferWidth : 64;
+        height = screen ? pp.BackBufferHeight : 64;
+        format = D3DFMT_A8R8G8B8;
+        CHECK(dev->CreateTexture(width, height, 1, D3DUSAGE_RENDERTARGET, format, D3DPOOL_DEFAULT, &view, nullptr));
+        CHECK(view->GetSurfaceLevel(0, &viewSurf));
+    }
+    CHECK(dev->CreateOffscreenPlainSurface(width, height, format, D3DPOOL_SYSTEMMEM, &sys, nullptr));
     const float bones[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
     const float identity[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
     const float light[12] = {0, 0, -1, 0, 0.5f, 0.5f, 0.5f, 0, 0.1f, 0.2f, 0.3f, 0};  // direction, diffuse, ambient
@@ -1246,6 +1261,11 @@ static int LightScene(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS& pp, bool ff)
     {
         CHECK(dev->BeginScene());
         CHECK(dev->Clear(0, nullptr, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER, 0xFF000000, 1.0f, 0));
+        if (rt)
+        {
+            CHECK(dev->SetRenderTarget(0, viewSurf));
+            CHECK(dev->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFF000000, 1.0f, 0));
+        }
         CHECK(dev->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE));
         CHECK(dev->SetRenderState(D3DRS_ZENABLE, FALSE));
         CHECK(dev->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE));
@@ -1296,18 +1316,23 @@ static int LightScene(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS& pp, bool ff)
             if (memcmp(after, light, sizeof(after)) != 0)
                 restored = 0;
         }
+        if (rt)
+            CHECK(dev->SetRenderTarget(0, bb));
         CHECK(dev->EndScene());
-        CHECK(dev->GetRenderTargetData(bb, sys));
+        CHECK(dev->GetRenderTargetData(rt ? viewSurf : bb, sys));
         D3DLOCKED_RECT lr;
         CHECK(sys->LockRect(&lr, nullptr, D3DLOCK_READONLY));
-        pixel = reinterpret_cast<const DWORD*>(static_cast<const BYTE*>(lr.pBits) +
-                                                (pp.BackBufferHeight / 2) * lr.Pitch)[pp.BackBufferWidth / 2];
+        pixel = reinterpret_cast<const DWORD*>(static_cast<const BYTE*>(lr.pBits) + (height / 2) * lr.Pitch)[width / 2];
         sys->UnlockRect();
         CHECK(dev->Present(nullptr, nullptr, nullptr, nullptr));
     }
     printf("LIGHT pixel=%08lx restored=%d\n", static_cast<unsigned long>(pixel), restored);
     CHECK(dev->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_MODULATE));
     CHECK(dev->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_TEXTURE));
+    if (viewSurf)
+        viewSurf->Release();
+    if (view)
+        view->Release();
     sys->Release();
     bb->Release();
     decl->Release();
@@ -1315,12 +1340,6 @@ static int LightScene(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS& pp, bool ff)
     return 0;
 }
 
-// Our water shader (shaders\water.hlsl) against the original, Colonization's (the game's compiled
-// shaders, extracted from its compiled effects into colDir): both drawn over a 16x16 grid of water with the same random textures
-// (normal map, coast fade, fog, grid, environment cube, reflection, refraction) and realistic constants, a different
-// view direction at every vertex. Prints "WATERCMP max=. differing=. pixels=. colours=." (the largest difference in
-// any channel, how many pixels differ at all, and how many distinct colours the original drew, to show the picture
-// isn't flat).
 // Water on models, run with [water] SurfaceTextures listing surfacePath: a fixed-function quad like an oasis' pool
 // (xyz, diffuse, one 2D texture coordinate; unlit, alpha-blended, depth writes) textured with surfacePath, at z = 0
 // under a top-down orthographic camera (500 world units = half the screen), over a black screen, three frames. Prints
@@ -1412,6 +1431,12 @@ static int SurfaceScene(IDirect3DDevice9* dev, const wchar_t* surfacePath)
     return 0;
 }
 
+// Our water shader (shaders\water.hlsl) against the original, Colonization's (the game's compiled
+// shaders, extracted from its compiled effects into colDir): both drawn over a 16x16 grid of water with the same random textures
+// (normal map, coast fade, fog, grid, environment cube, reflection, refraction) and realistic constants, a different
+// view direction at every vertex. Prints "WATERCMP max=. differing=. pixels=. colours=." (the largest difference in
+// any channel, how many pixels differ at all, and how many distinct colours the original drew, to show the picture
+// isn't flat).
 static int WaterCompareScene(IDirect3DDevice9* dev, const std::wstring& colDir)
 {
     std::vector<DWORD> vsOrig, psOrig;
@@ -1780,7 +1805,15 @@ int wmain(int argc, wchar_t** argv)
     }
     if (argc > 2 && wcscmp(argv[2], L"light") == 0)
     {
-        if (LightScene(dev, pp, argc > 3 && wcscmp(argv[3], L"ff") == 0) != 0)
+        // test_proxy <dll> light [ff] [rt | screen]
+        bool ff = false, rt = false, screen = false;
+        for (int a = 3; a < argc; ++a)
+        {
+            ff = ff || wcscmp(argv[a], L"ff") == 0;
+            rt = rt || wcscmp(argv[a], L"rt") == 0;
+            screen = screen || wcscmp(argv[a], L"screen") == 0;
+        }
+        if (LightScene(dev, pp, ff, rt, screen) != 0)
             return 1;
         ULONG devRefs = dev->Release();
         ULONG d3dRefs = d3d->Release();

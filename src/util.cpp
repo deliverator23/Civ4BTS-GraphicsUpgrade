@@ -541,6 +541,22 @@ std::wstring ProxyDir()
     return ModuleDir(g_self);
 }
 
+bool TargetIsMainView(IDirect3DDevice9* dev)
+{
+    IDirect3DSurface9 *rt = nullptr, *bb = nullptr;
+    dev->GetRenderTarget(0, &rt);
+    dev->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &bb);
+    bool main = rt && rt == bb;
+    D3DSURFACE_DESC r = {}, b = {};
+    if (!main && rt && bb && SUCCEEDED(rt->GetDesc(&r)) && SUCCEEDED(bb->GetDesc(&b)))
+        main = r.Width == b.Width && r.Height == b.Height;
+    if (rt)
+        rt->Release();
+    if (bb)
+        bb->Release();
+    return main;
+}
+
 bool EffectsAllowed()
 {
     // Config::games is a comma-separated list of game ids; "*" allows any game.
