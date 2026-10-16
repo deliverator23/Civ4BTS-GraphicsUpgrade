@@ -516,6 +516,12 @@ static int WaterScene(IDirect3DDevice9* dev, int frames)
 //                    ridge shades the ground at x = -250 (hill shadows); adds " hill=." (blue at (-250,0))
 //   vanish           no extra draws; frame 4 (after the Reset) draws nothing at all (a full-screen menu) and frame 5
 //                    has no caster: the ground mustn't show frame 3's shadow
+//   effect           a fixed-function additive effect (SRCALPHA/ONE, blue 64) over everything (depth test off), unlit,
+//                    through a perspective camera, like a sandstorm's glow: with [lighting] LitEffectTextures it takes
+//                    the change of light, as the roads do
+//   effectlit        the same, lit with an emissive-only material (the lights add nothing)
+//   effectmul        the same multiplying (ZERO/INVSRCCOLOR: blue x 191/255), like a sandstorm's shade: left alone
+//   effectui         the additive one through the orthographic camera, like the interface: left alone
 //   building         a lit fixed-function mesh (normals, depth writes) 100 units up at world (200,300), like a
 //                    building: with [shadows] BuildingShadows=1 its shadow lands at (100,300); adds " bld=."
 static bool ReadAll(const std::wstring& path, std::vector<DWORD>& out)
@@ -633,7 +639,10 @@ static int ShadowScene(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS& pp, int fra
                tree = wcscmp(overlay, L"tree") == 0 || treeShadow,
                building = wcscmp(overlay, L"building") == 0, ridge = wcscmp(overlay, L"ridge") == 0,
                vanish = wcscmp(overlay, L"vanish") == 0, waterOverlay = wcscmp(overlay, L"water") == 0,
-               slope = wcscmp(overlay, L"slope") == 0 || ridge;
+               slope = wcscmp(overlay, L"slope") == 0 || ridge,
+               effectLit = wcscmp(overlay, L"effectlit") == 0, effectMul = wcscmp(overlay, L"effectmul") == 0,
+               effectUi = wcscmp(overlay, L"effectui") == 0,
+               effect = wcscmp(overlay, L"effect") == 0 || effectLit || effectMul || effectUi;
     IDirect3DVertexBuffer9* slopeVb = nullptr;
     IDirect3DIndexBuffer9* slopeIb = nullptr;
     if (slope)
@@ -734,6 +743,8 @@ static int ShadowScene(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS& pp, int fra
             return 1;
     }
     if (decal && !solid(0xFF4080C0, &overlayTex[2]))
+        return 1;
+    if (effect && !solid(0xFF000040, &overlayTex[2]))  // the effect's colour: blue 64 (effectTex: a .dds of it)
         return 1;
     // building: frame 0 draws the painted-shadow spot with a white decoy (cached as "not a shadow"), which is then
     // released and the black painted shadow created, usually at the same address (reported as "reused").
@@ -982,6 +993,65 @@ static int ShadowScene(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS& pp, int fra
             CHECK(dev->SetTextureStageState(1, D3DTSS_TEXCOORDINDEX, 1));
             CHECK(dev->SetTextureStageState(1, D3DTSS_COLOROP, D3DTOP_DISABLE));
             CHECK(dev->SetTextureStageState(1, D3DTSS_ALPHAOP, D3DTOP_DISABLE));
+        }
+
+        if (effect)
+        {
+            // x, y, z, uv: a quad at z = 1 seen through a perspective-form camera (w = view z = 1), so it covers the
+            // screen as the orthographic camera's ground does; effectui keeps the orthographic camera (an interface).
+            const float eq[6][5] = {{-500, -500, 1, 0, 1}, {-500, 500, 1, 0, 0}, {500, 500, 1, 1, 0},
+                                    {-500, -500, 1, 0, 1}, {500, 500, 1, 1, 0},  {500, -500, 1, 1, 1}};
+            D3DMATRIX identity4 = translation(0, 0), persp = {};
+            persp._11 = persp._22 = 1 / 500.0f;
+            persp._43 = 0.5f;
+            persp._34 = 1;
+            DWORD oldLighting = FALSE;
+            dev->GetRenderState(D3DRS_LIGHTING, &oldLighting);
+            CHECK(dev->SetVertexShader(nullptr));
+            CHECK(dev->SetPixelShader(nullptr));
+            CHECK(dev->SetFVF(D3DFVF_XYZ | D3DFVF_TEX1));
+            CHECK(dev->SetRenderState(D3DRS_VERTEXBLEND, D3DVBF_DISABLE));
+            CHECK(dev->SetTransform(D3DTS_WORLD, &identity4));
+            CHECK(dev->SetTransform(D3DTS_VIEW, &ffView));
+            CHECK(dev->SetTransform(D3DTS_PROJECTION, effectUi ? &ffProj : &persp));
+            for (DWORD i = 0; i < 4; ++i)
+                CHECK(dev->SetTexture(i, nullptr));
+            CHECK(dev->SetTexture(0, overlayTex[2]));
+            CHECK(dev->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_SELECTARG1));
+            CHECK(dev->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_TEXTURE));
+            CHECK(dev->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG1));
+            CHECK(dev->SetTextureStageState(0, D3DTSS_ALPHAARG1, D3DTA_TEXTURE));
+            CHECK(dev->SetTextureStageState(1, D3DTSS_COLOROP, D3DTOP_DISABLE));
+            CHECK(dev->SetTextureStageState(1, D3DTSS_ALPHAOP, D3DTOP_DISABLE));
+            if (effectLit)
+            {
+                // Lit, but with an emissive-only material (black diffuse and ambient): the lights add nothing.
+                D3DMATERIAL9 emissive = {};
+                emissive.Emissive.b = emissive.Emissive.a = 1;
+                CHECK(dev->SetMaterial(&emissive));
+            }
+            CHECK(dev->SetRenderState(D3DRS_LIGHTING, effectLit ? TRUE : FALSE));
+            CHECK(dev->SetRenderState(D3DRS_ZENABLE, FALSE));  // a sandstorm's glow: over everything
+            CHECK(dev->SetRenderState(D3DRS_ZWRITEENABLE, FALSE));
+            CHECK(dev->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE));
+            CHECK(dev->SetRenderState(D3DRS_SRCBLEND, effectMul ? D3DBLEND_ZERO : D3DBLEND_SRCALPHA));
+            CHECK(dev->SetRenderState(D3DRS_DESTBLEND, effectMul ? D3DBLEND_INVSRCCOLOR : D3DBLEND_ONE));
+            CHECK(dev->SetRenderState(D3DRS_TEXTUREFACTOR, 0xFF123456));
+            CHECK(dev->DrawPrimitiveUP(D3DPT_TRIANGLELIST, 2, eq, 20));
+            CHECK(dev->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE));
+            CHECK(dev->SetRenderState(D3DRS_LIGHTING, oldLighting));
+            CHECK(dev->SetTransform(D3DTS_PROJECTION, &ffProj));
+            // the stage the proxy adds the light on, and the texture factor, must be as they were
+            DWORD op = 0, factor = 0;
+            IDirect3DBaseTexture9* t = nullptr;
+            dev->GetTextureStageState(1, D3DTSS_COLOROP, &op);
+            dev->GetTexture(1, &t);
+            dev->GetRenderState(D3DRS_TEXTUREFACTOR, &factor);
+            if (op != D3DTOP_DISABLE || t || factor != 0xFF123456)
+                restored = 0;
+            if (t)
+                t->Release();
+            CHECK(dev->SetTexture(0, nullptr));
         }
 
         // caster: flat red, alpha 1 (fixed-function pixel stage)
@@ -1823,7 +1893,7 @@ int wmain(int argc, wchar_t** argv)
     }
     if (argc > 2 && wcscmp(argv[2], L"shadow") == 0)
     {
-        // test_proxy <dll> shadow [blob .dds or -] [overlay: none, river0, river1, decal, symbol, overlay, tree,
+        // test_proxy <dll> shadow [blob .dds or -] [overlay: none, river0, river1, decal, symbol, overlay, effect*, tree,
         //            building]
         //            [folder of the game's extracted shaders] [flagpole .dds: the building drawn with it]
         const wchar_t* blobArg = argc > 3 && wcscmp(argv[3], L"-") != 0 ? argv[3] : nullptr;

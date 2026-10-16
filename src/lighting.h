@@ -15,17 +15,19 @@
 // carries its own ambient): each enabled directional light's diffuse and specular = sun, its ambient = ambient, and
 // its direction. A colour left unset keeps the game's own.
 #pragma once
+#include "assets.h"
 #include "common.h"
 #include "trace.h"
 
 #include <algorithm>
+#include <functional>
 #include <unordered_set>
 #include <vector>
 
 class Lighting
 {
 public:
-    explicit Lighting(IDirect3DDevice9* device) : m_dev(device) {}
+    explicit Lighting(IDirect3DDevice9* device);
     ~Lighting() { ReleaseAll(); }
 
     bool enabled = false;
@@ -81,6 +83,15 @@ public:
     // whatever the light) take the terrain's change of light: the light on flat ground now over the light BtS baked
     // into the terrain, per channel (0 to 2). Null: no change (the lighting off, or the terrain lit as baked).
     const float* DecalLight();
+    // Effects that take the light ([lighting] LitEffectTextures): a blended, unlit fixed-function draw in the map
+    // (particles: dust, smoke, a sandstorm's glow) is drawn scaled by DecalLight, as the ground under it is, through
+    // a spare texture stage. Unlit: lighting off, or an emissive-only material. Additive and alpha-blended draws only
+    // (source alpha or one, onto one or inverse source alpha); multiply-blended ones (a sandstorm's shade) already
+    // scale the lit ground, and are left alone. Not pre-transformed or orthographic draws (the interface), and only
+    // into the map (the caller's MainViewScope). False if it doesn't apply (the caller then draws it as usual).
+    bool DrawEffect(const std::function<HRESULT()>& draw, HRESULT& hr);
+    // A texture was just created at this address (see Shadows::ForgetTexture).
+    void ForgetTexture(const void* texture) { m_effectTextures.Forget(texture); }
     ULONG InternalRefs() const { return m_internalRefs; }
 
     // A group's sun / ambient colour: the cycle's for groups without their own *Sun / *Ambient key while it runs,
@@ -100,6 +111,7 @@ private:
     bool Direction(int group, float* dir) const;  // false = keep the game's direction
     bool EnsureTreeShader();
     void ApplyFixedFunction(int group);
+    bool UnlitEffect();  // DrawEffect's tests of the draw's state
 
     struct Saved
     {
@@ -137,6 +149,9 @@ private:
     int m_loggedStep = -1;   // the last whole step logged
     double m_cyclePos = 0;   // where the cycle is, 0 .. step count
     std::unordered_set<const void*> m_checked;
+    TextureList m_effectTextures;  // LitEffectTextures
+    DWORD m_maxStages = 0;         // texture stages the device can blend (0 = not asked yet)
+    bool m_loggedEffect = false;
     void TerrainLight() const;  // m_terrainBase and the flags below, for the light now
     // TerrainConstants' part that depends only on the light, worked out once per frame (NewFrame) and lighting state.
     uint32_t m_frame = 0;

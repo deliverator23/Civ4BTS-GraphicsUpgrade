@@ -117,13 +117,16 @@ private:
     // both PNGs, so the two frames are one frame apart.
     int m_compareStep = 0;
     bool m_compareKeyWasDown = false;
-    bool m_compareSaved[4] = {};  // reflection, water, shadows, lighting as they were
+    bool m_compareSaved[5] = {};  // reflection, water, shadows, lighting, anisotropic filtering as they were
     IDirect3DSurface9* m_compareShots[2] = {};  // on, off
     std::wstring m_comparePath;    // <output>\screenshots\<time>, + "_on.png" / "_off.png"
     std::unordered_set<uint64_t> m_loggedLights;  // fixed-function lights and ambients seen (logged once each)
     std::wstring m_lightmapSavedFor;  // trace folder the terrain lightmap was last saved into
     bool m_reflKeyWasDown = false, m_overlayKeyWasDown = false, m_waterKeyWasDown = false;
     bool m_shadowsKeyWasDown = false, m_shadowOverlayKeyWasDown = false;
+    // Anisotropic filtering ([textures] Anisotropy): on, and the samples it uses (the INI's, capped by the card; 1 = none).
+    bool m_aniso = false, m_anisoKeyWasDown = false;
+    DWORD m_anisoMax = 1;
     uint32_t m_frameBlobsSkipped = 0, m_framePaintedSkipped = 0;
     struct DeferredDraw
     {

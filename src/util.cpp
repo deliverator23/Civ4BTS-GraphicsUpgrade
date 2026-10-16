@@ -387,6 +387,8 @@ void LoadConfig()
             out[i] = static_cast<float>((std::max)(0, (std::min)(255, c[i]))) / 255.0f;
         return true;
     };
+    g_config.anisotropy = static_cast<UINT>((std::max)(1, (std::min)(16, IniInt(ini, L"textures", L"Anisotropy", 8))));
+    g_config.anisotropyKey = IniKey(ini, L"textures", L"ToggleKey", '5');
     g_config.lightingEnabled = IniInt(ini, L"lighting", L"Enabled", 1) != 0;
     g_config.lightingKey = IniKey(ini, L"lighting", L"ToggleKey", '3');
     g_config.lightCycleKey = IniKey(ini, L"lighting", L"LightCycleToggleKey", '4');
@@ -477,6 +479,14 @@ void LoadConfig()
     g_config.moonHeight = height(L"MoonHeight", 50);
     g_config.shadowsFollowSun = IniInt(ini, L"lighting", L"ShadowsFollowSun", 1) != 0;
     g_config.moonGlintSet = rgb(L"MoonGlint", g_config.moonGlint);
+    // LitEffectTextures: TextureList entries, or "*" for every blended, unlit effect.
+    g_config.litEffectTextures = IniString(ini, L"lighting", L"LitEffectTextures", L"");
+    std::wstring allEffects = g_config.litEffectTextures;
+    allEffects.erase(0, allEffects.find_first_not_of(L" \t"));
+    allEffects.erase(allEffects.find_last_not_of(L" \t") + 1);
+    g_config.litEffectsAll = allEffects == L"*";
+    if (g_config.litEffectsAll)
+        g_config.litEffectTextures.clear();
     if (g_config.lightCycleOn && ((g_config.lightCycle.empty() && g_config.lightCycleAmbient.empty() &&
                                    g_config.lightCycleDirection.empty() && g_config.lightCycleAngles.empty() &&
                                    !g_config.sunPath) ||

@@ -28,7 +28,7 @@ part can be turned off in the settings. Shadows fall on the terrain, rivers, roa
 
 ## What you need
 
-- Civilization IV: Beyond the Sword 3.19 on Windows.
+- Civilization IV: Beyond the Sword 3.19 on Windows Vista or later.
 - A graphics card with Shader Model 3 (any from about 2005 on). Without it, hill and mountain shadows are left out;
   everything else works.
 
@@ -67,16 +67,18 @@ If the folder already has a `d3d9.dll` (ReShade, DXVK...), read [Using with ReSh
 | Ctrl+Shift+2 | Sun shadows                                  |
 | Ctrl+Shift+3 | Lighting                                     |
 | Ctrl+Shift+4 | Pauses and resumes the day–night cycle       |
+| Ctrl+Shift+5 | Sharper distant textures (anisotropic filtering) |
 | Ctrl+Shift+/ | Saves a before/after pair of screenshots     |
 
 Ctrl+Shift+/ saves two screenshots from two frames in a row, so every unit, tree and wave is in the same place:
 one with GraphicsUpgrade's effects as you have them (`..._on.png`) and one with none of them, plain BtS
 (`..._off.png`). They go in `%LOCALAPPDATA%\GraphicsUpgrade\bts\screenshots`.
 
-To use other keys, change `ToggleKey` in that section of `GraphicsUpgrade.ini`. It can be a number, a letter, a key name
-such as `F11` or `Numpad5`, or `none`. `KeyModifiers` in `[general]` sets the Ctrl+Shift part. Letters are best
-avoided: many mods' own keys ignore extra modifiers, so a letter can set off a mod's command too. No mod we know of uses
-the number keys or `/`.
+To use other keys, change them in `GraphicsUpgrade.ini`: `ToggleKey` in the `[water]`, `[shadows]` and `[lighting]`
+sections, `LightCycleToggleKey` in `[lighting]` for pausing the day–night cycle, and `CompareKey` in `[general]` for the
+screenshots. Each can be a number, a letter, a key name such as `F11` or `Numpad5`, a symbol such as `/`, or `none`.
+`KeyModifiers` in `[general]` sets the Ctrl+Shift part. Letters are best avoided: many mods' own keys ignore extra
+modifiers, so a letter can set off a mod's command too. No mod we know of uses the number keys or `/`.
 
 ## Settings
 
@@ -88,13 +90,14 @@ The ones you're most likely to want:
 | `[shadows] Darkness` | How dark shadows are (0 to 1) |
 | `[shadows] Softness` | How soft shadow edges are (0 = hard) |
 | `[shadows] BuildingShadows` | Real building shadows on (1) or off (0) |
-| `[shadows] SunDirection` | Where the sun shines from |
+| `[shadows] SunDirection` | Which way the sunlight travels while the day–night cycle is off (while it runs, the sun follows `[lighting] SunMiddayFrom` and the height settings) |
 | `[shadows] HillShadowLength` | How long hill and mountain shadows are (1 = true to the terrain's heights) |
 | `[shadows] WaterShadow` | How much shadow falls on the water's surface |
 | `[water] UnderwaterDepth` | How deep you can see into the water (0 = not at all) |
 | `[reflection] Size` | Reflection sharpness: 1024, or 512 to save a little speed |
 | `[lighting] Enabled` | GraphicsUpgrade's lighting (1), or BtS's own (0) |
 | `[lighting] LightCycleOn` | The day–night cycle on (1) or off (0) |
+| `[textures] Anisotropy` | How sharp distant ground, roads and water stay: 2 to 16, or 1 for BtS's own filtering |
 
 ### Lighting and day–night
 
@@ -160,6 +163,19 @@ the vertex or material alpha) says where the water is. By default this is the oa
 ```ini
 [water]
 SurfaceTextures=Art\Terrain\Features\Oasis\oasis_water.dds; Art\Effects\Flood\flood_water.dds
+```
+
+**Effects that follow the light.** BtS draws most particle effects (dust, smoke, glows) unlit, so they keep the
+same colour by day and by night. `[lighting] LitEffectTextures` lists textures whose effects should follow the light
+instead. They then darken and change colour with the day–night cycle and the lighting presets, as the ground under them
+does. This applies to unlit, blended effects in the map: additive ones (source alpha or one onto one) and alpha-blended
+ones. Multiplying effects, which darken what is behind them, already follow the light through the lit ground, so they
+are left as they are. The interface and the Civilopedia are never changed. Entries work as in `NoShadowTextures`, and
+`*` means every such effect. By default the list is empty, so fires and magic glows stay as bright at night as by day:
+
+```ini
+[lighting]
+LitEffectTextures=Art\Effects\Sandstorm_P; Art\Effects\Dust\dust_cloud.dds
 ```
 
 **Your own terrain lighting.** BtS bakes the terrain's light from `Art\Terrain\Lights\SunLight.nif`, and

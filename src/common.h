@@ -98,6 +98,10 @@ struct Config
     // A colour that isn't set (no group key and no SunColour/AmbientColour) keeps the game's own.
     bool lightingEnabled = false;
     UINT lightingKey = '3';
+    // Anisotropic filtering of the map's textures: up to this many samples along the view (1 = BtS's own filtering),
+    // capped at what the graphics card supports.
+    UINT anisotropy = 8;
+    UINT anisotropyKey = '5';
     UINT lightCycleKey = '4';  // modifiers + key pauses and resumes the light cycle
     float lightSun[kLightGroups][3] = {};
     float lightAmbient[kLightGroups][3] = {};
@@ -133,6 +137,11 @@ struct Config
     // (a sixth of the cycle either side of midnight; full at midnight). Not set: the cycle's colour throughout.
     bool moonGlintSet = false;
     float moonGlint[3] = {1, 1, 1};
+    // Effects that take the light: blended, unlit fixed-function draws in the map (particles: dust, smoke, a
+    // sandstorm) drawn with one of these textures (TextureList entries) change with the light as the ground under them
+    // does (Lighting::DrawEffect). litEffectsAll: the INI says "*", every such draw.
+    std::wstring litEffectTextures;
+    bool litEffectsAll = false;
     bool matchShadowDirection = true;  // light units and ships from the shadows' sun direction
     bool haveLightDirection = false;   // LightDirection set: light units and ships from it instead
     float lightDirection[3] = {0, 0, -1};  // direction the light travels, like SunDirection
@@ -245,6 +254,8 @@ extern volatile DWORD g_lastCallTick;
 void StartWatchdog();
 
 // Records every call for the watchdog and logs the first call of each method (one line per method per process).
+// The game checks formats thousands of times at startup (IDirect3D9::CheckDeviceFormat), so even IDirect3D9's calls
+// are logged only the first time.
 #define GU_FIRST_CALL(name)                                                                                        \
     do                                                                                                             \
     {                                                                                                              \
@@ -258,11 +269,3 @@ void StartWatchdog();
         }                                                                                                          \
     } while (0)
 
-// IDirect3D9 calls are rare (adapter checks, device creation), so they're all logged.
-#define GU_LOG_CALL(name)                                                                                          \
-    do                                                                                                             \
-    {                                                                                                              \
-        g_lastCall = name;                                                                                         \
-        g_lastCallTick = GetTickCount();                                                                           \
-        Log::Write("call: %s", name);                                                                              \
-    } while (0)

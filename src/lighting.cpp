@@ -13,6 +13,14 @@ namespace
 const uint64_t kTreeVs = 0x3bdd40e63347e93full;  // instruction-only fingerprint (ShaderInfo::codeHash)
 }
 
+Lighting::Lighting(IDirect3DDevice9* device) : m_dev(device)
+{
+    if (g_config.litEffectsAll)
+        Log::Write("settings: [lighting] LitEffectTextures: * (every blended, unlit effect takes the light)");
+    else
+        m_effectTextures.Load(g_config.litEffectTextures, "[lighting] LitEffectTextures");
+}
+
 void Lighting::Set(bool vs, int reg, const float* rgb)
 {
     if (reg < 0 || m_count >= 8)
@@ -289,6 +297,186 @@ void Lighting::ReleaseAll()
         m_treeVs->Release();  // no reference counting afterwards: this can be the device's last object
     m_treeVs = nullptr;
     m_internalRefs = 0;
+    m_effectTextures.Clear();
+}
+
+bool Lighting::UnlitEffect()
+{
+    IDirect3DPixelShader9* ps = nullptr;
+    m_dev->GetPixelShader(&ps);
+    if (ps)
+    {
+        ps->Release();
+        return false;
+    }
+    DWORD vblend = 0, ablend = 0, zwrite = 0, src = 0, dst = 0, op = 0, lighting = 0, fvf = 0;
+    m_dev->GetRenderState(D3DRS_VERTEXBLEND, &vblend);
+    m_dev->GetRenderState(D3DRS_ALPHABLENDENABLE, &ablend);
+    m_dev->GetRenderState(D3DRS_ZWRITEENABLE, &zwrite);
+    m_dev->GetRenderState(D3DRS_SRCBLEND, &src);
+    m_dev->GetRenderState(D3DRS_DESTBLEND, &dst);
+    m_dev->GetRenderState(D3DRS_BLENDOP, &op);
+    // Blended without depth writes, not skinned (BtS's selection circle is vertex-blended). Additive (SRCALPHA/ONE,
+    // ONE/ONE) or alpha-blended: the colour it adds scales with the light. Multiplying ones (ZERO/INVSRCCOLOR) darken
+    // what is already lit.
+    const bool blendOk = (src == D3DBLEND_SRCALPHA || src == D3DBLEND_ONE) &&
+                         (dst == D3DBLEND_ONE || dst == D3DBLEND_INVSRCALPHA) && op == D3DBLENDOP_ADD;
+    if (vblend != D3DVBF_DISABLE || !ablend || zwrite || !blendOk)
+        return false;
+    m_dev->GetFVF(&fvf);
+    // Unlit: no lighting, or lighting that only adds the material's emissive colour (the lights add nothing).
+    m_dev->GetRenderState(D3DRS_LIGHTING, &lighting);
+    if (lighting)
+    {
+        D3DMATERIAL9 m = {};
+        DWORD colorVertex = FALSE, diffuseSrc = D3DMCS_MATERIAL, ambientSrc = D3DMCS_MATERIAL, specular = FALSE;
+        m_dev->GetMaterial(&m);
+        m_dev->GetRenderState(D3DRS_COLORVERTEX, &colorVertex);
+        m_dev->GetRenderState(D3DRS_DIFFUSEMATERIALSOURCE, &diffuseSrc);
+        m_dev->GetRenderState(D3DRS_AMBIENTMATERIALSOURCE, &ambientSrc);
+        m_dev->GetRenderState(D3DRS_SPECULARENABLE, &specular);
+        // A vertex colour as the diffuse or ambient source lets the lights in, unless the vertices have no such colour
+        // (Direct3D then takes the material's; with a vertex declaration, assume they have it).
+        auto fromVertex = [&](DWORD src) {
+            return colorVertex && ((src == D3DMCS_COLOR1 && (!fvf || (fvf & D3DFVF_DIFFUSE))) ||
+                                   (src == D3DMCS_COLOR2 && (!fvf || (fvf & D3DFVF_SPECULAR))));
+        };
+        auto dark = [](const D3DCOLORVALUE& c) { return c.r < 0.5f / 255 && c.g < 0.5f / 255 && c.b < 0.5f / 255; };
+        if (fromVertex(diffuseSrc) || fromVertex(ambientSrc) || !dark(m.Diffuse) || !dark(m.Ambient) ||
+            (specular && !dark(m.Specular)))
+            return false;
+    }
+    // In the world: not pre-transformed (screen positions), and seen through a perspective camera rather than the
+    // interface's orthographic one.
+    if ((fvf & D3DFVF_POSITION_MASK) == D3DFVF_XYZRHW)
+        return false;
+    if (!fvf)
+    {
+        IDirect3DVertexDeclaration9* decl = nullptr;
+        m_dev->GetVertexDeclaration(&decl);
+        if (decl)
+        {
+            D3DVERTEXELEMENT9 elements[MAXD3DDECLLENGTH + 1];
+            UINT count = MAXD3DDECLLENGTH + 1;
+            bool screen = false;
+            if (SUCCEEDED(decl->GetDeclaration(elements, &count)))
+                for (UINT i = 0; i < count && elements[i].Stream != 0xFF; ++i)
+                    screen = screen || elements[i].Usage == D3DDECLUSAGE_POSITIONT;
+            decl->Release();
+            if (screen)
+                return false;
+        }
+    }
+    D3DMATRIX proj;
+    if (FAILED(m_dev->GetTransform(D3DTS_PROJECTION, &proj)) || std::fabs(proj._34) < 1e-4f ||
+        std::fabs(proj._44) > 1e-4f)
+        return false;
+    // Listed (any stage), or every one.
+    if (g_config.litEffectsAll)
+        return true;
+    for (DWORD stage = 0; stage < 8; ++stage)
+    {
+        IDirect3DBaseTexture9* base = nullptr;
+        if (FAILED(m_dev->GetTexture(stage, &base)) || !base)
+            continue;
+        const bool listed = m_effectTextures.Contains(base);
+        base->Release();
+        if (listed)
+            return true;
+    }
+    return false;
+}
+
+bool Lighting::DrawEffect(const std::function<HRESULT()>& draw, HRESULT& hr)
+{
+    if (!enabled || (!g_config.litEffectsAll && g_config.litEffectTextures.empty()) || !UnlitEffect())
+        return false;
+    const float* light = DecalLight();
+    if (!light)
+        return false;  // the light as BtS baked it: the effect as it is
+    // The first unused texture stage, if the stages before it don't use the texture factor themselves.
+    if (!m_maxStages)
+    {
+        D3DCAPS9 caps = {};
+        m_dev->GetDeviceCaps(&caps);
+        m_maxStages = (std::min)((std::min)(caps.MaxTextureBlendStages, caps.MaxSimultaneousTextures), DWORD(8));
+    }
+    static const D3DTEXTURESTAGESTATETYPE kArgs[6] = {D3DTSS_COLORARG0, D3DTSS_COLORARG1, D3DTSS_COLORARG2,
+                                                      D3DTSS_ALPHAARG0, D3DTSS_ALPHAARG1, D3DTSS_ALPHAARG2};
+    DWORD stage = 0;
+    for (DWORD op = 0; stage < m_maxStages; ++stage)
+    {
+        if (SUCCEEDED(m_dev->GetTextureStageState(stage, D3DTSS_COLOROP, &op)) && op == D3DTOP_DISABLE)
+            break;
+        for (D3DTEXTURESTAGESTATETYPE arg : kArgs)
+        {
+            DWORD v = 0;
+            m_dev->GetTextureStageState(stage, arg, &v);
+            if ((v & D3DTA_SELECTMASK) == D3DTA_TFACTOR)
+                return false;
+        }
+    }
+    if (stage >= m_maxStages)
+        return false;
+
+    const D3DTEXTURESTAGESTATETYPE states[8] = {D3DTSS_COLOROP,   D3DTSS_COLORARG1, D3DTSS_COLORARG2,
+                                                D3DTSS_ALPHAOP,   D3DTSS_ALPHAARG1, D3DTSS_ALPHAARG2,
+                                                D3DTSS_RESULTARG, D3DTSS_TEXTURETRANSFORMFLAGS};
+    DWORD saved[8], oldNextColor = D3DTOP_DISABLE, oldNextAlpha = D3DTOP_DISABLE, oldFactor = 0;
+    IDirect3DBaseTexture9* oldTex = nullptr;
+    for (int k = 0; k < 8; ++k)
+        m_dev->GetTextureStageState(stage, states[k], &saved[k]);
+    m_dev->GetTexture(stage, &oldTex);
+    const bool next = stage + 1 < 8;
+    if (next)
+    {
+        m_dev->GetTextureStageState(stage + 1, D3DTSS_COLOROP, &oldNextColor);
+        m_dev->GetTextureStageState(stage + 1, D3DTSS_ALPHAOP, &oldNextAlpha);
+    }
+    m_dev->GetRenderState(D3DRS_TEXTUREFACTOR, &oldFactor);
+
+    // As the roads (Shadows::DrawDecal): current x 2 x (factor / 2), so it can brighten too (up to 2). Alpha as it is.
+    auto half = [](float v) { return static_cast<DWORD>((std::min)(255.0f, v * 127.5f + 0.5f)); };
+    m_dev->SetRenderState(D3DRS_TEXTUREFACTOR, D3DCOLOR_ARGB(255, half(light[0]), half(light[1]), half(light[2])));
+    m_dev->SetTexture(stage, nullptr);
+    m_dev->SetTextureStageState(stage, D3DTSS_COLOROP, D3DTOP_MODULATE2X);
+    m_dev->SetTextureStageState(stage, D3DTSS_COLORARG1, D3DTA_TFACTOR);
+    m_dev->SetTextureStageState(stage, D3DTSS_COLORARG2, D3DTA_CURRENT);
+    m_dev->SetTextureStageState(stage, D3DTSS_ALPHAOP, D3DTOP_SELECTARG1);
+    m_dev->SetTextureStageState(stage, D3DTSS_ALPHAARG1, D3DTA_CURRENT);
+    m_dev->SetTextureStageState(stage, D3DTSS_ALPHAARG2, D3DTA_CURRENT);
+    m_dev->SetTextureStageState(stage, D3DTSS_RESULTARG, D3DTA_CURRENT);
+    m_dev->SetTextureStageState(stage, D3DTSS_TEXTURETRANSFORMFLAGS, D3DTTFF_DISABLE);
+    if (next)
+    {
+        m_dev->SetTextureStageState(stage + 1, D3DTSS_COLOROP, D3DTOP_DISABLE);
+        m_dev->SetTextureStageState(stage + 1, D3DTSS_ALPHAOP, D3DTOP_DISABLE);
+    }
+    if (!m_loggedEffect)
+    {
+        m_loggedEffect = true;
+        DWORD src = 0, dst = 0, lighting = 0;
+        m_dev->GetRenderState(D3DRS_SRCBLEND, &src);
+        m_dev->GetRenderState(D3DRS_DESTBLEND, &dst);
+        m_dev->GetRenderState(D3DRS_LIGHTING, &lighting);
+        Log::Write("lighting: first effect taking the light (blend %u/%u, lighting %u, texture stage %u): "
+                   "x%.2f,%.2f,%.2f", src, dst, lighting, stage, light[0], light[1], light[2]);
+    }
+
+    hr = draw();
+
+    for (int k = 0; k < 8; ++k)
+        m_dev->SetTextureStageState(stage, states[k], saved[k]);
+    m_dev->SetTexture(stage, oldTex);
+    if (oldTex)
+        oldTex->Release();
+    if (next)
+    {
+        m_dev->SetTextureStageState(stage + 1, D3DTSS_COLOROP, oldNextColor);
+        m_dev->SetTextureStageState(stage + 1, D3DTSS_ALPHAOP, oldNextAlpha);
+    }
+    m_dev->SetRenderState(D3DRS_TEXTUREFACTOR, oldFactor);
+    return true;
 }
 
 void Lighting::Apply(const ShaderInfo* vs, const ShaderInfo* ps, int ffGroup)

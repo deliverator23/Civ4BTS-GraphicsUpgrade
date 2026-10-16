@@ -42,7 +42,7 @@ HRESULT ProxyD3D9::CreateDevice(UINT Adapter, D3DDEVTYPE DeviceType, HWND hFocus
                                 D3DPRESENT_PARAMETERS* pPresentationParameters,
                                 IDirect3DDevice9** ppReturnedDeviceInterface)
 {
-    GU_LOG_CALL("IDirect3D9::CreateDevice");
+    GU_FIRST_CALL("IDirect3D9::CreateDevice");
     DWORD flags = BehaviorFlags;
     if (g_config.clearPureDevice && (flags & D3DCREATE_PUREDEVICE))
     {

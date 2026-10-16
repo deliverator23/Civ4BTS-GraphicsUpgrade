@@ -96,6 +96,12 @@ ProxyDevice::ProxyDevice(IDirect3DDevice9* real, ProxyD3D9* parent)
                (caps.VertexShaderVersion >> 8) & 0xFF, caps.VertexShaderVersion & 0xFF, caps.MaxVertexShaderConst,
                (caps.PixelShaderVersion >> 8) & 0xFF, caps.PixelShaderVersion & 0xFF, caps.NumSimultaneousRTs,
                caps.MaxTextureWidth, caps.MaxTextureHeight);
+    if (caps.TextureFilterCaps & 0x00000400L)  // D3DPTFILTERCAPS_MINFANISOTROPY
+        m_anisoMax = (std::min)(static_cast<DWORD>(g_config.anisotropy), (std::max)(caps.MaxAnisotropy, 1ul));
+    m_aniso = m_effects && m_anisoMax > 1;
+    if (m_effects)
+        Log::Write("anisotropic filtering: %s (Anisotropy=%u, the card's most %u)",
+                   m_aniso ? ("x" + std::to_string(m_anisoMax)).c_str() : "off", g_config.anisotropy, caps.MaxAnisotropy);
     if (g_config.dumpShaders)
         EnsureDir(Log::GameDir() + L"\\shaders");
     m_ghost = m_effects && g_config.ghostEnabled;
@@ -104,11 +110,12 @@ ProxyDevice::ProxyDevice(IDirect3DDevice9* real, ProxyD3D9* parent)
                    g_config.ghostOffset[2]);
     std::string modifiers = std::string(g_config.keyCtrl ? "ctrl+" : "") + (g_config.keyShift ? "shift+" : "") +
                             (g_config.keyAlt ? "alt+" : "");
-    Log::Write("hotkeys (%skey): water %s, shadows %s, lighting %s, light cycle %s, reflection %s, reflection "
-               "overlay %s, shadow overlay %s, ghost %s, trace %s",
+    Log::Write("hotkeys (%skey): water %s, shadows %s, lighting %s, light cycle %s, filtering %s, reflection %s, "
+               "reflection overlay %s, shadow overlay %s, ghost %s, trace %s",
                modifiers.c_str(),
                KeyName(g_config.waterKey).c_str(), KeyName(g_config.shadowsKey).c_str(),
                KeyName(g_config.lightingKey).c_str(), KeyName(g_config.lightCycleKey).c_str(),
+               KeyName(g_config.anisotropyKey).c_str(),
                KeyName(g_config.reflectionKey).c_str(),
                KeyName(g_config.overlayKey).c_str(), KeyName(g_config.shadowOverlayKey).c_str(),
                KeyName(g_config.ghostKey).c_str(), g_config.tracesEnabled ? KeyName(g_config.traceKey).c_str() : "off");
@@ -230,16 +237,16 @@ HRESULT ProxyDevice::Present(CONST RECT* pSourceRect, CONST RECT* pDestRect, HWN
     if (m_frame % 1000 == 0)
         Log::Write("%s", m_perf.Summary().c_str());
     m_frameDraws = m_frameRtSwitches = m_framePrims = m_frameGhosts = m_frameWaterDraws = m_frameBlobsSkipped = m_framePaintedSkipped = m_frameDeferred = 0;
-    bool* effects[4] = {&m_refl.enabled, &m_water.enabled, &m_shadows.enabled, &m_light.enabled};
+    bool* effects[5] = {&m_refl.enabled, &m_water.enabled, &m_shadows.enabled, &m_light.enabled, &m_aniso};
     if (m_compareStep == 1)
     {
-        for (int i = 0; i < 4; ++i)
+        for (int i = 0; i < 5; ++i)
             m_compareSaved[i] = *effects[i], *effects[i] = false;
         m_compareStep = 2;
     }
     else if (m_compareStep == 2)
     {
-        for (int i = 0; i < 4; ++i)
+        for (int i = 0; i < 5; ++i)
             *effects[i] = m_compareSaved[i];
         m_compareStep = 0;
         for (int i = 0; i < 2; ++i)
@@ -321,6 +328,11 @@ HRESULT ProxyDevice::Present(CONST RECT* pSourceRect, CONST RECT* pDestRect, HWN
         m_light.enabled = !m_light.enabled;
         Log::Write("lighting %s at frame %u", m_light.enabled ? "on" : "off", m_frame);
     }
+    if (m_effects && m_anisoMax > 1 && combo(g_config.anisotropyKey, m_anisoKeyWasDown))
+    {
+        m_aniso = !m_aniso;
+        Log::Write("anisotropic filtering %s at frame %u", m_aniso ? "on" : "off", m_frame);
+    }
     if (m_effects && combo(g_config.lightCycleKey, m_lightCycleKeyWasDown))
     {
         m_light.cyclePaused = !m_light.cyclePaused;
@@ -399,7 +411,10 @@ HRESULT ProxyDevice::CreateTexture(UINT Width, UINT Height, UINT Levels, DWORD U
 {
     HRESULT hr = m_real->CreateTexture(Width, Height, Levels, Usage, Format, Pool, ppTexture, pSharedHandle);
     if (SUCCEEDED(hr) && ppTexture && *ppTexture)
+    {
         m_shadows.ForgetTexture(*ppTexture);  // a new texture at a possibly reused address
+        m_light.ForgetTexture(*ppTexture);
+    }
     if (Usage & (D3DUSAGE_RENDERTARGET | D3DUSAGE_DEPTHSTENCIL))
         Log::Write("CreateTexture %ux%u levels %u usage 0x%x fmt %u pool %u -> 0x%08x tex %s", Width, Height, Levels,
                    Usage, Format, Pool, static_cast<unsigned>(hr),
@@ -722,7 +737,7 @@ HRESULT ProxyDevice::Dispatch(Draw draw)
     // state right after its draw.
     const ShaderInfo* vs = nullptr;
     bool fixedFunction = false;
-    if (m_refl.enabled || m_water.enabled || m_shadows.enabled || m_light.enabled)
+    if (m_refl.enabled || m_water.enabled || m_shadows.enabled || m_light.enabled || m_aniso)
     {
         IDirect3DVertexShader9* shader = nullptr;
         m_real->GetVertexShader(&shader);
@@ -738,6 +753,41 @@ HRESULT ProxyDevice::Dispatch(Draw draw)
     }
     if (!m_deferred.empty() && m_frameWaterDraws > 0 && !(vs && vs->btsWater))
         ReplayDeferred();  // the water is done: the held-back selection decals go on top of it
+    // Anisotropic filtering: the draw's linearly filtered textures (stages 0-7) for this draw and its redraws, back to
+    // linear when Dispatch returns. Not for the interface's pre-transformed fixed-function draws (flat on the screen,
+    // where it changes nothing).
+    struct FilterScope
+    {
+        IDirect3DDevice9* dev;
+        DWORD stages = 0, oldMax[8] = {};
+        ~FilterScope()
+        {
+            for (DWORD s = 0; s < 8; ++s)
+                if (stages & (1u << s))
+                {
+                    dev->SetSamplerState(s, D3DSAMP_MINFILTER, D3DTEXF_LINEAR);
+                    dev->SetSamplerState(s, D3DSAMP_MAXANISOTROPY, oldMax[s]);
+                }
+        }
+    } filterScope{m_real};
+    DWORD drawFvf = 0;
+    if (m_aniso && (!fixedFunction || (SUCCEEDED(m_real->GetFVF(&drawFvf)) &&
+                                       (drawFvf & D3DFVF_POSITION_MASK) != D3DFVF_XYZRHW)))
+        for (DWORD s = 0; s < 8; ++s)
+        {
+            IDirect3DBaseTexture9* t = nullptr;
+            DWORD minFilter = 0;
+            if (FAILED(m_real->GetTexture(s, &t)) || !t)
+                continue;
+            t->Release();
+            if (SUCCEEDED(m_real->GetSamplerState(s, D3DSAMP_MINFILTER, &minFilter)) && minFilter == D3DTEXF_LINEAR &&
+                SUCCEEDED(m_real->GetSamplerState(s, D3DSAMP_MAXANISOTROPY, &filterScope.oldMax[s])))
+            {
+                m_real->SetSamplerState(s, D3DSAMP_MINFILTER, D3DTEXF_ANISOTROPIC);
+                m_real->SetSamplerState(s, D3DSAMP_MAXANISOTROPY, m_anisoMax);
+                filterScope.stages |= 1u << s;
+            }
+        }
     // INI light colours for this draw and its redraws; the game's values go back when Dispatch returns.
     struct LightScope
     {
@@ -880,6 +930,13 @@ HRESULT ProxyDevice::Dispatch(Draw draw)
         {
             if (m_trace.Active())
                 m_trace.Event("{\"ev\":\"shadowed_decal\"}");
+            return hr;
+        }
+        // Unlit effects in the map (dust, a sandstorm's glow) that a mod has listed: scaled by the change of light.
+        if (fixedFunction && mainView && m_light.DrawEffect([&] { return draw(); }, hr))
+        {
+            if (m_trace.Active())
+                m_trace.Event("{\"ev\":\"lit_effect\"}");
             return hr;
         }
     }

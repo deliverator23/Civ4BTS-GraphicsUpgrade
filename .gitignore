@@ -1,5 +1,6 @@
 build/
 dist/
+work/
 .venv/
 .idea/
 CFC-post.txt

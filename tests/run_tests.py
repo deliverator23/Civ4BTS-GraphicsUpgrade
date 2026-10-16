@@ -474,6 +474,46 @@ def main():
             check(v.get('shadowed', 999) <= v.get('lit', 0) * 0.6,
                   f"{name}: still darkened in the shadow ({v.get('shadowed')})")
 
+    # Unlit effects (particles: a sandstorm's glow) a mod lists in [lighting] LitEffectTextures (or "*" for all) take
+    # the same change of light: the additive effect's blue 64 over the night ground becomes 64 x 0.394. Multiplying
+    # effects (a sandstorm's shade) scale the lit ground already; unlisted effects and the interface (an orthographic
+    # camera) are left alone.
+    def write_dds(path, bgra):
+        """A 1x1 uncompressed 32-bit .dds of one pixel (B, G, R, A)."""
+        hdr = bytearray(128)
+        hdr[0:4] = b'DDS '
+        struct.pack_into('<7I', hdr, 4, 124, 0x100F, 1, 1, 4, 0, 1)  # size, flags, height, width, pitch, depth, mips
+        struct.pack_into('<8I', hdr, 76, 32, 0x41, 0, 32, 0xFF0000, 0xFF00, 0xFF, 0xFF000000)  # RGB + alpha, 32 bits
+        struct.pack_into('<I', hdr, 108, 0x1000)
+        with open(path, 'wb') as f:
+            f.write(bytes(hdr) + bytes(bgra))
+
+    effect_dds, other_dds = os.path.join(TEST, 'effect_blue64.dds'), os.path.join(TEST, 'effect_other.dds')
+    write_dds(effect_dds, (0x40, 0, 0, 0xFF))  # the harness effect's texture
+    write_dds(other_dds, (0x40, 0x40, 0, 0xFF))
+    ground = shadow_run('night', 0, 'none', night)[0].get('lit', 0)
+    lit_effect = ground + 64 * scale
+    for overlay, label, ini, expect, name in (
+            ('effect', 'all', 'LitEffectTextures=*\n', lit_effect, 'additive effect at night, every effect listed (*)'),
+            ('effect', 'listed', f'LitEffectTextures={other_dds}; {effect_dds}\n', lit_effect,
+             'additive effect at night, its texture listed'),
+            ('effectlit', 'all', 'LitEffectTextures=*\n', lit_effect,
+             'additive effect lit with an emissive-only material, at night'),
+            ('effect', 'unlisted', f'LitEffectTextures={other_dds}\n', ground + 64,
+             'additive effect at night, its texture not listed: unchanged'),
+            ('effect', 'none', '', ground + 64, 'additive effect at night, nothing listed (the default): unchanged'),
+            ('effectmul', 'all', 'LitEffectTextures=*\n', ground * 191 / 255,
+             'multiplying effect (a sandstorm\'s shade) at night: unchanged'),
+            ('effectui', 'all', 'LitEffectTextures=*\n', ground + 64,
+             'additive draw through an orthographic camera (the interface) at night: unchanged')):
+        v, elog = shadow_run(label, 0, overlay, night + ini)
+        check(abs(v.get('lit', 0) - expect) <= 4 and v.get('restored') == 1 and v['released'],
+              f"{name} ({v.get('lit')}, expected {expect:.0f} over the ground's {ground}); game state restored")
+        if label == 'listed':
+            check('LitEffectTextures: ' + effect_dds + ': 1 texture' in elog and
+                  'first effect taking the light (blend 5/2, lighting 0' in elog,
+                  'the listed effect texture found and logged; the first effect taking the light logged')
+
     # The baked terrain light comes from the SunLight.nif the game uses (the running mod's first) for the BakedTerrain*
     # settings left out. Here a mod's light like Realism Invictus's (sun 255,235,188) from a direction 0.8 up: the
     # night road above is then (50 + 90 x 0.707) / (133 + 0.999 x 188 x 0.8) of 173.
@@ -641,13 +681,21 @@ def main():
     # Hotkeys written as keys: letters (any case), F-keys, numpad, names, hex codes, empty = none, junk = none + warning.
     keys_ini = ('[water]\nToggleKey=Numpad5\n[shadows]\nToggleKey=F11\n[lighting]\nToggleKey=\nLightCycleToggleKey=f12\n'
                 '[reflection]\nToggleKey=0x4C\nOverlayToggleKey=PrintScreen\n[ghost]\nToggleKey=bogus\n'
-                '[debug]\nTraces=1\n[trace]\nKey=t\n')
+                '[textures]\nToggleKey=Home\n[debug]\nTraces=1\n[trace]\nKey=t\n')
     light_run('keys', keys_ini)
     klog = open(os.path.join(TEST, 'light_keys', 'out', 'test_proxy', 'session.log'), encoding='latin-1').read()
-    expect_keys = ('water Numpad5, shadows F11, lighting none, light cycle F12, reflection L, reflection overlay '
-                   'PrintScreen, shadow overlay none, ghost none, trace T')
+    expect_keys = ('water Numpad5, shadows F11, lighting none, light cycle F12, filtering Home, reflection L, '
+                   'reflection overlay PrintScreen, shadow overlay none, ghost none, trace T')
     check(expect_keys in klog and "[ghost] ToggleKey=bogus isn't a key" in klog,
-          f'hotkeys written as keys (t, F11, f12, Numpad5, PrintScreen, 0x4C, empty, a bogus name) read as {expect_keys}')
+          f'hotkeys written as keys (t, F11, f12, Numpad5, Home, PrintScreen, 0x4C, empty, a bogus name) read as '
+          f'{expect_keys}')
+    # Anisotropic filtering: on by default at the INI's 8 (or the card's most, if less); Anisotropy=1 turns it off.
+    alog = open(os.path.join(TEST, 'light_keys', 'out', 'test_proxy', 'session.log'), encoding='latin-1').read()
+    light_run('noaniso', '[textures]\nAnisotropy=1\n')
+    olog = open(os.path.join(TEST, 'light_noaniso', 'out', 'test_proxy', 'session.log'), encoding='latin-1').read()
+    check(re.search(r'anisotropic filtering: x[2-8] \(Anisotropy=8', alog) is not None and
+          'anisotropic filtering: off (Anisotropy=1' in olog,
+          'anisotropic filtering: on at Anisotropy=8 (capped by the card), off at Anisotropy=1')
 
     # Buildings: fixed-function lights (a directional light and D3DRS_AMBIENT) take the Building colours.
     for label, ini, expect, what in (
@@ -1145,6 +1193,10 @@ def main():
           'proxy file version = system d3d9.dll file version')
     check('first call: IDirect3D9::GetDeviceCaps' in log or 'first call: IDirect3DDevice9::SetStreamSource' in log,
           'first-call logging')
+    # The game checks formats thousands of times at startup: IDirect3D9's calls too are logged once each.
+    repeated = re.findall(r'\] call: \S+', log)
+    check(not repeated and 'first call: IDirect3D9::' in log,
+          f"IDirect3D9 calls logged only the first time, so the log stays short ({len(repeated)} repeated call lines)")
 
     print('shader dumps:')
     for kind, hdr in (('vs_2_0', 'test_vs.h'), ('ps_2_0', 'test_ps.h')):
