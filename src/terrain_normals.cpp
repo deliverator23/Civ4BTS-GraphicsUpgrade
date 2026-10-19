@@ -1,5 +1,6 @@
 #include "terrain_normals.h"
 #include "overlay.h"
+#include "perf.h"
 #include "hill_shadow_ps.h"
 #include "hill_shadow_vs.h"
 
@@ -19,6 +20,7 @@ void TerrainNormals::Capture(const ShaderInfo& vs)
         vb->Release();
         return;
     }
+    const double readStart = Perf::Now();
     D3DVERTEXBUFFER_DESC d = {};
     vb->GetDesc(&d);
     void* data = nullptr;
@@ -66,12 +68,26 @@ void TerrainNormals::Capture(const ShaderInfo& vs)
             vb->Release();
             return;
         }
-        m_spacing = step;
-        m_heights.assign(kCells * kCells, std::numeric_limits<float>::quiet_NaN());
-        m_normals.assign(kCells * kCells, 0x00808080);
+        m_vertexSpacing = step;
+        const float span = MapSpan(vs);
+        m_spacing = GridSpacingFor(step, span);
+        m_cells = CellsFor(m_spacing, span);
+        D3DCAPS9 caps = {};
+        while (m_cells > kMinCells && SUCCEEDED(m_dev->GetDeviceCaps(&caps)) &&
+               (caps.MaxTextureWidth < m_cells || caps.MaxTextureHeight < m_cells))
+            m_cells /= 2;
+        m_heights.assign(m_cells * m_cells, std::numeric_limits<float>::quiet_NaN());
+        m_normals.assign(m_cells * m_cells, 0x00808080);
+        char every[64] = "";
+        if (m_spacing > step * 1.5f)
+            snprintf(every, sizeof(every), " (1 in %d of the vertices, %.3f apart)", static_cast<int>(m_spacing / step + 0.5f),
+                     step);
         Log::Write("terrain normals: first terrain vertex buffer: pool %u, usage 0x%x, fvf 0x%x, stride %u, %u vertices; "
-                   "grid spacing %.3f world units (%u cells cover %.0f units, wrapping)",
-                   d.Pool, d.Usage, d.FVF, stride, count, m_spacing, kCells, m_spacing * kCells);
+                   "grid spacing %.3f world units%s (%u cells cover %.0f units, wrapping; map %.0f units across)",
+                   d.Pool, d.Usage, d.FVF, stride, count, m_spacing, every, m_cells, m_spacing * m_cells, span);
+        if (span > m_spacing * m_cells + m_spacing)
+            Log::Write("terrain normals: the map is wider than the grid; its far side shares cells with its near side "
+                       "(terrain lighting and hill shadows may be wrong there)");
     }
     int x0 = INT32_MAX, y0 = INT32_MAX, x1 = INT32_MIN, y1 = INT32_MIN;
     unsigned offGrid = 0;
@@ -81,7 +97,11 @@ void TerrainNormals::Capture(const ShaderInfo& vs)
         int cx = static_cast<int>(std::floor(fx + 0.5f)), cy = static_cast<int>(std::floor(fy + 0.5f));
         if (std::fabs(fx - cx) > 0.05f || std::fabs(fy - cy) > 0.05f)
         {
-            ++offGrid;  // not on the grid (shouldn't happen for BtS terrain); skipped
+            // Between the grid's cells: a vertex the grid skips (it keeps every 2nd, 4th... at fine spacings), or
+            // off BtS's own vertex grid altogether (which shouldn't happen).
+            const float vx = world[i * 3] / m_vertexSpacing, vy = world[i * 3 + 1] / m_vertexSpacing;
+            if (std::fabs(vx - std::floor(vx + 0.5f)) > 0.05f || std::fabs(vy - std::floor(vy + 0.5f)) > 0.05f)
+                ++offGrid;
             continue;
         }
         Height(cx, cy) = world[i * 3 + 2];
@@ -96,13 +116,72 @@ void TerrainNormals::Capture(const ShaderInfo& vs)
     if (x1 >= x0)
     {
         UpdateNormals(x0 - 1, y0 - 1, x1 + 1, y1 + 1);
-        m_heightsDirty = true;  // hill shadows: worked out again
-        m_heightTexDirty = true;  // and the height texture uploaded again
-        m_shoreDirty = true;    // and the shore worked out again
-        m_readX0 = (std::min)(m_readX0, x0), m_readY0 = (std::min)(m_readY0, y0);
-        m_readX1 = (std::max)(m_readX1, x1), m_readY1 = (std::max)(m_readY1, y1);
+        m_heightsDirty = true;            // hill shadows: worked out again
+        m_heightsNew.Add(x0, y0, x1, y1);  // these heights uploaded
+        m_shoreNew.Add(x0, y0, x1, y1);    // and the shore worked out again around them
+        m_read.Add(x0, y0, x1, y1);
     }
     vb->Release();
+    m_readSeconds += Perf::Now() - readStart;
+}
+
+template <class T, class Fill>
+bool TerrainNormals::Upload(IDirect3DTexture9* tex, const TerrainCells::Rect& r, Fill fill)
+{
+    const double start = Perf::Now();
+    bool ok = true;
+    TerrainCells::ForEachPiece(r, static_cast<int>(m_cells), [&](int gx0, int gy0, int gx1, int gy1, int tx, int ty) {
+        RECT rc = {tx, ty, tx + gx1 - gx0 + 1, ty + gy1 - gy0 + 1};
+        D3DLOCKED_RECT lr;
+        if (!ok || FAILED(tex->LockRect(0, &lr, &rc, 0)))
+        {
+            ok = false;
+            return;
+        }
+        for (int y = gy0; y <= gy1; ++y)
+        {
+            T* row = reinterpret_cast<T*>(static_cast<BYTE*>(lr.pBits) + (y - gy0) * lr.Pitch);
+            for (int x = gx0; x <= gx1; ++x)
+                row[x - gx0] = fill(x, y);
+        }
+        tex->UnlockRect(0);
+        m_uploadBytes += static_cast<double>(gx1 - gx0 + 1) * (gy1 - gy0 + 1) * sizeof(T);
+    });
+    m_uploadSeconds += Perf::Now() - start;
+    return ok;
+}
+
+float TerrainNormals::GridSpacingFor(float vertexSpacing, float mapSpan)
+{
+    float spacing = vertexSpacing;
+    while (spacing * kMaxCells < (std::max)(mapSpan, kHugeMapSpan) - 0.01f * spacing)
+        spacing *= 2;
+    return spacing;
+}
+
+UINT TerrainNormals::CellsFor(float spacing, float mapSpan)
+{
+    const float cover = (std::max)(mapSpan, kHugeMapSpan) / spacing;
+    UINT cells = kMinCells;
+    while (cells < kMaxCells && cells < cover - 0.01f)  // (a map exactly as wide as the grid fits: its edges meet)
+        cells *= 2;
+    return cells;
+}
+
+float TerrainNormals::MapSpan(const ShaderInfo& vs) const
+{
+    // mtxLightmap (float4x2, a register per column): the lightmap's uv from world xy, over the whole map. Its width
+    // is 1 / (uv per world unit) along each axis; BtS's lightmap is square, over the map's longer side.
+    const int reg = vs.Reg("mtxLightmap", 2);
+    float m[8];
+    if (reg < 0 || FAILED(m_dev->GetVertexShaderConstantF(static_cast<UINT>(reg), m, 2)))
+        return 0;
+    const float perX = std::hypot(m[0], m[4]), perY = std::hypot(m[1], m[5]);
+    float span = 0;
+    for (float per : {perX, perY})
+        if (per > 1e-7f && per < 1e-2f)  // a sane map: 100 to 10 million units across
+            span = (std::max)(span, 1 / per);
+    return span;
 }
 
 void TerrainNormals::FitDetailAxes(const BYTE* vertices, UINT count, UINT stride, const std::vector<float>& world)
@@ -190,89 +269,38 @@ void TerrainNormals::FitDetailAxes(const BYTE* vertices, UINT count, UINT stride
 
 IDirect3DTexture9* TerrainNormals::ShoreTexture(float waterHeight)
 {
-    if (m_spacing <= 0 || m_readX1 < m_readX0)
+    if (m_spacing <= 0 || m_read.Empty())
         return nullptr;
     if (!m_shoreTex)
     {
         ULONG before = DeviceRefs(m_dev);
-        if (FAILED(m_dev->CreateTexture(kCells, kCells, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &m_shoreTex, nullptr)))
+        if (FAILED(m_dev->CreateTexture(m_cells, m_cells, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &m_shoreTex, nullptr)))
         {
             m_shoreTex = nullptr;
             return nullptr;
         }
         m_internalRefs += DeviceRefs(m_dev) - before;
-        m_shoreDirty = true;
+        Upload<DWORD>(m_shoreTex, TerrainCells::Rect::Whole(m_cells), [](int, int) { return 0u; });  // unknown
+        m_shoreAll = true;
     }
-    if (!m_shoreDirty && waterHeight == m_shoreHeight)
+    // New terrain: the shore around it; a new texture or water height: around all the terrain read.
+    const bool all = m_shoreAll || waterHeight != m_shoreHeight;
+    const TerrainCells::Rect changed = all ? m_read : m_shoreNew;
+    if (changed.Empty())
         return m_shoreTex;
-    // The terrain read so far and a margin (32 cells: as far as the distance is kept), at most the whole grid.
-    const int kMargin = 32;
-    int x0 = m_readX0 - kMargin, y0 = m_readY0 - kMargin, x1 = m_readX1 + kMargin, y1 = m_readY1 + kMargin;
-    if (x1 - x0 + 1 > static_cast<int>(kCells))
-        x0 = 0, x1 = kCells - 1;
-    if (y1 - y0 + 1 > static_cast<int>(kCells))
-        y0 = 0, y1 = kCells - 1;
-    const int w = x1 - x0 + 1, h = y1 - y0 + 1;
-    // Distance to the nearest land cell: a two-pass chamfer (1 straight, 1.414 diagonally), in cells.
-    const float kFar = 1e9f, kDiagonal = 1.41421356f;
-    std::vector<float> dist(static_cast<size_t>(w) * h);
-    for (int y = 0; y < h; ++y)
-        for (int x = 0; x < w; ++x)
-        {
-            const float v = Height(x0 + x, y0 + y);
-            dist[static_cast<size_t>(y) * w + x] = !std::isnan(v) && v >= waterHeight ? 0.0f : kFar;
-        }
-    auto at = [&](int x, int y) -> float& { return dist[static_cast<size_t>(y) * w + x]; };
-    for (int y = 0; y < h; ++y)
-        for (int x = 0; x < w; ++x)
-        {
-            float& d = at(x, y);
-            if (x > 0)
-                d = (std::min)(d, at(x - 1, y) + 1);
-            if (y > 0)
-            {
-                d = (std::min)(d, at(x, y - 1) + 1);
-                if (x > 0)
-                    d = (std::min)(d, at(x - 1, y - 1) + kDiagonal);
-                if (x < w - 1)
-                    d = (std::min)(d, at(x + 1, y - 1) + kDiagonal);
-            }
-        }
-    for (int y = h - 1; y >= 0; --y)
-        for (int x = w - 1; x >= 0; --x)
-        {
-            float& d = at(x, y);
-            if (x < w - 1)
-                d = (std::min)(d, at(x + 1, y) + 1);
-            if (y < h - 1)
-            {
-                d = (std::min)(d, at(x, y + 1) + 1);
-                if (x < w - 1)
-                    d = (std::min)(d, at(x + 1, y + 1) + kDiagonal);
-                if (x > 0)
-                    d = (std::min)(d, at(x - 1, y + 1) + kDiagonal);
-            }
-        }
-    D3DLOCKED_RECT lr;
-    if (FAILED(m_shoreTex->LockRect(0, &lr, nullptr, 0)))
-        return m_shoreTex;
-    for (UINT y = 0; y < kCells; ++y)
-        memset(static_cast<BYTE*>(lr.pBits) + y * lr.Pitch, 0, kCells * 4);  // unknown everywhere else
-    auto byte = [](float v) { return static_cast<DWORD>((std::min)(255.0f, (std::max)(0.0f, v * 8.0f + 0.5f))); };
-    for (int y = 0; y < h; ++y)
-    {
-        DWORD* row = reinterpret_cast<DWORD*>(static_cast<BYTE*>(lr.pBits) + ((y0 + y) & (kCells - 1)) * lr.Pitch);
-        for (int x = 0; x < w; ++x)
-        {
-            const float v = Height(x0 + x, y0 + y);
-            if (std::isnan(v))
-                continue;
-            const DWORD r = byte(at(x, y)), g = byte(waterHeight - v);  // x 8: 32 cells / units fill the byte
-            row[(x0 + x) & (kCells - 1)] = 0xFF000000u | r << 16 | g << 8;
-        }
-    }
-    m_shoreTex->UnlockRect(0);
-    m_shoreDirty = false;
+    TerrainCells::Rect write, window;
+    TerrainCells::ShoreRects(changed, static_cast<int>(m_cells), write, window);
+    const double start = Perf::Now();
+    const std::vector<float> dist =
+        TerrainCells::ShoreDistances(window, waterHeight, [&](int x, int y) { return Height(x, y); });
+    m_uploadSeconds += Perf::Now() - start;
+    const int w = window.x1 - window.x0 + 1;
+    Upload<DWORD>(m_shoreTex, write, [&](int x, int y) {
+        return static_cast<DWORD>(TerrainCells::ShoreTexel(
+            dist[static_cast<size_t>(y - window.y0) * w + (x - window.x0)], Height(x, y), waterHeight));
+    });
+    m_shoreNew = TerrainCells::Rect();
+    m_shoreAll = false;
     m_shoreHeight = waterHeight;
     return m_shoreTex;
 }
@@ -282,7 +310,7 @@ bool TerrainNormals::EnsureHeightTexture()
     if (!m_heightTex)
     {
         ULONG before = DeviceRefs(m_dev);
-        if (FAILED(m_dev->CreateTexture(kCells, kCells, 1, 0, D3DFMT_R32F, D3DPOOL_MANAGED, &m_heightTex, nullptr)))
+        if (FAILED(m_dev->CreateTexture(m_cells, m_cells, 1, 0, D3DFMT_R32F, D3DPOOL_MANAGED, &m_heightTex, nullptr)))
         {
             m_heightTex = nullptr;
             return false;
@@ -298,26 +326,13 @@ bool TerrainNormals::EnsureHeightTexture()
         if (d3d)
             d3d->Release();
         m_internalRefs += DeviceRefs(m_dev) - before;
-        m_heightTexDirty = true;
+        m_heightsNew = TerrainCells::Rect::Whole(m_cells);
     }
-    if (m_heightTexDirty && !m_heights.empty())
-    {
-        D3DLOCKED_RECT lr;
-        if (SUCCEEDED(m_heightTex->LockRect(0, &lr, nullptr, 0)))
-        {
-            for (UINT y = 0; y < kCells; ++y)
-            {
-                float* row = reinterpret_cast<float*>(static_cast<BYTE*>(lr.pBits) + y * lr.Pitch);
-                for (UINT x = 0; x < kCells; ++x)
-                {
-                    const float v = m_heights[y * kCells + x];
-                    row[x] = std::isnan(v) ? -10000.0f : v;
-                }
-            }
-            m_heightTex->UnlockRect(0);
-            m_heightTexDirty = false;
-        }
-    }
+    if (!m_heightsNew.Empty() && !m_heights.empty() && Upload<float>(m_heightTex, m_heightsNew, [&](int x, int y) {
+            const float v = Height(x, y);
+            return std::isnan(v) ? -10000.0f : v;
+        }))
+        m_heightsNew = TerrainCells::Rect();
     return true;
 }
 
@@ -367,26 +382,50 @@ bool TerrainNormals::UpdateHills(const float* sunDirection, float darkness, cons
     float len = std::sqrt(sun[0] * sun[0] + sun[1] * sun[1] + sun[2] * sun[2]);
     for (float& v : sun)
         v /= len > 0 ? len : 1;
-    // The area: the ground in view plus a margin, as a square snapped to whole texels (and its size to 64 units) so
-    // panning doesn't make the edges shimmer. Before any view is known, the whole grid.
+    // The area: a square on the ground snapped to whole texels (and its size to 64 units), so panning doesn't make the
+    // edges shimmer: the ground in view and a quarter more, kept while the view stays inside it and isn't under half
+    // its size (zoomed in: too coarse). Small pans and the view's own wobble from frame to frame (it comes from the
+    // first draw with a camera, a terrain or a unit draw, and their matrices differ slightly) then don't make a new
+    // mask. Before any view is known, the whole grid.
     float region[3];
+    bool viewMoved;
     if (view[2] > 0)
     {
-        region[2] = std::ceil((view[2] * 1.05f + 200.0f) / 64.0f) * 64.0f;
-        const float texel = 2 * region[2] / kHillCells;
-        region[0] = std::floor(view[0] / texel) * texel;
-        region[1] = std::floor(view[1] / texel) * texel;
+        const float need = view[2] * 1.05f + 200.0f;  // the half-width the view needs covered
+        const float off = (std::max)(std::fabs(view[0] - m_hillRegion[0]), std::fabs(view[1] - m_hillRegion[1]));
+        viewMoved = off + need > m_hillRegion[2] || need < 0.5f * m_hillRegion[2];
+        if (viewMoved)
+        {
+            region[2] = std::ceil(need * 1.25f / 64.0f) * 64.0f;
+            const float texel = 2 * region[2] / kHillCells;
+            region[0] = std::floor(view[0] / texel) * texel;
+            region[1] = std::floor(view[1] / texel) * texel;
+        }
+        else
+            memcpy(region, m_hillRegion, sizeof(region));
     }
     else
-        region[0] = region[1] = region[2] = 0.5f * m_spacing * kCells;
-    // Nothing to see changed: the view still, and the sun within 0.1 degrees and the darkness within half a colour step
-    // of the mask's (the light cycle moves both a little every frame; a 0.1 degree turn moves even a long hill
-    // shadow's tip by well under a texel). The cycle at its default speed then makes a new mask a few times a second.
+    {
+        region[0] = region[1] = region[2] = 0.5f * m_spacing * m_cells;
+        viewMoved = memcmp(region, m_hillRegion, sizeof(region)) != 0;
+    }
+    // Made again only for something to see: new terrain, the view leaving the area, the sun moving more than 0.1
+    // degrees or the darkness half a colour step (the light cycle moves both a little every frame; a 0.1 degree turn
+    // moves even a long hill shadow's tip by well under a texel; at its default speed, a few new masks a second).
     const float kSunStill = 0.99999848f;  // cos 0.1 degrees
-    if (m_hillReady && !m_heightsDirty && std::fabs(darkness - m_hillDarkness) < 0.5f / 255 &&
-        sun[0] * m_hillSun[0] + sun[1] * m_hillSun[1] + sun[2] * m_hillSun[2] > kSunStill &&
-        memcmp(region, m_hillRegion, sizeof(region)) == 0)
+    int why = 0;
+    if (!m_hillReady)
+        why = kHillFirst;
+    else
+    {
+        why |= m_heightsDirty ? kHillTerrain : 0;
+        why |= viewMoved ? kHillView : 0;
+        why |= sun[0] * m_hillSun[0] + sun[1] * m_hillSun[1] + sun[2] * m_hillSun[2] > kSunStill ? 0 : kHillSun;
+        why |= std::fabs(darkness - m_hillDarkness) < 0.5f / 255 ? 0 : kHillDarkness;
+    }
+    if (!why)
         return false;
+    m_hillWhy = why;
     if (m_heightsDirty)
     {
         EnsureHeightTexture();  // the new heights uploaded (unless the waves' draping already has)
@@ -401,7 +440,7 @@ bool TerrainNormals::UpdateHills(const float* sunDirection, float darkness, cons
     if (hor > 1e-4f && tz > 0)
     {
         const float rise = 0.5f * m_spacing * tz / hor / g_config.hillShadowLength;
-        step[0] = 0.5f * tx / hor / kCells, step[1] = 0.5f * ty / hor / kCells, step[2] = rise;
+        step[0] = 0.5f * tx / hor / m_cells, step[1] = 0.5f * ty / hor / m_cells, step[2] = rise;
         step[3] = (std::min)(192.0f, std::ceil((m_maxHeight - m_minHeight) / rise) + 1);
     }
     // Soft edges: HillShadowSoftness at the foot of the slope, widening by 3% of the distance from it (a sun's
@@ -439,7 +478,7 @@ bool TerrainNormals::UpdateHills(const float* sunDirection, float darkness, cons
         m_dev->SetPixelShaderConstantF(2, known, 1);
         // Clip space, shifted half a texel so texel centres meet pixel centres; uv 0-1 over the grid.
         // uv: the heights' uv (grid convention, cell centres at (i + 0.5) / cells) at the area's corners.
-        const float d = 1.0f / kHillCells, gs = 1.0f / (m_spacing * kCells), go = 0.5f / kCells;
+        const float d = 1.0f / kHillCells, gs = 1.0f / (m_spacing * m_cells), go = 0.5f / m_cells;
         const float u0 = (region[0] - region[2]) * gs + go, u1 = (region[0] + region[2]) * gs + go;
         const float v0 = (region[1] - region[2]) * gs + go, v1 = (region[1] + region[2]) * gs + go;
         struct V
@@ -474,7 +513,7 @@ void TerrainNormals::UpdateNormals(int x0, int y0, int x1, int y1)
         for (int cx = x0; cx <= x1; ++cx)
         {
             float h = Height(cx, cy);
-            DWORD& out = m_normals[(cy & (kCells - 1)) * kCells + (cx & (kCells - 1))];
+            DWORD& out = m_normals[(cy & (m_cells - 1)) * m_cells + (cx & (m_cells - 1))];
             if (std::isnan(h))
             {
                 out = 0x00808080;  // unknown: alpha 0
@@ -493,7 +532,7 @@ void TerrainNormals::UpdateNormals(int x0, int y0, int x1, int y1)
                 c[k] = static_cast<DWORD>((std::max)(0.0f, (std::min)(255.0f, (n[k] / len * 0.5f + 0.5f) * 255.0f + 0.5f)));
             out = 0xFF000000u | (c[0] << 16) | (c[1] << 8) | c[2];
         }
-    m_dirty = true;
+    m_normalsNew.Add(x0, y0, x1, y1);
 }
 
 IDirect3DTexture9* TerrainNormals::Texture()
@@ -503,23 +542,14 @@ IDirect3DTexture9* TerrainNormals::Texture()
     if (!m_tex)
     {
         ULONG before = DeviceRefs(m_dev);
-        if (FAILED(m_dev->CreateTexture(kCells, kCells, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &m_tex, nullptr)))
+        if (FAILED(m_dev->CreateTexture(m_cells, m_cells, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &m_tex, nullptr)))
             return nullptr;
         m_internalRefs += DeviceRefs(m_dev) - before;
-        m_dirty = true;
+        m_normalsNew = TerrainCells::Rect::Whole(m_cells);
     }
-    if (m_dirty)
-    {
-        // Whole upload (4 MB): only while new terrain comes into view.
-        D3DLOCKED_RECT lr;
-        if (SUCCEEDED(m_tex->LockRect(0, &lr, nullptr, 0)))
-        {
-            for (UINT y = 0; y < kCells; ++y)
-                memcpy(static_cast<BYTE*>(lr.pBits) + y * lr.Pitch, &m_normals[y * kCells], kCells * 4);
-            m_tex->UnlockRect(0);
-        }
-        m_dirty = false;
-    }
+    // Just the cells new terrain changed (all of them for a new texture: 4 MB at 1024 cells, 16 MB at 2048).
+    if (!m_normalsNew.Empty() && Upload<DWORD>(m_tex, m_normalsNew, [&](int x, int y) { return m_normals[Index(x, y)]; }))
+        m_normalsNew = TerrainCells::Rect();
     return m_tex;
 }
 
@@ -562,9 +592,7 @@ void TerrainNormals::ReleaseAll()
     m_hillTex = nullptr;
     m_hillState = nullptr;
     m_heightTex = nullptr;
-    m_heightTexDirty = true;
-    m_shoreTex = nullptr;
-    m_shoreDirty = true;
+    m_shoreTex = nullptr;  // (each made again, with all of its cells, on use)
     m_hillVs = nullptr;
     m_hillPs = nullptr;
     m_hillReady = false;

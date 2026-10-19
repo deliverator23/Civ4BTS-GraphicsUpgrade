@@ -14,6 +14,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -36,6 +37,10 @@
 #include "water_shore_ps.h"
 #include "water_shore_vs.h"
 #include "water_vs.h"
+
+#include "../src/terrain_cells.h"
+#include "../src/terrain_patch.h"
+#include "../src/terrain_sets.h"
 
 #define CHECK(expr)                                                                                                \
     do                                                                                                             \
@@ -538,6 +543,10 @@ static int WaterScene(IDirect3DDevice9* dev, int frames)
 //                    z = 0.2 x: the proxy reads its heights for per-pixel lighting (traces save terrain_normals.bmp)
 //   ridge            the same grid, flat but for a 300-high ridge along x = 0: with the sun going towards -x, the
 //                    ridge shades the ground at x = -250 (hill shadows); adds " hill=." (blue at (-250,0))
+//   finemap          instead of the quad, three small terrain chunks 1024 grid cells apart at spacing 11.25 (High
+//                    Detail Terrain): the proxy's height grid must keep them apart (traces save terrain_heights.bin)
+//   widemap          the same at spacing 22.5, with mtxLightmap over a map 256 plots across
+//   ultramap         the same with 9x9 chunks of vertices 2.8125 apart: the grid keeps 1 vertex in 4
 //   vanish           no extra draws; frame 4 (after the Reset) draws nothing at all (a full-screen menu) and frame 5
 //                    has no caster: the ground mustn't show frame 3's shadow
 //   effect           a fixed-function additive effect (SRCALPHA/ONE, blue 64) over everything (depth test off), unlit,
@@ -677,6 +686,8 @@ static int ShadowScene(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS& pp, int fra
                building = wcscmp(overlay, L"building") == 0, ridge = wcscmp(overlay, L"ridge") == 0,
                vanish = wcscmp(overlay, L"vanish") == 0, waterOverlay = wcscmp(overlay, L"water") == 0,
                slope = wcscmp(overlay, L"slope") == 0 || ridge,
+               wideMap = wcscmp(overlay, L"widemap") == 0, ultraMap = wcscmp(overlay, L"ultramap") == 0,
+               fineMap = wcscmp(overlay, L"finemap") == 0 || wideMap || ultraMap,
                effectLit = wcscmp(overlay, L"effectlit") == 0, effectMul = wcscmp(overlay, L"effectmul") == 0,
                effectUi = wcscmp(overlay, L"effectui") == 0,
                effect = wcscmp(overlay, L"effect") == 0 || effectLit || effectMul || effectUi;
@@ -712,6 +723,35 @@ static int ShadowScene(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS& pp, int fra
         CHECK(slopeIb->Lock(0, 0, &p, 0));
         memcpy(p, idx, sizeof(idx));
         slopeIb->Unlock();
+    }
+    // finemap / widemap: three 5x5 terrain chunks (a vertex buffer each, placed by mtxWorld) exactly 1024 grid cells
+    // apart, at (0,0), (1024 cells, 0) and (0, 1024 cells), flat at heights 10, 20 and 30. finemap: spacing 11.25,
+    // as with "High Detail Terrain", no mtxLightmap; widemap: spacing 22.5, mtxLightmap over a map 256 plots (46,080
+    // units) across. Either way the proxy's grid must keep the three apart (traces save terrain_heights.bin).
+    // ultramap: 9x9 chunks of vertices 2.8125 apart (the 65-sample terrain patch with High Detail Terrain): the grid
+    // keeps 1 vertex in 4 (11.25 apart) so a Huge map still fits, and the chunks are 1024 of those cells apart.
+    const float fineSpacing = wideMap ? 22.5f : ultraMap ? 2.8125f : 11.25f, fineHeights[3] = {10, 20, 30};
+    const float gridSpacing = ultraMap ? 11.25f : fineSpacing;
+    const int fineN = ultraMap ? 9 : 5;
+    const float fineAt[3][2] = {{0, 0}, {1024 * gridSpacing, 0}, {0, 1024 * gridSpacing}};
+    IDirect3DVertexBuffer9* fineVb[3] = {};
+    for (int c = 0; fineMap && c < 3; ++c)
+    {
+        float verts[81][7];
+        for (int y = 0; y < fineN; ++y)
+            for (int x = 0; x < fineN; ++x)
+            {
+                const float u = x / (fineN - 1.0f), v = y / (fineN - 1.0f);
+                const float vert[7] = {fineSpacing * (x - fineN / 2), fineSpacing * (y - fineN / 2), fineHeights[c], u,
+                                       1 - v, u, 1 - v};
+                memcpy(verts[y * fineN + x], vert, sizeof(vert));
+            }
+        void* p = nullptr;
+        const UINT bytes = static_cast<UINT>(fineN * fineN * sizeof(verts[0]));  // just the chunk's vertices
+        CHECK(dev->CreateVertexBuffer(bytes, D3DUSAGE_WRITEONLY, 0, D3DPOOL_MANAGED, &fineVb[c], nullptr));
+        CHECK(fineVb[c]->Lock(0, 0, &p, 0));
+        memcpy(p, verts, bytes);
+        fineVb[c]->Unlock();
     }
     IDirect3DVertexShader9* riverVs = nullptr;
     IDirect3DPixelShader9* riverPs = nullptr;
@@ -863,6 +903,24 @@ static int ShadowScene(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS& pp, int fra
             CHECK(dev->DrawIndexedPrimitive(D3DPT_TRIANGLELIST, 0, 0, 25, 0, 32));
             CHECK(dev->SetStreamSource(0, nullptr, 0, 0));
             CHECK(dev->SetIndices(nullptr));
+        }
+        else if (fineMap)
+        {
+            if (wideMap)
+            {
+                // mtxLightmap (a register per column): u = x / 46080 + 0.25, v = -y / 46080 + 0.75, like BtS's
+                const float lightmap[8] = {1 / 46080.0f, 0, 0, 0.25f, 0, -1 / 46080.0f, 0, 0.75f};
+                CHECK(dev->SetVertexShaderConstantF(9, lightmap, 2));
+            }
+            for (int c = 0; c < 3; ++c)
+            {
+                const float placed[12] = {1, 0, 0, fineAt[c][0], 0, 1, 0, fineAt[c][1], 0, 0, 1, 0};
+                CHECK(dev->SetVertexShaderConstantF(4, placed, 3));
+                CHECK(dev->SetStreamSource(0, fineVb[c], 0, 28));
+                CHECK(dev->DrawPrimitive(D3DPT_TRIANGLELIST, 0, 8));  // (some of the grid: only its heights matter)
+            }
+            CHECK(dev->SetStreamSource(0, nullptr, 0, 0));
+            CHECK(dev->SetVertexShaderConstantF(4, world, 3));
         }
         else
             CHECK(dev->DrawPrimitiveUP(D3DPT_TRIANGLELIST, 2, quad, 28));
@@ -1305,6 +1363,9 @@ static int ShadowScene(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS& pp, int fra
         slopeVb->Release();
     if (slopeIb)
         slopeIb->Release();
+    for (IDirect3DVertexBuffer9* vb : fineVb)
+        if (vb)
+            vb->Release();
     for (IUnknown* o : {static_cast<IUnknown*>(riverVs), static_cast<IUnknown*>(riverPs), static_cast<IUnknown*>(riverDecl),
                         static_cast<IUnknown*>(overlayTex[0]), static_cast<IUnknown*>(overlayTex[1]),
                         static_cast<IUnknown*>(overlayTex[2])})
@@ -2181,8 +2242,240 @@ static int WaterCompareScene(IDirect3DDevice9* dev, const std::wstring& colDir)
     return 0;
 }
 
+// test_proxy terrainpatch: TerrainPatch::Apply on a fake exe image holding BtS's bytes at the patch sites. Prints
+// "TERRAINPATCH name=0/1 ..." for run_tests.py.
+static int TerrainPatchTest()
+{
+    const size_t size = 0xbb000;
+    std::vector<uint8_t> stock(size, 0xcc);
+    for (const auto& site : TerrainPatch::Sites(33))
+        memcpy(stock.data() + site.rva, site.original.data(), site.original.size());
+    auto run = [&](std::vector<uint8_t>& image, int verts, int& writes) {
+        writes = 0;
+        return TerrainPatch::Apply(image.data(), image.size(), verts, [&](uint32_t rva, const uint8_t* b, size_t n) {
+            memcpy(image.data() + rva, b, n);
+            ++writes;
+        });
+    };
+    int writes = 0;
+    // 33: all seven sites rewritten, nothing else touched
+    std::vector<uint8_t> img = stock;
+    std::string why = run(img, 33, writes);
+    const uint8_t want[][6] = {{0xba, 0x21, 0, 0, 0}, {0xc1, 0xe9, 5}, {0xc1, 0xe8, 5}, {0xc1, 0xe0, 5},
+                               {0xb8, 0x20, 0, 0, 0}, {0xc1, 0xe0, 5}, {0xb8, 0x20, 0, 0, 0}};
+    const uint32_t rvas[] = {0xba862, 0xba884, 0xba887, 0x78db3, 0x78dc4, 0x78ef3, 0x78f04};
+    const size_t lens[] = {5, 3, 3, 3, 5, 3, 5};
+    bool bytes33 = why.empty() && writes == 7;
+    size_t changed = 0;
+    for (size_t i = 0; i < size; ++i)
+        changed += img[i] != stock[i];
+    for (int k = 0; k < 7; ++k)
+        bytes33 = bytes33 && memcmp(img.data() + rvas[k], want[k], lens[k]) == 0;
+    // the same again: already patched, nothing written, success
+    std::string again = run(img, 33, writes);
+    const bool idempotent = again.empty() && writes == 0;
+    // 65: shift 6, sizes 65 and 64
+    std::vector<uint8_t> img65 = stock;
+    run(img65, 65, writes);
+    const bool v65 = writes == 7 && img65[0xba863] == 65 && img65[0xba886] == 6 && img65[0x78dc5] == 64;
+    // one byte different (another build): refused, nothing written
+    std::vector<uint8_t> other = stock;
+    other[0x78f05] = 0x11;
+    std::string refusedWhy = run(other, 33, writes);
+    const bool refused = !refusedWhy.empty() && writes == 0 && other == [&] {
+        std::vector<uint8_t> o = stock;
+        o[0x78f05] = 0x11;
+        return o;
+    }();
+    // an image too small for the sites: refused
+    std::vector<uint8_t> tiny(0x1000, 0);  // ("small" is a Windows header macro)
+    const bool tooSmall = !run(tiny, 33, writes).empty() && writes == 0;
+    // unsupported values refused; 17 does nothing
+    std::vector<uint8_t> img20 = stock, img17 = stock;
+    const bool bad = !run(img20, 20, writes).empty() && writes == 0 && img20 == stock;
+    const bool stock17 = run(img17, 17, writes).empty() && writes == 0 && img17 == stock;
+    // The landscape's cell values as the patch gives them (the XML's iGameCellSize unused; plots per cell at most so
+    // many that a cell stays within 129 samples across)
+    auto cellsAre = [](int verts, int xmlPlots, int samples, int plots, int vertCnt) {
+        const TerrainPatch::CellValues c = TerrainPatch::Cells(verts, xmlPlots);
+        return c.samples == samples && c.plots == plots && c.vertCnt == vertCnt;
+    };
+    const bool cells = cellsAre(33, 4, 33, 4, 129) && cellsAre(65, 4, 65, 2, 129) && cellsAre(65, 2, 65, 2, 129) &&
+                       cellsAre(17, 4, 17, 4, 65) && cellsAre(65, 1, 65, 1, 65) && cellsAre(33, 8, 33, 4, 129) &&
+                       TerrainPatch::CellImports().size() == 6;
+    printf("TERRAINPATCH bytes33=%d changed=%zu idempotent=%d v65=%d refused=%d toosmall=%d bad=%d stock17=%d cells=%d\n",
+           bytes33, changed, idempotent, v65, refused, tooSmall, bad, stock17, cells);
+    printf("TERRAINPATCH refusal: %s\n", refusedWhy.c_str());
+    return 0;
+}
+
+// test_proxy terraincells: the terrain grid's partial updates (terrain_cells.h) against doing everything. Prints
+// "TERRAINCELLS pieces=0/1 shore=0/1 shoreall=0/1 steps=N seam=N".
+static int TerrainCellsTest()
+{
+    using namespace TerrainCells;
+    unsigned seed = 12345;
+    auto rnd = [&](int n) {
+        seed = seed * 1103515245u + 12345u;
+        return static_cast<int>((seed >> 8) % static_cast<unsigned>(n));
+    };
+    // Every texel a rectangle covers (wrapped, at most one grid across) written once, at its own place.
+    const int g = 64, gm = g - 1;
+    bool pieces = true;
+    for (int t = 0; t < 400 && pieces; ++t)
+    {
+        Rect r;
+        const int x0 = rnd(300) - 150, y0 = rnd(300) - 150;
+        r.Add(x0, y0, x0 + rnd(100), y0 + rnd(100));
+        std::vector<int> hits(g * g, 0);
+        ForEachPiece(r, g, [&](int gx0, int gy0, int gx1, int gy1, int tx, int ty) {
+            pieces = pieces && tx + gx1 - gx0 < g && ty + gy1 - gy0 < g;
+            for (int y = gy0; y <= gy1; ++y)
+                for (int x = gx0; x <= gx1; ++x)
+                {
+                    pieces = pieces && (x & gm) == tx + x - gx0 && (y & gm) == ty + y - gy0;
+                    ++hits[(y & gm) * g + (x & gm)];
+                }
+        });
+        const Rect c = ClampToGrid(r, g);
+        for (int ty = 0; ty < g; ++ty)
+            for (int tx = 0; tx < g; ++tx)
+            {
+                const bool covered = ((tx - c.x0) & gm) <= c.x1 - c.x0 && ((ty - c.y0) & gm) <= c.y1 - c.y0;
+                pieces = pieces && hits[ty * g + tx] == (covered ? 1 : 0);
+            }
+    }
+    // The shore, updated around each new chunk of terrain (land and sea, some across the grid's seam), against
+    // working out everything read and 32 cells round it, as it used to be.
+    const int n = 256, nm = n - 1;
+    std::vector<float> heights(n * n, std::numeric_limits<float>::quiet_NaN());
+    auto height = [&](int x, int y) { return heights[(y & nm) * n + (x & nm)]; };
+    std::vector<uint32_t> tex(n * n, 0);
+    Rect read;
+    float water = 49.5f;
+    auto incremental = [&](const Rect& changed) {
+        Rect write, window;
+        ShoreRects(changed, n, write, window);
+        const std::vector<float> dist = ShoreDistances(window, water, height);
+        const int w = window.x1 - window.x0 + 1;
+        ForEachPiece(write, n, [&](int gx0, int gy0, int gx1, int gy1, int, int) {
+            for (int y = gy0; y <= gy1; ++y)
+                for (int x = gx0; x <= gx1; ++x)
+                    tex[(y & nm) * n + (x & nm)] =
+                        ShoreTexel(dist[static_cast<size_t>(y - window.y0) * w + (x - window.x0)], height(x, y), water);
+        });
+    };
+    auto reference = [&]() {
+        std::vector<uint32_t> ref(n * n, 0);
+        const Rect win = {read.x0 - kShoreKeep, read.y0 - kShoreKeep, read.x1 + kShoreKeep, read.y1 + kShoreKeep};
+        const std::vector<float> dist = ShoreDistances(win, water, height);
+        const int w = win.x1 - win.x0 + 1;
+        for (int y = win.y0; y <= win.y1; ++y)
+            for (int x = win.x0; x <= win.x1; ++x)
+                if (!std::isnan(height(x, y)))
+                    ref[(y & nm) * n + (x & nm)] =
+                        ShoreTexel(dist[static_cast<size_t>(y - win.y0) * w + (x - win.x0)], height(x, y), water);
+        return ref;
+    };
+    bool shore = true;
+    int steps = 0, seam = 0;
+    for (; steps < 16; ++steps)
+    {
+        Rect c;
+        const int x0 = rnd(140) - 40, y0 = rnd(140) - 40;
+        c.Add(x0, y0, x0 + 2 + rnd(18), y0 + 2 + rnd(18));
+        seam += c.x0 < 0 || c.y0 < 0;
+        for (int y = c.y0; y <= c.y1; ++y)
+            for (int x = c.x0; x <= c.x1; ++x)
+                heights[(y & nm) * n + (x & nm)] = water + static_cast<float>(rnd(41) - 20);
+        read.Add(c);
+        incremental(c);
+        shore = shore && tex == reference();
+    }
+    water = 55.0f;  // the water rising: everything read worked out again
+    incremental(read);
+    const bool shoreAll = tex == reference();
+    printf("TERRAINCELLS pieces=%d shore=%d shoreall=%d steps=%d seam=%d\n", pieces, shore, shoreAll, steps, seam);
+    return 0;
+}
+
+// test_proxy tilesets: terrain tile sets' logic and patch sites (terrain_sets.h). Prints "TILESETS name=0/1 ...".
+static int TileSetsTest()
+{
+    using namespace TileSets;
+    auto range = [](int count, int sets, int set, int lo, int size) {
+        const Range r = SetRange(count, sets, set);
+        return r.lo == lo && r.size == size;
+    };
+    const bool ranges = range(8, 2, 0, 0, 4) && range(8, 2, 1, 4, 4) && range(7, 2, 1, 3, 3) && range(1, 2, 1, 0, 1) &&
+                        range(8, 1, 0, 0, 8) && range(6, 3, 2, 4, 2) && range(2, 3, 1, 0, 2);
+    const int v1[4] = {1, 1, 0, -1}, v2[4] = {0, 1, -1, -1}, v3[4] = {-1, -1, -1, -1}, v4[4] = {1, 1, 0, 0},
+              v5[4] = {2, 2, 1, -1}, v6[4] = {-1, 1, -1, -1};
+    const bool majority = Majority(v1, 2) == 1 && Majority(v2, 2) == 0 && Majority(v3, 2) == 0 &&
+                          Majority(v4, 2) == 0 && Majority(v5, 3) == 2 && Majority(v6, 2) == 1;
+    int c[4][2];
+    Corners(5, 3, 10, c);
+    const bool corners = c[0][0] == 4 && c[0][1] == 7 && c[1][0] == 5 && c[1][1] == 7 && c[2][0] == 5 &&
+                         c[2][1] == 6 && c[3][0] == 4 && c[3][1] == 6;
+    const bool seed = Seed(1, 1) == 0x1C81u + 0xB5Du && Seed(3, 0) == 3u * 0x1C81u;
+    // The sites on a fake image: rewritten with JMP / CALL to the thunks only when every one holds BtS's bytes.
+    const uint32_t base = 0x400000, picker = 0x10001000, hill = 0x10002000, peak = 0x10003000, atlas = 0x10004000,
+                   wave = 0x10005000;
+    const auto sites = Sites(base, picker, hill, peak, atlas, wave);
+    std::vector<uint8_t> stock(0x220000, 0xcc);
+    for (const auto& s : sites)
+        memcpy(stock.data() + s.rva, s.original.data(), s.original.size());
+    auto rel = [&](const std::vector<uint8_t>& img, uint32_t at) {
+        int32_t r;
+        memcpy(&r, img.data() + at, 4);
+        return r;
+    };
+    std::vector<uint8_t> img = stock;
+    int writes = 0;
+    auto write = [&](std::vector<uint8_t>& im) {
+        return [&](uint32_t rva, const uint8_t* b, size_t n) { memcpy(im.data() + rva, b, n), ++writes; };
+    };
+    const std::string why = TerrainPatch::ApplySites(img.data(), img.size(), sites, write(img));
+    // the coast index's two calls: still to FUN_004788e0 before (the original bytes), to the thunks after
+    const bool callsBefore = stock[kAtlasCall] == 0xE8 &&
+                             rel(stock, kAtlasCall + 1) == static_cast<int32_t>(base + kCoastClassFn - (base + kAtlasCall + 5)) &&
+                             rel(stock, kWaveCall + 1) == static_cast<int32_t>(base + kCoastClassFn - (base + kWaveCall + 5));
+    bool patched = why.empty() && writes == 5 && callsBefore && img[kPicker] == 0xE9 &&
+                   rel(img, kAtlasCall + 1) == static_cast<int32_t>(atlas - (base + kAtlasCall + 5)) &&
+                   rel(img, kWaveCall + 1) == static_cast<int32_t>(wave - (base + kWaveCall + 5)) &&
+                   rel(img, kPicker + 1) == static_cast<int32_t>(picker - (base + kPicker + 5)) && img[kHills] == 0xE8 &&
+                   rel(img, kHills + 1) == static_cast<int32_t>(hill - (base + kHills + 5)) && img[kPeaks] == 0x56 &&
+                   img[kPeaks + 1] == 0xE8 && rel(img, kPeaks + 2) == static_cast<int32_t>(peak - (base + kPeaks + 6));
+    for (int k = 0; k < 5; ++k)
+        patched = patched && img[kHills + 5 + k] == 0x90 && img[kPeaks + 6 + k] == 0x90;
+    std::vector<uint8_t> other = stock;
+    other[kPeaks + 3] = 0x75;  // another list address: another build
+    writes = 0;
+    const std::string refusal = TerrainPatch::ApplySites(other.data(), other.size(), sites, write(other));
+    std::vector<uint8_t> otherStock = stock;
+    otherStock[kPeaks + 3] = 0x75;
+    const bool refused = !refusal.empty() && writes == 0 && other == otherStock;
+    // coast variants folded into the art: stock 8, 8, 6, 7; a class's art never past the atlas's 8, 8, 8, 7 cells
+    const int stockArt[4] = {8, 8, 6, 7}, bigArt[4] = {20, 20, 20, 20};
+    const bool cycle = CycleIndex(5, 1, stockArt) == 5 && CycleIndex(9, 2, stockArt) == 1 &&   // one corner: 9 % 8
+                       CycleIndex(6, 5, stockArt) == 0 && CycleIndex(7, 10, stockArt) == 1 &&  // diagonal: % 6
+                       CycleIndex(7, 7, stockArt) == 0 && CycleIndex(13, 14, stockArt) == 6 && // three: % 7
+                       CycleIndex(9, 9, stockArt) == 1 && CycleIndex(3, 15, stockArt) == 3 &&  // 15: not a coast
+                       CycleIndex(10, 5, bigArt) == 2 && CycleIndex(10, 11, bigArt) == 3;      // atlas caps 8 and 7
+    printf("TILESETS ranges=%d majority=%d corners=%d seed=%d patched=%d refused=%d cycle=%d\n", ranges, majority,
+           corners, seed, patched, refused, cycle);
+    printf("TILESETS refusal: %s\n", refusal.c_str());
+    return 0;
+}
+
 int wmain(int argc, wchar_t** argv)
 {
+    if (argc > 1 && wcscmp(argv[1], L"terrainpatch") == 0)
+        return TerrainPatchTest();
+    if (argc > 1 && wcscmp(argv[1], L"tilesets") == 0)
+        return TileSetsTest();
+    if (argc > 1 && wcscmp(argv[1], L"terraincells") == 0)
+        return TerrainCellsTest();
     // A trailing mod=<folder> is for the proxy, which reads the command line itself (the way BtS is started with a mod)
     while (argc > 2 && _wcsnicmp(argv[argc - 1], L"mod=", 4) == 0)
         --argc;

@@ -1,5 +1,6 @@
 #include "perf.h"
 
+#include <algorithm>
 #include <cstdio>
 
 Perf::Perf(IDirect3DDevice9* device) : m_dev(device)
@@ -64,6 +65,7 @@ void Perf::StartFrame()
 {
     const double now = Now();
     m_frameSeconds += now - m_lastPresent;
+    m_worstFrame = (std::max)(m_worstFrame, now - m_lastPresent);
     m_lastPresent = now;
     ++m_frames;
     if (!EnsureQueries())
@@ -125,22 +127,27 @@ void Perf::Collect(Slot& s, bool wait)
 
 std::string Perf::Summary()
 {
-    char buf[512];
+    char buf[768];
     const double frames = m_frames ? m_frames : 1;
     const double ours = (m_drawSeconds - m_gameDrawSeconds + m_presentSeconds) * 1000.0 / frames;
     int n = snprintf(buf, sizeof(buf),
-                     "timing over %u frames: frame %.2f ms; GraphicsUpgrade CPU %.3f ms a frame (draws %.3f, Present "
-                     "%.3f); hill shadow mask made %u times",
-                     m_frames, m_frameSeconds * 1000.0 / frames, ours,
+                     "timing over %u frames: frame %.2f ms (worst %.1f); GraphicsUpgrade CPU %.3f ms a frame (draws "
+                     "%.3f, Present %.3f; new terrain: read %.3f, textures %.3f, %.1f MB written); hill shadow mask "
+                     "made %u times (first %u, new terrain %u, sun %u, darkness %u, view %u)",
+                     m_frames, m_frameSeconds * 1000.0 / frames, m_worstFrame * 1000.0, ours,
                      (m_drawSeconds - m_gameDrawSeconds) * 1000.0 / frames, m_presentSeconds * 1000.0 / frames,
-                     m_hillBuilds);
+                     m_terrainRead * 1000.0 / frames, m_terrainUpload * 1000.0 / frames, m_terrainBytes / 1048576.0,
+                     m_hillBuilds, m_hillWhy[0], m_hillWhy[1], m_hillWhy[2], m_hillWhy[3], m_hillWhy[4]);
     static const char* const kNames[kPasses] = {"hill shadow mask", "shadow blur"};
     if (m_gpu)
         for (int p = 0; p < kPasses && n > 0 && n < static_cast<int>(sizeof(buf)); ++p)
             n += snprintf(buf + n, sizeof(buf) - n, m_gpuCount[p] ? "; GPU %s %.3f ms each" : "; GPU %s: no results",
                           kNames[p], m_gpuCount[p] ? m_gpuMs[p] / m_gpuCount[p] : 0.0);
     m_frames = m_hillBuilds = 0;
-    m_frameSeconds = m_drawSeconds = m_gameDrawSeconds = m_presentSeconds = 0;
+    for (unsigned& w : m_hillWhy)
+        w = 0;
+    m_frameSeconds = m_drawSeconds = m_gameDrawSeconds = m_presentSeconds = m_worstFrame = 0;
+    m_terrainRead = m_terrainUpload = m_terrainBytes = 0;
     for (int p = 0; p < kPasses; ++p)
         m_gpuMs[p] = 0, m_gpuCount[p] = 0;
     return buf;

@@ -134,7 +134,10 @@ bool Waves::Draw(const std::function<HRESULT()>& draw, HRESULT& hr)
     m_dev->GetPixelShader(&oldPs);
     float oldLight[4];
     m_dev->GetPixelShaderConstantF(0, oldLight, 1);
-    const float lightNow[4] = {light ? light[0] : 1.0f, light ? light[1] : 1.0f, light ? light[2] : 1.0f, 1};
+    // [water] FoamLight of the change of light: 0 = the white BtS draws, 1 = all of it, as the roads take it.
+    const float k = g_config.foamLight;
+    const float lightNow[4] = {light ? 1 + (light[0] - 1) * k : 1.0f, light ? 1 + (light[1] - 1) * k : 1.0f,
+                               light ? 1 + (light[2] - 1) * k : 1.0f, 1};
     m_dev->SetPixelShaderConstantF(0, lightNow, 1);
     m_dev->SetVertexShader(draped ? m_drapeVs : m_vs);
     m_dev->SetPixelShader(draped ? m_drapePs : m_ps);

@@ -19,7 +19,8 @@ public:
     IDirect3DTexture9* heightTexture = nullptr;
     float heightSpacing = 0;
     UINT heightCells = 0;
-    // The change of light the foam takes (Lighting::DecalLight: rgb; null = none), set before a wave draw.
+    // The change of light the foam takes (Lighting::DecalLight: rgb; null = none), set before a wave draw; the foam
+    // takes [water] FoamLight of it (0 = white as BtS draws it, 1 = all of it).
     const float* light = nullptr;
 
     // A draw with BtS's wave shader (Civ4Wave.fx): its constants and samplers where ours expect them.

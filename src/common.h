@@ -35,6 +35,18 @@ struct Config
     std::wstring games = L"bts";  // game ids the effects run in ("bts", "col", exe name without .exe, or "*")
     bool dumpShaders = false;   // debug: save every shader the game creates
     bool tracesEnabled = false; // debug: frame traces (hotkey, trigger file, AutoFrame)
+    int terrainVertsPerPlot = 17;  // debug, experimental: patch BtS's terrain code for this many samples (terrain_patch.h)
+    // [terrain tiles], experimental (terrain_sets.h): Patch=1 hooks the heightmap tile picks; Sets splits each tile
+    // list into that many groups, a square using its corner terrains' set. The INI numbers the sets from 1: SetN (1..8)
+    // lists the terrains of set N, here tileSetTerrains[N - 1]; land listed nowhere is in Set1, water listed nowhere
+    // doesn't vote.
+    bool tileSetsPatch = false;
+    int tileSets = 1;
+    std::wstring tileSetTerrains[8];
+    // Coast art per class (one land corner, two side by side, two diagonal, three): cells of the water's transition
+    // atlas and CoastWave<class>_<NN>.nif models; more coast tiles than this reuse them in turn. Stock: 8, 8, 6, 7.
+    int coastAtlasCells[4] = {8, 8, 6, 7};
+    int coastWaveModels[4] = {8, 8, 6, 7};
     float waterTime = -1;       // debug: the water's clock stopped at this many seconds (< 0: running)
     UINT traceKey = '9';     // modifiers + traceKey traces the next frame(s)
     bool keyCtrl = true, keyShift = true, keyAlt = false;  // the modifiers every hotkey needs
@@ -84,6 +96,7 @@ struct Config
     int glintFollowsSun = 1;  // 0 = Colonization's fixed glint, 1 = follows the sun in view, 2 = exactly where it is
     float caustics = 1.0f;
     int waveShading = 64;  // the waves' faces lit by the glint's light, and sparkle around it: 0 (off) to 255
+    float foamLight = 0.4f;  // how much of the change of light the coast waves' foam takes: 0 = white, as BtS, to 1
     int riverGlint = 128;  // the sea's glint off the rivers: 0 (off), 128 (normal) to 255
     float riverShimmer = 3;  // how far the rivers' ripples sway along the channel, texels of their normal map (0 = still)
     std::wstring civ5Dir = L"C:\\Program Files (x86)\\Steam\\steamapps\\common\\Sid Meier's Civilization V";
@@ -178,6 +191,12 @@ extern Config g_config;
 extern HMODULE g_self;
 
 void LoadConfig();
+// [debug] TerrainVertsPerPlot: patch the running exe's terrain code (terrain_patch.cpp); logs what it did. Once.
+void ApplyTerrainPatch();
+// [terrain tiles] Patch: hook the heightmap tile picks (terrain_sets.cpp); logs what it did. Once.
+void ApplyTileSets();
+// "terrain tile sets: ..." (picks by set, hill/peak variants used) when they changed since the last call, else "".
+std::string TileSetsSummary();
 // The Baked* light the INI leaves out, from the SunLight.nif the game uses (the running mod's first); logs it. Once.
 void LoadBakedTerrainLight();
 // Folder the proxy DLL was loaded from (the game folder), without a trailing backslash.

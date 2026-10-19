@@ -33,7 +33,18 @@ public:
     void Begin(Pass pass) { Stamp(pass, 0); }
     void End(Pass pass) { Stamp(pass, 1); }
     void Cancel(Pass pass);  // bracketed, but the pass didn't run after all
-    void CountHillBuild() { ++m_hillBuilds; }
+    // A new hill shadow mask, and why (TerrainNormals::kHill* bits: first, new terrain, sun, darkness, view).
+    void CountHillBuild(int why)
+    {
+        ++m_hillBuilds;
+        for (int b = 0; b < kHillWhys; ++b)
+            m_hillWhy[b] += (why >> b) & 1;
+    }
+    // Reading new terrain and updating the textures from it (TerrainNormals::TakeStats), once a frame.
+    void AddTerrain(double readSeconds, double uploadSeconds, double uploadBytes)
+    {
+        m_terrainRead += readSeconds, m_terrainUpload += uploadSeconds, m_terrainBytes += uploadBytes;
+    }
 
     void EndFrame();    // just before the game's Present
     void StartFrame();  // just after it
@@ -61,8 +72,11 @@ private:
     bool m_tried = false, m_gpu = false, m_inFrame = false;
     bool m_noTimestamps = false;  // the driver has none: not tried again
     ULONG m_internalRefs = 0;
-    double m_lastPresent = 0, m_frameSeconds = 0;
+    double m_lastPresent = 0, m_frameSeconds = 0, m_worstFrame = 0;
     unsigned m_frames = 0, m_hillBuilds = 0;
+    static const int kHillWhys = 5;
+    unsigned m_hillWhy[kHillWhys] = {};
+    double m_terrainRead = 0, m_terrainUpload = 0, m_terrainBytes = 0;
     double m_drawSeconds = 0, m_gameDrawSeconds = 0, m_presentSeconds = 0;
     double m_gpuMs[kPasses] = {};
     unsigned m_gpuCount[kPasses] = {};

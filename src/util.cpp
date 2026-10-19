@@ -464,6 +464,19 @@ void LoadConfig()
     g_config.dumpShaders = IniInt(ini, L"debug", L"DumpShaders", 0) != 0;
     g_config.tracesEnabled = IniInt(ini, L"debug", L"Traces", 0) != 0;
     g_config.waterTime = static_cast<float>(_wtof(IniString(ini, L"debug", L"WaterTime", L"-1").c_str()));
+    g_config.terrainVertsPerPlot = IniInt(ini, L"debug", L"TerrainVertsPerPlot", 17);
+    g_config.tileSetsPatch = IniInt(ini, L"terrain tiles", L"Patch", 0) != 0;
+    g_config.tileSets = (std::max)(1, (std::min)(8, IniInt(ini, L"terrain tiles", L"Sets", 1)));
+    for (int s = 0; s < 8; ++s)  // the INI numbers sets from 1: Set1 is set 0
+        g_config.tileSetTerrains[s] = IniString(ini, L"terrain tiles", (L"Set" + std::to_wstring(s + 1)).c_str(), L"");
+    auto fourInts = [&](const wchar_t* key, int* out) {
+        int v[4];
+        if (swscanf_s(IniString(ini, L"terrain tiles", key, L"").c_str(), L"%d,%d,%d,%d", &v[0], &v[1], &v[2], &v[3]) == 4)
+            for (int k = 0; k < 4; ++k)
+                out[k] = (std::max)(1, v[k]);
+    };
+    fourInts(L"CoastAtlasCells", g_config.coastAtlasCells);
+    fourInts(L"CoastWaveModels", g_config.coastWaveModels);
     g_config.traceKey = IniKey(ini, L"trace", L"Key", '9');
     std::wstring mods = IniString(ini, L"general", L"KeyModifiers", L"ctrl+shift");
     for (auto& c : mods)
@@ -505,6 +518,8 @@ void LoadConfig()
     };
     g_config.caustics = strength(L"Caustics");
     g_config.waveShading = (std::max)(0, (std::min)(255, IniInt(ini, L"water", L"WaveShading", 64)));
+    g_config.foamLight = (std::max)(0.0f, (std::min)(1.0f, static_cast<float>(_wtof(
+                                                           IniString(ini, L"water", L"FoamLight", L"0.4").c_str()))));
     g_config.riverGlint = (std::max)(0, (std::min)(255, IniInt(ini, L"water", L"RiverGlint", 128)));
     g_config.riverShimmer = (std::max)(0.0f, (std::min)(3.0f, static_cast<float>(_wtof(
                                                               IniString(ini, L"water", L"RiverShimmer", L"3").c_str()))));

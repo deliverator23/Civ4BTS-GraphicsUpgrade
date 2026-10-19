@@ -239,7 +239,12 @@ HRESULT ProxyDevice::Present(CONST RECT* pSourceRect, CONST RECT* pDestRect, HWN
                    m_frame, m_frameDraws, m_framePrims, m_frameRtSwitches, m_frameGhosts, m_refl.FrameRedraws(),
                    m_frameWaterDraws, m_shadows.FrameCasters(), m_shadows.FrameReceivers(), m_frameBlobsSkipped, m_framePaintedSkipped, m_frameDeferred);
     if (m_frame % 1000 == 0)
+    {
         Log::Write("%s", m_perf.Summary().c_str());
+        const std::string sets = TileSetsSummary();
+        if (!sets.empty())
+            Log::Write("%s", sets.c_str());
+    }
     m_frameDraws = m_frameRtSwitches = m_framePrims = m_frameGhosts = m_frameWaterDraws = m_frameBlobsSkipped = m_framePaintedSkipped = m_frameDeferred = 0;
     bool* effects[5] = {&m_refl.enabled, &m_water.enabled, &m_shadows.enabled, &m_light.enabled, &m_aniso};
     if (m_compareStep == 1)
@@ -272,9 +277,14 @@ HRESULT ProxyDevice::Present(CONST RECT* pSourceRect, CONST RECT* pDestRect, HWN
         m_perf.Begin(Perf::kHillMask);
         if (m_terrain.UpdateHills(m_light.SunDirection(), g_config.shadowDarkness * m_light.ShadowScale(),
                                   m_shadows.viewGround))
-            m_perf.End(Perf::kHillMask), m_perf.CountHillBuild();
+            m_perf.End(Perf::kHillMask), m_perf.CountHillBuild(m_terrain.HillWhy());
         else
             m_perf.Cancel(Perf::kHillMask);
+    }
+    {
+        double read = 0, upload = 0, bytes = 0;
+        m_terrain.TakeStats(read, upload, bytes);
+        m_perf.AddTerrain(read, upload, bytes);
     }
 
     m_trace.FrameDone();

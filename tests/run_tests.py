@@ -262,7 +262,8 @@ def main():
         shutil.rmtree(OUT)
     shutil.copyfile(DLL, os.path.join(TEST, 'd3d9.dll'))
     with TestIni(os.path.join(TEST, 'GraphicsUpgrade.ini')) as f:
-        f.write(f'[general]\nOutputDir={OUT}\nGames=*\n[debug]\nTraces=1\nDumpShaders=1\n'
+        f.write(f'[general]\nOutputDir={OUT}\nGames=*\n[debug]\nTraces=1\nDumpShaders=1\nTerrainVertsPerPlot=33\n'
+                f'[terrain tiles]\nPatch=1\nSets=2\nSet2=TERRAIN_DESERT\n'
                 f'[trace]\nAutoFrame=2\nFrames=1\nHashTextures=1\n')
     request = os.path.join(OUT, 'test_proxy', 'trace.request')
     out = run([os.path.join(TEST, 'test_proxy.exe'), os.path.join(TEST, 'd3d9.dll'), '25', request])
@@ -284,6 +285,48 @@ def main():
     check('trace requested by' in log and log.count('trace written') == 2 and not os.path.exists(request),
           'trigger file picked up, deleted, second trace written')
     check('device released' in log, 'device wrapper released')
+
+    print('terrain patch ([debug] TerrainVertsPerPlot, experimental):')
+    check('terrain patch: TerrainVertsPerPlot 33 not applied: test_proxy.exe isn\'t Civ4BeyondSword.exe' in log,
+          'not applied outside BtS (the harness ran with TerrainVertsPerPlot=33)')
+    tout = run([os.path.join(TEST, 'test_proxy.exe'), 'terrainpatch'])
+    m = re.search(r'^TERRAINPATCH (bytes33.*)$', tout, re.M)
+    tp = {k: int(v) for k, v in (kv.split('=') for kv in m.group(1).split())} if m else {}
+    check(tp.get('bytes33') == 1 and tp.get('changed') == 7,
+          f'33: the seven sites rewritten (17 -> 33, shifts 4 -> 5, canyon window 16 -> 32), 7 bytes changed {tp}')
+    check(tp.get('idempotent') == 1, 'applying it again writes nothing')
+    check(tp.get('v65') == 1, '65: shift 6, canyon window 64')
+    check(tp.get('refused') == 1 and 'unexpected bytes at +0x78f04' in tout,
+          'one site with other bytes (another build): nothing written at all')
+    check(tp.get('toosmall') == 1 and tp.get('bad') == 1 and tp.get('stock17') == 1,
+          'image too small, 20 (not 2^n+1) refused; 17 does nothing')
+    check(tp.get('cells') == 1, 'the landscape cell values given instead of the XML: samples = TerrainVertsPerPlot, plots '
+          'per cell at most so many that a cell is 129 across (65: 2), samples a cell from those')
+
+    print('terrain tile sets ([terrain tiles], experimental):')
+    check("terrain tile sets: not applied: test_proxy.exe isn't Civ4BeyondSword.exe" in log,
+          'not applied outside BtS (the harness ran with Patch=1, Sets=2)')
+    sout = run([os.path.join(TEST, 'test_proxy.exe'), 'tilesets'])
+    m = re.search(r'^TILESETS (ranges.*)$', sout, re.M)
+    ts = {k: int(v) for k, v in (kv.split('=') for kv in m.group(1).split())} if m else {}
+    check(ts.get('ranges') == 1, f'a list split into equal groups in file order; whole when too few for every set {ts}')
+    check(ts.get('majority') == 1 and ts.get('corners') == 1,
+          "a square's set: the majority of its corner plots (TL, TR, BR, BL as the engine finds them), ties lower")
+    check(ts.get('seed') == 1, "the engine's seed (x * 0x1C81 + y * 0xB5D)")
+    check(ts.get('patched') == 1, 'picker JMP, hill CALL, PUSH ESI + peak CALL to the thunks, NOPs after; the coast '
+          "index's atlas and wave-model CALLs (to FUN_004788e0 before) to theirs")
+    check(ts.get('cycle') == 1, 'coast variants folded into the art (stock 8, 8, 6, 7; never past the atlas 8, 8, 8, 7)')
+    check(ts.get('refused') == 1 and 'unexpected bytes at +0x78e20' in sout,
+          'one site with other bytes (another build): nothing written')
+
+    print('terrain grid, partial updates:')
+    cout = run([os.path.join(TEST, 'test_proxy.exe'), 'terraincells'])
+    m = re.search(r'^TERRAINCELLS (.*)$', cout, re.M)
+    tc = {k: int(v) for k, v in (kv.split('=') for kv in m.group(1).split())} if m else {}
+    check(tc.get('pieces') == 1, f'changed rectangles, split at the grid\'s wrap: every texel once, in place {tc}')
+    check(tc.get('shore') == 1 and tc.get('steps') == 16 and tc.get('seam', 0) > 0,
+          'the shore worked out around each new chunk of terrain (16, some across the seam) = everything worked out again')
+    check(tc.get('shoreall') == 1, 'the water height changing: all of the shore worked out again, the same')
 
     print('ghost:')
     off = ghost_pixels(out)
@@ -897,9 +940,60 @@ def main():
     else:
         got = None
     check(got is not None and abs(got[0] - 102) <= 2 and abs(got[1] - 128) <= 1 and abs(got[2] - 252) <= 2 and got[3] == 255
-          and 'grid spacing 250.000' in nlog,
-          f'terrain normals from the vertex buffer: spacing 250 found, normal of the z = 0.2x slope {got} '
+          and 'grid spacing 250.000' in nlog and '1024 cells cover' in nlog,
+          f'terrain normals from the vertex buffer: spacing 250 found (1024 cells), normal of the z = 0.2x slope {got} '
           f'(expected 102,128,252)')
+
+    # The height grid covers the whole map at any spacing: three flat terrain chunks (5x5 vertices, heights 10, 20,
+    # 30) 1024 cells apart, which a 1024-cell grid would lay over each other. finemap: spacing 11.25 ("High Detail
+    # Terrain"), so a Huge map needs 2048 cells; widemap: 22.5, but mtxLightmap says the map is 256 plots across;
+    # ultramap: 9x9 chunks of vertices 2.8125 apart (the 65-sample terrain patch with High Detail Terrain), of which the
+    # grid keeps 1 in 4 (11.25 apart), so a Huge map still fits: 3x3 known cells a chunk.
+    import array
+    import math
+    for fine_overlay, fine_spacing, fine_half, fine_log in (
+            ('finemap', '11.250', 2, ''), ('widemap', '22.500', 2, ''),
+            ('ultramap', '11.250', 1, 'grid spacing 11.250 world units (1 in 4 of the vertices, 2.812 apart)')):
+        fine_known = 3 * (2 * fine_half + 1) ** 2
+        _, flog = shadow_run('heights', 0, fine_overlay, '[lighting]\nEnabled=1\n[debug]\nTraces=1\n[trace]\nAutoFrame=1\n')
+        fdir = os.path.join(TEST, f'shadow_{fine_overlay}_heights', 'out', 'test_proxy', 'traces')
+        fpath = os.path.join(fdir, os.listdir(fdir)[0], 'terrain_heights.bin') if os.path.isdir(fdir) else ''
+        cells, known, wrong = 0, 0, ['no terrain_heights.bin']
+        if os.path.exists(fpath):
+            h = array.array('f')
+            h.frombytes(open(fpath, 'rb').read())
+            cells = int(round(math.sqrt(len(h))))
+            known = sum(1 for v in h if v == v)
+            wrong = []
+            for (cx, cy), z in (((0, 0), 10), ((1024, 0), 20), ((0, 1024), 30)):
+                for dy in range(-fine_half, fine_half + 1):
+                    for dx in range(-fine_half, fine_half + 1):
+                        x, y = (cx + dx) % cells, (cy + dy) % cells
+                        if h[y * cells + x] != z:
+                            wrong.append(f'({cx + dx},{cy + dy})={h[y * cells + x]} not {z}')
+        check(cells == 2048 and known == fine_known and not wrong and f'grid spacing {fine_spacing}' in flog and
+              fine_log in flog,
+              f'{fine_overlay}: height grid {cells} cells at spacing {fine_spacing} (expected 2048), three chunks 1024 '
+              f'cells apart kept apart ({known} known cells, expected {fine_known}{"; " + ", ".join(wrong[:3]) if wrong else ""})')
+        # The normal texture, uploaded a chunk at a time (only the cells each changed; the one at (0,0) spans the
+        # grid's seam): known exactly at those cells, and flat there.
+        npath = os.path.join(os.path.dirname(fpath), 'terrain_normals.bmp') if fpath else ''
+        tex_known, tex_wrong = 0, ['no terrain_normals.bmp']
+        if os.path.exists(npath):
+            nb = open(npath, 'rb').read()
+            tex_wrong = []
+            alphas = nb[54 + 3::4]  # BGRA, top-down: cell (x, y) at 54 + (y * cells + x) * 4
+            tex_known = alphas.count(255)
+            for (cx, cy) in ((0, 0), (1024, 0), (0, 1024)):
+                for dy in range(-fine_half, fine_half + 1):
+                    for dx in range(-fine_half, fine_half + 1):
+                        x, y = (cx + dx) % cells, (cy + dy) % cells
+                        px = nb[54 + (y * cells + x) * 4:58 + (y * cells + x) * 4]
+                        if px[3] != 255 or abs(px[2] - 128) > 1 or abs(px[1] - 128) > 1 or px[0] < 254:
+                            tex_wrong.append(f'({cx + dx},{cy + dy})={tuple(px)}')
+        check(tex_known == fine_known and not tex_wrong,
+              f'{fine_overlay}: the normal texture, updated a chunk at a time, known at exactly the {fine_known} cells read and '
+              f'flat there ({tex_known} known{"; " + ", ".join(tex_wrong[:3]) if tex_wrong else ""})')
 
     # Per-pixel terrain lighting: BtS's colours, the sun moved overhead (LightDirection 0,0,-1). The slope's sun
     # amount changes by N.L(new) - N.L(BtS's sun), N from its normal map texel (102,128,253); BtS's sun direction

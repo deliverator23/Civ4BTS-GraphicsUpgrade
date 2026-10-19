@@ -101,6 +101,7 @@ The ones you're most likely to want:
 | `[water] UnderwaterDepth` | How deep you can see into the water (0 = not at all) |
 | `[water] Caustics` | How strong the shimmer on the shallow sea floor is (0 = off) |
 | `[water] WaveShading` | How strongly the sun or moon lights the waves, and the sparkle around the glint (0 = off, up to 255) |
+| `[water] FoamLight` | How much of the light's colour and brightness the coast waves' foam takes (0 = always white, 1 = like the ground) |
 | `[water] RiverGlint` | How bright the glint off the rivers is (0 = off, 128 = normal, up to 255) |
 | `[water] RiverShimmer` | How far the rivers' ripples sway back and forth along the channel (0 = still, up to 3) |
 | `[water] Civ5Dir` | Your Civilization V folder: the caustics use its textures |
