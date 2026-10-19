@@ -37,8 +37,18 @@ public:
     bool UpdateHills(const float* sunDirection, float darkness, const float* view);
     IDirect3DTexture9* HillTexture() const { return m_hillReady ? m_hillTex : nullptr; }
     const float* HillGrid() const { return m_hillGrid; }
+    // The shore, for the water's caustics: a texture on the height grid (A8R8G8B8, wrapping), r = distance to
+    // the nearest land (terrain at or above waterHeight) in cells / 32, g = depth below waterHeight / 32, a = 255 where
+    // the terrain has been read. Null until something was. Worked out again when new terrain is read.
+    IDirect3DTexture9* ShoreTexture(float waterHeight);
+    // The heights (R32F on the same grid, wrapping; unknown = -10000), uploaded when new terrain has been read; null
+    // until something was, or if the texture can't be made. The hill shadows and the waves' draping read it.
+    IDirect3DTexture9* HeightTexture() { return m_spacing > 0 && EnsureHeightTexture() ? m_heightTex : nullptr; }
     float Spacing() const { return m_spacing; }
     UINT Cells() const { return kCells; }
+    // Detail normals: the world xy direction in which the detail texture's u grows (xy) and its v (zw), unit length,
+    // from the terrain's TEXCOORD1; null until a terrain vertex buffer was read.
+    const float* DetailAxes() const { return m_haveDetailAxes ? m_detailAxes : nullptr; }
 
     bool SaveBmp(const std::wstring& path);  // debug: the normal map, for traces
     bool SaveHillBmp(const std::wstring& path);  // debug: the hill shadow mask
@@ -56,7 +66,9 @@ private:
     static const UINT kHillCells = 2048;  // the hill shadow mask's size: over the ground in view
     float& Height(int cx, int cy) { return m_heights[(cy & (kCells - 1)) * kCells + (cx & (kCells - 1))]; }
     void UpdateNormals(int x0, int y0, int x1, int y1);
+    void FitDetailAxes(const BYTE* vertices, UINT count, UINT stride, const std::vector<float>& world);
     bool EnsureHillResources();
+    bool EnsureHeightTexture();  // made and uploaded if the heights changed since
 
     IDirect3DDevice9* m_dev;
     std::unordered_set<const void*> m_done;  // vertex buffers already read (or not readable)
@@ -69,9 +81,13 @@ private:
     bool m_loggedUnreadable = false;
     std::vector<DWORD> m_normals;  // texture contents, kept to update dirty rectangles
     float m_minHeight = 1e30f, m_maxHeight = -1e30f;  // lowest and highest terrain read
+    float m_detailAxes[4] = {};
+    bool m_haveDetailAxes = false;
+    bool m_loggedNoDetailUv = false;
     // Hill shadows: heights (R32F, unknown = -10000), the mask (a render target), the pass's shaders and state.
     IDirect3DTexture9* m_heightTex = nullptr;
-    bool m_heightsDirty = true;
+    bool m_heightsDirty = true;     // new heights since the hill shadows last used them
+    bool m_heightTexDirty = true;   // new heights since the height texture was last uploaded
     bool m_heightFilter = true;  // R32F can be filtered (bilinear), else point
     IDirect3DTexture9* m_hillTex = nullptr;
     IDirect3DSurface9* m_hillSurf = nullptr;
@@ -82,4 +98,9 @@ private:
     bool m_hillReady = false;   // the mask holds a result for:
     float m_hillSun[3] = {}, m_hillDarkness = -1, m_hillRegion[3] = {};
     float m_hillGrid[3] = {};
+    // The shore texture, and the cells read so far (a bounding box in cell coordinates).
+    IDirect3DTexture9* m_shoreTex = nullptr;
+    bool m_shoreDirty = true;
+    float m_shoreHeight = 0;
+    int m_readX0 = INT32_MAX, m_readY0 = INT32_MAX, m_readX1 = INT32_MIN, m_readY1 = INT32_MIN;
 };

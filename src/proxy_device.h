@@ -3,7 +3,9 @@
 #pragma once
 #include "common.h"
 #include "d3d9_forward.h"
+#include "detail_normals.h"
 #include "water.h"
+#include "waves.h"
 #include "reflection.h"
 #include "lighting.h"
 #include "perf.h"
@@ -107,7 +109,9 @@ private:
     Water m_water;
     Shadows m_shadows;
     Lighting m_light;
+    Waves m_waves;  // coast waves drawn with our copy of their shader (opacity over time)
     TerrainNormals m_terrain;  // heights and normals read from the terrain's vertex buffers (per-pixel lighting)
+    DetailNormals m_detail;    // the terrain detail textures' normal maps ([textures] DetailNormals)
     Perf m_perf;               // timing for the log
     float m_terrainLight[32] = {};  // Lighting::TerrainConstants for the shadows' terrain draws
     bool m_lightKeyWasDown = false;
@@ -123,10 +127,12 @@ private:
     std::unordered_set<uint64_t> m_loggedLights;  // fixed-function lights and ambients seen (logged once each)
     std::wstring m_lightmapSavedFor;  // trace folder the terrain lightmap was last saved into
     bool m_reflKeyWasDown = false, m_overlayKeyWasDown = false, m_waterKeyWasDown = false;
+    bool m_waterNormalKeyWasDown = false;  // [water] NormalMapToggleKey
     bool m_shadowsKeyWasDown = false, m_shadowOverlayKeyWasDown = false;
     // Anisotropic filtering ([textures] Anisotropy): on, and the samples it uses (the INI's, capped by the card; 1 = none).
     bool m_aniso = false, m_anisoKeyWasDown = false;
     DWORD m_anisoMax = 1;
+    bool m_detailKeyWasDown = false;  // DetailNormalsToggleKey
     uint32_t m_frameBlobsSkipped = 0, m_framePaintedSkipped = 0;
     struct DeferredDraw
     {

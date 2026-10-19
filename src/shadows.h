@@ -43,6 +43,19 @@ public:
     const float* decalLight = nullptr;            // unlit ground decals' change of light (Lighting::DecalLight), or null
     float terrainGrid[2] = {};                    // world xy -> grid uv: scale, offset
     float hillGrid[3] = {};                       // world xy -> hill mask uv: scale, x offset, y offset
+    // Detail normals on the terrain (s7, PS c20-c21; terrain_shadow.hlsl): the maps, and the detail texture's
+    // directions on the ground (TerrainNormals::DetailAxes). Either null: none.
+    class DetailNormals* detailNormals = nullptr;
+    const float* detailAxes = nullptr;
+    // Rivers (River_Shader P1), set each frame: the sun their ripples are lit from (its travel direction; null: the
+    // game's own), and the sea's glint off them: its strength (0 = none, 128 = normal, up to 255), and for a view the
+    // sky texture with the painted sun, the turn that puts it where the sun's glint is now and how bright the glint is
+    // (Water::GlintSky; null texture: no glint). Either takes rivers through our shader with the shadows off too.
+    const float* riverSun = nullptr;
+    int riverGlint = 0;
+    std::function<IDirect3DBaseTexture9*(const float* viewProj, float rot[12], float& fade)> glintSky;
+    // And how far their ripples sway back and forth along the channel, in texels of the river normal map (0 = still).
+    float riverShimmer = 0;
     // The ground in view, as the last sun camera fitted it: centre x, y and half-width (world units; 0 = none yet).
     float viewGround[3] = {};
 
@@ -115,6 +128,14 @@ private:
     bool TreeGround(const ShaderInfo& vs, const float* world, float& ground);
     bool BuildingPart(DWORD fvf);   // a solid lit fixed-function mesh: buildings, improvements (BuildingShadows)
     bool SamplesFogOfWar(DWORD stages);  // one of the first `stages` texture stages holds this frame's fog of war
+    // The terrain draw's detail normals (s7, PS c20-c21); none unless lit (GraphicsUpgrade's lighting is on).
+    void SetDetailNormals(bool lit);
+    // River_Shader P1's additions (river_shadow.hlsl): its light vector from riverSun (VS c12), the camera (VS c24),
+    // the glint's colour and turn (PS c12-c15) and the sky texture (s5), the ripples' sway (PS c16-c17) and the flow
+    // map (s3); and the normal map (s0) read with mipmaps.
+    void SetRiverConstants();
+    // The flow map (src/river_flow.h), made on first use; null if it can't be.
+    IDirect3DTexture9* RiverFlow();
     HRESULT DrawShadowed(IDirect3DVertexShader9* vs, IDirect3DPixelShader9* ps, const std::function<HRESULT()>& draw,
                          bool terrain);
 
@@ -132,6 +153,9 @@ private:
     IDirect3DPixelShader9* m_riverFloodPs = nullptr;
     IDirect3DVertexShader9* m_riverVs = nullptr;  // River_Shader P1 (river) with shadows
     IDirect3DPixelShader9* m_riverPs = nullptr;
+    IDirect3DTexture9* m_riverFlow = nullptr;  // managed: kept over Reset
+    bool m_riverFlowTried = false;
+    DWORD m_riverStart = GetTickCount();
     IDirect3DVertexShader9* m_waterVs = nullptr;  // shadows on the water's surface
     IDirect3DPixelShader9* m_waterPs = nullptr;
     DWORD m_maxStages = 0;  // fixed-function texture stages usable at once (caps)

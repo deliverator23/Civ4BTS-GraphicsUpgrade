@@ -24,6 +24,14 @@ rem Shaders, compiled into headers the DLL embeds.
 set "FXC=fxc /nologo /O3"
 %FXC% /T vs_1_1 /E VSMain /Vn g_waterVS /Fh build\shaders\water_vs.h shaders\water.hlsl >nul || exit /b 1
 %FXC% /T ps_2_0 /E PSMain /Vn g_waterPS /Fh build\shaders\water_ps.h shaders\water.hlsl >nul || exit /b 1
+rem The coast waves (BtS's wave shader, with an opacity over time).
+%FXC% /T vs_2_0 /E VSMain /Vn g_waveVS /Fh build\shaders\wave_vs.h shaders\wave.hlsl >nul || exit /b 1
+%FXC% /T ps_2_0 /E PSMain /Vn g_wavePS /Fh build\shaders\wave_ps.h shaders\wave.hlsl >nul || exit /b 1
+%FXC% /T vs_3_0 /D DRAPE=1 /E VSMain /Vn g_waveDrapeVS /Fh build\shaders\wave_drape_vs.h shaders\wave.hlsl >nul || exit /b 1
+%FXC% /T ps_3_0 /D DRAPE=1 /E PSMain /Vn g_waveDrapePS /Fh build\shaders\wave_drape_ps.h shaders\wave.hlsl >nul || exit /b 1
+rem The same water with the shoreline and shallow water (Shader Model 3).
+%FXC% /T vs_3_0 /D SHORE=1 /E VSMain /Vn g_waterShoreVS /Fh build\shaders\water_shore_vs.h shaders\water.hlsl >nul || exit /b 1
+%FXC% /T ps_3_0 /D SHORE=1 /E PSMain /Vn g_waterShorePS /Fh build\shaders\water_shore_ps.h shaders\water.hlsl >nul || exit /b 1
 %FXC% /T vs_2_0 /E VSMain /Vn g_waterSurfaceVS /Fh build\shaders\water_surface_vs.h shaders\water_surface.hlsl >nul || exit /b 1
 %FXC% /T ps_2_0 /E PSMain /Vn g_waterSurfacePS /Fh build\shaders\water_surface_ps.h shaders\water_surface.hlsl >nul || exit /b 1
 %FXC% /T vs_2_0 /E VSMain /Vn g_waterShadowVS /Fh build\shaders\water_shadow_vs.h shaders\water_shadow.hlsl >nul || exit /b 1
@@ -42,6 +50,6 @@ set "FXC=fxc /nologo /O3"
 cl /nologo /std:c++17 /O2 /MT /EHsc /W4 /DUNICODE /D_UNICODE /Isrc /Ibuild\shaders ^
    /Fobuild\ /Fdbuild\ src\*.cpp ^
    /LD /Fe:build\d3d9.dll ^
-   /link /DEF:src\d3d9.def /MACHINE:X86 user32.lib shell32.lib build\version.res || exit /b 1
+   /link /DEF:src\d3d9.def /MACHINE:X86 user32.lib shell32.lib ole32.lib windowscodecs.lib build\version.res || exit /b 1
 copy /y GraphicsUpgrade.ini build\GraphicsUpgrade.ini >nul
 echo Built build\d3d9.dll

@@ -1,0 +1,55 @@
+// Detail normals: small bumps on the ground, tiled like BtS's terrain detail textures and lit by the sun as it is now
+// (terrain_shadow.hlsl).
+//
+// Each terrain's detail texture (CIV4ArtDefines_Terrain.xml, <Detail>) can have a normal map beside it, the same path
+// with _normal before .dds (e.g. Art/Terrain/Textures/detail/desertdetail_normal.dds), in the running mod or the game,
+// loose or packed. It's tangent space: red along the texture's u, green up the image (DirectX), blue out of the ground.
+// The detail texture bound for a terrain draw is recognised by its content (TextureList), so the right map is found
+// however the game loaded it. A detail texture without one gets normals made from its own brightness, read as height,
+// in the shader ([textures] DetailBumpiness).
+#pragma once
+#include "assets.h"
+#include "common.h"
+
+#include <memory>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+class DetailNormals
+{
+public:
+    explicit DetailNormals(IDirect3DDevice9* device) : m_dev(device) {}
+    ~DetailNormals() { ReleaseAll(); }
+
+    bool enabled = g_config.detailNormals;  // [textures] DetailNormals, switched in game by DetailNormalsToggleKey
+
+    // What to use with this detail texture (BtS's s3 for a terrain draw): a normal map (null: none shipped) and the
+    // size of one texel in uv. Looks the settings' files up on first use.
+    struct Use
+    {
+        IDirect3DTexture9* normalMap = nullptr;
+        float texel[2] = {};
+    };
+    Use For(IDirect3DBaseTexture9* detail);
+    void ForgetTexture(const void* texture) { m_cache.erase(texture); }
+    void ReleaseAll();
+    ULONG InternalRefs() const { return m_internalRefs; }
+
+private:
+    void Load();
+
+    struct Shipped
+    {
+        std::wstring detail, normal;  // paths under Assets
+        TextureList match;            // the detail texture
+        std::vector<uint8_t> dds;     // the normal map, until its texture is made
+        IDirect3DTexture9* texture = nullptr;
+        bool failed = false;
+    };
+    IDirect3DDevice9* m_dev;
+    bool m_loaded = false;
+    std::vector<std::unique_ptr<Shipped>> m_shipped;
+    std::unordered_map<const void*, Use> m_cache;
+    ULONG m_internalRefs = 0;
+};

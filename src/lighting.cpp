@@ -93,6 +93,22 @@ static float Brightness(const float* c)
     return 0.299f * c[0] + 0.587f * c[1] + 0.114f * c[2];
 }
 
+// The sun path's direction (the way the light travels) at a step of the cycle: SunMiddayFrom, SunMiddayHeight,
+// SunriseHeight and MoonHeight. Midday at half the cycle, midnight at 0; sunrise and sunset a quarter either side of
+// midday; clockwise round the sky.
+static void SunPathDirection(double pos, double count, float dir[3])
+{
+    const double kPi = 3.14159265358979, kDeg = kPi / 180;
+    const double x = std::cos(kPi * (pos - count / 2) / (count / 2));  // 1 midday, 0 sunrise/sunset, -1 midnight
+    const double low = g_config.sunriseHeight;
+    const double el = x >= 0 ? low + (g_config.sunMiddayHeight - low) * x : low + (g_config.moonHeight - low) * -x;
+    const double bearing = g_config.sunMiddayFrom + 360.0 * (pos - count / 2) / count;  // clockwise
+    const double az = (90.0 - bearing) * kDeg;  // compass bearing -> anticlockwise from east (+x)
+    dir[0] = static_cast<float>(-std::cos(el * kDeg) * std::cos(az));
+    dir[1] = static_cast<float>(-std::cos(el * kDeg) * std::sin(az));
+    dir[2] = static_cast<float>(-std::sin(el * kDeg));
+}
+
 void Lighting::NewFrame()
 {
     // The cycle's own clock: it moves on only while the cycle runs and the world is on screen, so pausing it,
@@ -113,7 +129,23 @@ void Lighting::NewFrame()
     m_cycleDirActive = false;
     m_shadowScale = 1.0f;
     if (!m_cycleActive)
+    {
+        // The cycle isn't running (LightCycleOn=0, or the lighting is off): with a sun path, the sun stands where the
+        // path has it at LightCycleStartStep, and [shadows] SunDirection is left unused.
+        if (g_config.sunPath && g_config.lightCycleStepCount > 0)
+        {
+            SunPathDirection(g_config.lightCycleStart, g_config.lightCycleStepCount, m_cycleDir);
+            m_cycleDirActive = true;
+            if (!m_loggedFixedSun)
+            {
+                m_loggedFixedSun = true;
+                Log::Write("lighting: sun fixed on the sun path at step %g of %g (from %g degrees at midday, %g up): "
+                           "direction %.3f,%.3f,%.3f", g_config.lightCycleStart, g_config.lightCycleStepCount,
+                           g_config.sunMiddayFrom, g_config.sunMiddayHeight, m_cycleDir[0], m_cycleDir[1], m_cycleDir[2]);
+            }
+        }
         return;
+    }
     const double seconds = m_cycleSeconds;
     const double count = g_config.lightCycleStepCount;
     double pos = std::fmod(g_config.lightCycleStart + seconds / g_config.lightCycleTime * count, count);
@@ -121,16 +153,7 @@ void Lighting::NewFrame()
     CycleColour(g_config.lightCycleAmbient, pos, count, m_cycleAmbient);
     if (g_config.sunPath)
     {
-        // Midday at half the cycle, midnight at 0; sunrise and sunset a quarter either side of midday.
-        const double kPi = 3.14159265358979, kDeg = kPi / 180;
-        const double x = std::cos(kPi * (pos - count / 2) / (count / 2));  // 1 midday, 0 sunrise/sunset, -1 midnight
-        const double low = g_config.sunriseHeight;
-        const double el = x >= 0 ? low + (g_config.sunMiddayHeight - low) * x : low + (g_config.moonHeight - low) * -x;
-        const double bearing = g_config.sunMiddayFrom + 360.0 * (pos - count / 2) / count;  // clockwise
-        const double az = (90.0 - bearing) * kDeg;  // compass bearing -> anticlockwise from east (+x)
-        m_cycleDir[0] = static_cast<float>(-std::cos(el * kDeg) * std::cos(az));
-        m_cycleDir[1] = static_cast<float>(-std::cos(el * kDeg) * std::sin(az));
-        m_cycleDir[2] = static_cast<float>(-std::sin(el * kDeg));
+        SunPathDirection(pos, count, m_cycleDir);
         m_cycleDirActive = true;
     }
     else if (!g_config.lightCycleAngles.empty())

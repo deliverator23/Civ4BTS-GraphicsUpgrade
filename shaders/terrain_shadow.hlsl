@@ -12,6 +12,10 @@
 // Per pixel, when the sun's direction differs from the one BtS baked with: amount += N . L' - N . L_baked, with N from
 // the terrain normal map (s5; built from the terrain's own vertex buffers). At BtS's direction that adds
 // nothing, so the terrain stays exactly as baked; as the sun moves, the hill shading follows it.
+// Detail normals ([terrain] DetailNormals): the ground's small bumps, tiled like the detail texture. They tilt that
+// normal, and amount += N_detail . L' - N . L': the bumps are lit by the sun as it is now. They come from a normal
+// map shipped with the detail texture (s7, tangent space: red along +u, green along -v), or else from the detail
+// texture's own brightness, read as height (two more samples, one texel along u and v).
 
 float4x4 mtxWorldViewProj : register(c0);
 float4x3 mtxWorld : register(c4);
@@ -38,6 +42,10 @@ float4 f4NormalMap : register(c18);    // x = 1 / (spacing x cells), y = 0.5 / c
 float4 f4HillGrid : register(c19);     // world xy -> hill mask uv: x = scale, yz = offset
 sampler2D TerrainNormals : register(s5);  // rgb = normal x 0.5 + 0.5, a = 1 where known
 sampler2D HillShadows : register(s6);     // a = shaded by hills (0..1)
+float4 f4DetailAxes : register(c20);      // xy: world direction of +u in the detail texture, zw: of +v (unit)
+float4 f4DetailNormal : register(c21);    // x = strength of s7's normal map, y = strength of the normals made from
+                                          // the detail texture (0 = none), zw = one detail texel in uv
+sampler2D DetailNormals : register(s7);   // a normal map for the detail texture, or nothing (f4DetailNormal.x = 0)
 
 struct VSOut
 {
@@ -74,9 +82,20 @@ float4 PSMain(float2 base : TEXCOORD0, float2 fow : TEXCOORD1, float2 lightmap :
     float2 grid = worldXY * f4NormalMap.x + f4NormalMap.y;
     float4 nm = tex2D(TerrainNormals, grid);
     float3 n = nm.rgb * 2 - 1;
-    amount += f4NormalMap.z * nm.a * (dot(n, f4LightNew.xyz) - dot(n, f4LightBaked.xyz));
+    float known = f4NormalMap.z * nm.a;
+    amount += known * (dot(n, f4LightNew.xyz) - dot(n, f4LightBaked.xyz));
+    // Detail normals: a slope in the detail texture's tangent space (x along +u, y along -v), into the world.
+    float3 d = tex2D(TerrainDetail, detail).rgb;
+    const float3 kLuma = float3(0.299, 0.587, 0.114);
+    float h = dot(d, kLuma);
+    float2 made = float2(h - dot(tex2D(TerrainDetail, detail + float2(f4DetailNormal.z, 0)).rgb, kLuma),
+                         dot(tex2D(TerrainDetail, detail + float2(0, f4DetailNormal.w)).rgb, kLuma) - h);
+    float2 slope = f4DetailNormal.x * (tex2D(DetailNormals, detail).rg * 2 - 1) + f4DetailNormal.y * made;
+    float3 flat = lerp(float3(0, 0, 1), n, known);
+    float3 bumped = normalize(flat + float3(slope.x * f4DetailAxes.xy - slope.y * f4DetailAxes.zw, 0));
+    amount = max(0, amount + dot(bumped, f4LightNew.xyz) - dot(flat, f4LightNew.xyz));
     lm = lerp(lm, saturate(0.5 * (f4Ambient.rgb + f4Sun.rgb * amount)), f4Relight.x);
-    float3 colour = b.rgb + tex2D(TerrainDetail, detail).rgb + lm - 1;
+    float3 colour = b.rgb + d + lm - 1;
     // BtS's output is clamped to 1 before blending; clamp first so bright ground darkens by the same fraction.
     float3 lit = saturate(tex2D(TerrainFOWar, fow).rgb * colour);
     // Objects' shadows and hills' shadows: the darker of the two (no double darkening where they overlap).

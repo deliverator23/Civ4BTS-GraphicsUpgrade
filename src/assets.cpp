@@ -7,6 +7,47 @@
 #include <cstdio>
 #include <cstring>
 #include <cwctype>
+#include <wincodec.h>
+
+bool DecodeImage(const std::vector<uint8_t>& file, UINT& width, UINT& height, std::vector<uint8_t>& rgba)
+{
+    if (file.empty())
+        return false;
+    // Called from the first Direct3D call (LoadConfig), never from DllMain. COM is left as it was found.
+    const HRESULT co = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    IWICImagingFactory* factory = nullptr;
+    IWICStream* stream = nullptr;
+    IWICBitmapDecoder* decoder = nullptr;
+    IWICBitmapFrameDecode* frame = nullptr;
+    IWICFormatConverter* converter = nullptr;
+    bool ok = false;
+    std::vector<uint8_t> bgra;
+    if (SUCCEEDED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory))) &&
+        SUCCEEDED(factory->CreateStream(&stream)) &&
+        SUCCEEDED(stream->InitializeFromMemory(const_cast<BYTE*>(file.data()), static_cast<DWORD>(file.size()))) &&
+        SUCCEEDED(factory->CreateDecoderFromStream(stream, nullptr, WICDecodeMetadataCacheOnDemand, &decoder)) &&
+        SUCCEEDED(decoder->GetFrame(0, &frame)) && SUCCEEDED(factory->CreateFormatConverter(&converter)) &&
+        SUCCEEDED(converter->Initialize(frame, GUID_WICPixelFormat32bppBGRA, WICBitmapDitherTypeNone, nullptr, 0,
+                                        WICBitmapPaletteTypeCustom)) &&
+        SUCCEEDED(converter->GetSize(&width, &height)) && width && height && width <= 4096 && height <= 4096)
+    {
+        bgra.resize(static_cast<size_t>(width) * height * 4);
+        ok = SUCCEEDED(converter->CopyPixels(nullptr, width * 4, static_cast<UINT>(bgra.size()), bgra.data()));
+    }
+    for (IUnknown* o : {static_cast<IUnknown*>(converter), static_cast<IUnknown*>(frame),
+                        static_cast<IUnknown*>(decoder), static_cast<IUnknown*>(stream),
+                        static_cast<IUnknown*>(factory)})
+        if (o)
+            o->Release();
+    if (co == S_OK || co == S_FALSE)
+        CoUninitialize();
+    if (!ok)
+        return false;
+    rgba.resize(bgra.size());
+    for (size_t i = 0; i < bgra.size(); i += 4)
+        rgba[i] = bgra[i + 2], rgba[i + 1] = bgra[i + 1], rgba[i + 2] = bgra[i], rgba[i + 3] = bgra[i + 3];
+    return true;
+}
 
 bool ReadFileBytes(const std::wstring& path, std::vector<uint8_t>& out)
 {
@@ -76,6 +117,51 @@ bool ReadFromFpk(const std::wstring& fpk, const std::string& name, std::vector<u
         if (e.name == name)
             return ReadFpkEntry(fpk, e, out);
     return false;
+}
+
+// Civ 5's layout: u32 6, "FPK_", u16, u32 count, then per entry u32 name length, name bytes as they are, padding to 4,
+// u64 time, u32 size, u32 offset.
+bool ReadFromCiv5Fpk(const std::wstring& fpk, const std::string& name, std::vector<uint8_t>& out)
+{
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, fpk.c_str(), L"rb") || !f)
+        return false;
+    auto lower = [](std::string s) {
+        for (auto& c : s)
+            c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+        return s;
+    };
+    const std::string want = lower(name);
+    uint8_t head[14];
+    FpkEntry found;
+    bool ok = false;
+    if (fread(head, 1, 14, f) == 14 && memcmp(head + 4, "FPK_", 4) == 0)
+    {
+        uint32_t count;
+        memcpy(&count, head + 10, 4);
+        std::string entryName;
+        for (uint32_t i = 0; i < count && !ok; ++i)
+        {
+            uint32_t len = 0;
+            if (fread(&len, 4, 1, f) != 1 || len > 1024)
+                break;
+            entryName.resize(len);
+            if (fread(&entryName[0], 1, len, f) != len)
+                break;
+            fseek(f, (4 - len % 4) % 4, SEEK_CUR);
+            uint8_t rest[16];
+            if (fread(rest, 1, 16, f) != 16)
+                break;
+            if (lower(entryName) == want)
+            {
+                memcpy(&found.size, rest + 8, 4);
+                memcpy(&found.offset, rest + 12, 4);
+                ok = true;
+            }
+        }
+    }
+    fclose(f);
+    return ok && ReadFpkEntry(fpk, found, out);
 }
 
 namespace

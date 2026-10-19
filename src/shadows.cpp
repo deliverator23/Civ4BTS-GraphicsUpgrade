@@ -1,5 +1,6 @@
 #include "shadows.h"
 #include "camera.h"
+#include "detail_normals.h"
 #include "matrix.h"
 #include "overlay.h"
 
@@ -10,6 +11,7 @@
 
 #include "river_flood_ps.h"
 #include "river_flood_vs.h"
+#include "river_flow.h"
 #include "river_ps.h"
 #include "river_vs.h"
 #include "shadow_blur_ps.h"
@@ -162,10 +164,12 @@ void Shadows::ReleaseAll()
 {
     ReleaseDefault();
     IUnknown* objects[] = {m_terrainVs, m_terrainPs,   m_blurPs, m_riverFloodVs, m_riverFloodPs,
-                           m_riverVs,   m_riverPs,     m_waterVs, m_waterPs};
+                           m_riverVs,   m_riverPs,     m_waterVs, m_waterPs, m_riverFlow};
     for (IUnknown* o : objects)
         if (o)
             o->Release();
+    m_riverFlow = nullptr;
+    m_riverFlowTried = false;
     m_terrainVs = m_riverFloodVs = m_riverVs = m_waterVs = nullptr;
     m_terrainPs = m_blurPs = m_riverFloodPs = m_riverPs = m_waterPs = nullptr;
     m_internalRefs = 0;
@@ -554,7 +558,11 @@ bool Shadows::MaybeReceiver(const ShaderInfo& vs)
 bool Shadows::DrawReceiver(const ShaderInfo& vs, const ShaderInfo* ps, const std::function<HRESULT()>& draw,
                            HRESULT& hr)
 {
-    if ((!enabled && !terrainLight) || !ps)
+    if (!ps)
+        return false;
+    const bool river = vs.codeHash == kRiverVs && ps->codeHash == kRiverPs;
+    const bool riverExtras = river && (riverSun || (riverGlint > 0 && glintSky) || riverShimmer > 0);
+    if (!enabled && !terrainLight && !riverExtras)
         return false;
     // BtS's terrain shader with exactly the registers and samplers our copy assumes, or one of the two river passes.
     IDirect3DVertexShader9** ourVs = nullptr;
@@ -565,11 +573,11 @@ bool Shadows::DrawReceiver(const ShaderInfo& vs, const ShaderInfo* ps, const std
         (ps->Reg("TerrainBase", 3) == 0 || ps->Reg("TerrainBase0", 3) == 0) &&  // the older builds' name
         ps->Reg("TerrainFOWar", 3) == 1 && ps->Reg("TerrainLightmap", 3) == 2 && ps->Reg("TerrainDetail", 3) == 3)
         ourVs = &m_terrainVs, ourPs = &m_terrainPs, terrain = true;
-    else if (!enabled)
-        return false;  // lighting alone: only the terrain needs our shader (the rivers' colours are constants)
+    else if (!enabled && !riverExtras)
+        return false;  // lighting alone: the rivers' colours are constants, so only their sun and glint need our shader
     else if (vs.codeHash == kRiverFloodVs && ps->codeHash == kRiverFloodPs)
         ourVs = &m_riverFloodVs, ourPs = &m_riverFloodPs;
-    else if (vs.codeHash == kRiverVs && ps->codeHash == kRiverPs)
+    else if (river)
         ourVs = &m_riverVs, ourPs = &m_riverPs;
     else
         return false;
@@ -592,9 +600,189 @@ bool Shadows::DrawReceiver(const ShaderInfo& vs, const ShaderInfo* ps, const std
         if (fow)
             fow->Release();
     }
-    hr = DrawShadowed(*ourVs, *ourPs, draw, terrain);
+    if (river)
+    {
+        // River_Shader P1: what our copy adds (SetRiverConstants), BtS's values back after.
+        const D3DSAMPLERSTATETYPE states[7] = {D3DSAMP_ADDRESSU,  D3DSAMP_ADDRESSV,  D3DSAMP_ADDRESSW,   D3DSAMP_MAGFILTER,
+                                               D3DSAMP_MINFILTER, D3DSAMP_MIPFILTER, D3DSAMP_SRGBTEXTURE};
+        float oldLight[4], oldEye[4], oldPsc[24];
+        DWORD oldSamp[2][7], oldMip = D3DTEXF_NONE;
+        IDirect3DBaseTexture9* oldTex[2] = {};
+        const DWORD stages[2] = {3, 5};  // the flow map, the sky texture
+        m_dev->GetVertexShaderConstantF(12, oldLight, 1);
+        m_dev->GetVertexShaderConstantF(24, oldEye, 1);
+        m_dev->GetPixelShaderConstantF(12, oldPsc, 6);
+        m_dev->GetSamplerState(0, D3DSAMP_MIPFILTER, &oldMip);
+        for (int s = 0; s < 2; ++s)
+        {
+            m_dev->GetTexture(stages[s], &oldTex[s]);
+            for (int k = 0; k < 7; ++k)
+                m_dev->GetSamplerState(stages[s], states[k], &oldSamp[s][k]);
+        }
+        SetRiverConstants();
+        hr = DrawShadowed(*ourVs, *ourPs, draw, false);
+        m_dev->SetVertexShaderConstantF(12, oldLight, 1);
+        m_dev->SetVertexShaderConstantF(24, oldEye, 1);
+        m_dev->SetPixelShaderConstantF(12, oldPsc, 6);
+        m_dev->SetSamplerState(0, D3DSAMP_MIPFILTER, oldMip);
+        for (int s = 0; s < 2; ++s)
+        {
+            m_dev->SetTexture(stages[s], oldTex[s]);
+            for (int k = 0; k < 7; ++k)
+                m_dev->SetSamplerState(stages[s], states[k], oldSamp[s][k]);
+            if (oldTex[s])
+                oldTex[s]->Release();
+        }
+    }
+    else
+        hr = DrawShadowed(*ourVs, *ourPs, draw, terrain);
     ++m_frameReceivers;
     return true;
+}
+
+void Shadows::SetRiverConstants()
+{
+    // BtS's own: mtxWorldViewProj (c0-c3), mtxWorld (c4-c6), the river's sun colour (PS c0).
+    float wvp[16], world[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1}, worldInv[16];
+    m_dev->GetVertexShaderConstantF(0, wvp, 4);
+    m_dev->GetVertexShaderConstantF(4, world, 3);
+    float eye[4] = {0, 0, 1, 0}, colour[4] = {}, rot[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
+    IDirect3DBaseTexture9* sky = nullptr;
+    if (mat::Invert(world, worldInv))
+    {
+        // World -> the river's object space: a point (w = 1) or a direction (w = 0).
+        auto toObject = [&](const float* v, float w, float* out) {
+            for (int r = 0; r < 3; ++r)
+                out[r] = worldInv[r * 4] * v[0] + worldInv[r * 4 + 1] * v[1] + worldInv[r * 4 + 2] * v[2] + worldInv[r * 4 + 3] * w;
+        };
+        auto normalize = [](float* v) {
+            const float len = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+            for (int k = 0; k < 3; ++k)
+                v[k] /= len > 0 ? len : 1;
+            return len > 0;
+        };
+        if (riverSun)
+        {
+            // As River.fx: -f3SunLightDir times the inverse world matrix (the direction unit length first).
+            float towards[3] = {-riverSun[0], -riverSun[1], -riverSun[2]}, light[4];
+            m_dev->GetVertexShaderConstantF(12, light, 1);
+            if (normalize(towards))
+            {
+                toObject(towards, 0, light);
+                m_dev->SetVertexShaderConstantF(12, light, 1);
+            }
+        }
+        // The camera: where clip x, y and w are all 0 (the view-projection's rows 0, 1 and 3), found as the 4D cross
+        // product of those rows. w = 0: a view without perspective, the camera that way off (taken as up).
+        float vp[16];
+        mat::Mul(wvp, worldInv, vp);
+        const float* r[3] = {vp, vp + 4, vp + 12};
+        double e[4];
+        for (int k = 0; k < 4; ++k)
+        {
+            int c[3], n = 0;
+            for (int j = 0; j < 4; ++j)
+                if (j != k)
+                    c[n++] = j;
+            const double det = r[0][c[0]] * (static_cast<double>(r[1][c[1]]) * r[2][c[2]] - static_cast<double>(r[1][c[2]]) * r[2][c[1]]) -
+                               r[0][c[1]] * (static_cast<double>(r[1][c[0]]) * r[2][c[2]] - static_cast<double>(r[1][c[2]]) * r[2][c[0]]) +
+                               r[0][c[2]] * (static_cast<double>(r[1][c[0]]) * r[2][c[1]] - static_cast<double>(r[1][c[1]]) * r[2][c[0]]);
+            e[k] = k % 2 ? -det : det;
+        }
+        const double size = std::sqrt(e[0] * e[0] + e[1] * e[1] + e[2] * e[2]);
+        if (size > 0)
+        {
+            const bool point = std::fabs(e[3]) > 1e-6 * size;
+            const double scale = point ? 1 / e[3] : (e[2] < 0 ? -1 : 1) / size;
+            for (int k = 0; k < 3; ++k)
+                eye[k] = static_cast<float>(e[k] * scale);
+            eye[3] = point ? 1.0f : 0.0f;
+        }
+        float fade = 0;
+        if (riverGlint > 0 && glintSky && (sky = glintSky(vp, rot, fade)) != nullptr)
+        {
+            float sun[4] = {};
+            m_dev->GetPixelShaderConstantF(0, sun, 1);  // f3SunLightDiffuse: the river's sun (the lighting's River sun)
+            const float k = riverGlint / 128.0f * fade;
+            for (int c = 0; c < 3; ++c)
+                colour[c] = (std::max)(0.0f, sun[c]) * k;
+        }
+    }
+    m_dev->SetVertexShaderConstantF(24, eye, 1);
+    m_dev->SetPixelShaderConstantF(12, colour, 1);
+    m_dev->SetPixelShaderConstantF(13, rot, 3);
+    // The sky texture as the sea's water draw has it (its alpha read linear: sRGB off); the flow map without mips.
+    const D3DSAMPLERSTATETYPE states[7] = {D3DSAMP_ADDRESSU,  D3DSAMP_ADDRESSV,  D3DSAMP_ADDRESSW,   D3DSAMP_MAGFILTER,
+                                           D3DSAMP_MINFILTER, D3DSAMP_MIPFILTER, D3DSAMP_SRGBTEXTURE};
+    const DWORD values[7] = {D3DTADDRESS_CLAMP, D3DTADDRESS_CLAMP, D3DTADDRESS_CLAMP, D3DTEXF_LINEAR,
+                             D3DTEXF_LINEAR,    D3DTEXF_LINEAR,    FALSE};
+    m_dev->SetTexture(5, sky);
+    for (int k = 0; k < 7; ++k)
+        m_dev->SetSamplerState(5, states[k], values[k]);
+
+    // The ripples' sway: two copies of the normal map, each swayed along the channel by its own slow swing (3.5 and
+    // about 4.9 seconds), so they shift against each other; riverShimmer texels each way, in texture units (the
+    // normal map's size). Read with mipmaps, so fine ripples don't flicker and crawl when zoomed out.
+    float shimmer[8] = {};
+    IDirect3DTexture9* flow = riverShimmer > 0 ? RiverFlow() : nullptr;
+    IDirect3DBaseTexture9* normals = nullptr;
+    m_dev->GetTexture(0, &normals);
+    D3DSURFACE_DESC desc = {};
+    if (flow && normals && normals->GetType() == D3DRTYPE_TEXTURE &&
+        SUCCEEDED(static_cast<IDirect3DTexture9*>(normals)->GetLevelDesc(0, &desc)) && desc.Width && desc.Height)
+    {
+        const float t = g_config.waterTime >= 0 ? g_config.waterTime : (GetTickCount() - m_riverStart) / 1000.0f;
+        const float kTwoPi = 6.2831853f, a = riverShimmer * std::sin(kTwoPi * t / 3.5f),
+                    b = riverShimmer * std::sin(kTwoPi * t / 4.9f + 2.1f);
+        const float s[8] = {a / desc.Width, a / desc.Height, b / desc.Width, b / desc.Height, 0.41f, 0, 0, 0};
+        memcpy(shimmer, s, sizeof(s));
+    }
+    if (normals)
+        normals->Release();
+    m_dev->SetPixelShaderConstantF(16, shimmer, 2);
+    m_dev->SetTexture(3, flow);
+    const DWORD flowValues[7] = {D3DTADDRESS_WRAP, D3DTADDRESS_WRAP, D3DTADDRESS_WRAP, D3DTEXF_LINEAR,
+                                 D3DTEXF_LINEAR,   D3DTEXF_NONE,     FALSE};
+    for (int k = 0; k < 7; ++k)
+        m_dev->SetSamplerState(3, states[k], flowValues[k]);
+    m_dev->SetSamplerState(0, D3DSAMP_MIPFILTER, D3DTEXF_LINEAR);
+}
+
+IDirect3DTexture9* Shadows::RiverFlow()
+{
+    if (m_riverFlow || m_riverFlowTried)
+        return m_riverFlow;
+    m_riverFlowTried = true;
+    ULONG before = DeviceRefs(m_dev);
+    D3DLOCKED_RECT lr;
+    if (FAILED(m_dev->CreateTexture(kRiverFlowWidth, kRiverFlowHeight, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED,
+                                    &m_riverFlow, nullptr)) ||
+        FAILED(m_riverFlow->LockRect(0, &lr, nullptr, 0)))
+    {
+        if (m_riverFlow)
+            m_riverFlow->Release();
+        m_riverFlow = nullptr;
+        Log::Write("rivers: making the flow map failed; their ripples stay still");
+        return nullptr;
+    }
+    // RGBA bytes -> A8R8G8B8 (B, G, R, A in memory).
+    for (unsigned y = 0; y < kRiverFlowHeight; ++y)
+    {
+        const unsigned char* from = g_riverFlow + y * kRiverFlowWidth * 4;
+        unsigned char* to = static_cast<unsigned char*>(lr.pBits) + y * lr.Pitch;
+        for (unsigned x = 0; x < kRiverFlowWidth; ++x)
+        {
+            to[x * 4 + 0] = from[x * 4 + 2];
+            to[x * 4 + 1] = from[x * 4 + 1];
+            to[x * 4 + 2] = from[x * 4 + 0];
+            to[x * 4 + 3] = from[x * 4 + 3];
+        }
+    }
+    m_riverFlow->UnlockRect(0);
+    m_internalRefs += DeviceRefs(m_dev) - before;
+    Log::Write("rivers: their ripples sway along the channels, %g texels each way (flow map %ux%u)", riverShimmer,
+               kRiverFlowWidth, kRiverFlowHeight);
+    return m_riverFlow;
 }
 
 namespace
@@ -602,6 +790,11 @@ namespace
 const D3DSAMPLERSTATETYPE kShadowSamplerStates[8] = {
     D3DSAMP_ADDRESSU,  D3DSAMP_ADDRESSV,  D3DSAMP_ADDRESSW,    D3DSAMP_BORDERCOLOR,
     D3DSAMP_MAGFILTER, D3DSAMP_MINFILTER, D3DSAMP_MIPFILTER, D3DSAMP_SRGBTEXTURE};
+
+// What the detail normal map's sampler (s7) copies from the detail texture's (s3).
+const D3DSAMPLERSTATETYPE kDetailSamplerStates[9] = {
+    D3DSAMP_ADDRESSU,  D3DSAMP_ADDRESSV,  D3DSAMP_MAGFILTER,     D3DSAMP_MINFILTER, D3DSAMP_MIPFILTER,
+    D3DSAMP_MAXANISOTROPY, D3DSAMP_MIPMAPLODBIAS, D3DSAMP_MAXMIPLEVEL, D3DSAMP_SRGBTEXTURE};
 
 // Shadow texture sampler: bilinear, no mips, and outside the area BORDER = no shadow.
 void SetShadowSampler(IDirect3DDevice9* dev, DWORD stage)
@@ -618,6 +811,34 @@ void Shadows::BindSampler(IDirect3DDevice9* dev, DWORD stage)
     SetShadowSampler(dev, stage);
 }
 
+void Shadows::SetDetailNormals(bool lit)
+{
+    // c20: the detail texture's u and v directions on the ground; c21: map strength, strength of the normals made
+    // from the detail texture's brightness, one texel in uv. s7: the map, filtered like the detail texture (s3).
+    float c[8] = {1, 0, 0, -1, 0, 0, 0, 0};
+    IDirect3DBaseTexture9* detail = nullptr;
+    m_dev->GetTexture(3, &detail);
+    DetailNormals::Use use;
+    if (lit && detailNormals && detailNormals->enabled && detailAxes && detail)
+    {
+        use = detailNormals->For(detail);
+        memcpy(c, detailAxes, 4 * sizeof(float));
+        c[4] = use.normalMap ? g_config.detailNormalStrength : 0.0f;
+        c[5] = use.normalMap ? 0.0f : g_config.detailBumpiness;
+        c[6] = use.texel[0], c[7] = use.texel[1];
+    }
+    if (detail)
+        detail->Release();
+    m_dev->SetPixelShaderConstantF(20, c, 2);
+    m_dev->SetTexture(7, use.normalMap);
+    for (int k = 0; k < 9; ++k)
+    {
+        DWORD v = 0;
+        m_dev->GetSamplerState(3, kDetailSamplerStates[k], &v);
+        m_dev->SetSamplerState(7, kDetailSamplerStates[k], v);
+    }
+}
+
 HRESULT Shadows::DrawShadowed(IDirect3DVertexShader9* vs, IDirect3DPixelShader9* ps,
                               const std::function<HRESULT()>& draw, bool terrain)
 {
@@ -626,9 +847,9 @@ HRESULT Shadows::DrawShadowed(IDirect3DVertexShader9* vs, IDirect3DPixelShader9*
     IDirect3DVertexShader9* oldVs = nullptr;
     IDirect3DPixelShader9* oldPs = nullptr;
     IDirect3DBaseTexture9* oldTex = nullptr;
-    float oldVsc[16], oldPsc[4], oldLight[32], oldHillGrid[4];
-    IDirect3DBaseTexture9 *oldNormals = nullptr, *oldHills = nullptr;
-    DWORD oldSamp5[8], oldSamp6[8];
+    float oldVsc[16], oldPsc[4], oldLight[32], oldHillGrid[4], oldDetail[8];
+    IDirect3DBaseTexture9 *oldNormals = nullptr, *oldHills = nullptr, *oldDetailMap = nullptr;
+    DWORD oldSamp5[8], oldSamp6[8], oldSamp7[9];
     DWORD oldSamp[8];
     m_dev->GetVertexShader(&oldVs);
     m_dev->GetPixelShader(&oldPs);
@@ -640,6 +861,10 @@ HRESULT Shadows::DrawShadowed(IDirect3DVertexShader9* vs, IDirect3DPixelShader9*
         m_dev->GetTexture(5, &oldNormals);
         for (int k = 0; k < 8; ++k)
             m_dev->GetSamplerState(5, kShadowSamplerStates[k], &oldSamp5[k]);
+        m_dev->GetPixelShaderConstantF(20, oldDetail, 2);
+        m_dev->GetTexture(7, &oldDetailMap);
+        for (int k = 0; k < 9; ++k)
+            m_dev->GetSamplerState(7, kDetailSamplerStates[k], &oldSamp7[k]);
     }
     else
         m_dev->GetPixelShaderConstantF(11, oldHillGrid, 1);
@@ -676,6 +901,7 @@ HRESULT Shadows::DrawShadowed(IDirect3DVertexShader9* vs, IDirect3DPixelShader9*
                                  D3DTEXF_LINEAR,   D3DTEXF_LINEAR,   D3DTEXF_NONE,     FALSE};
         for (int k = 0; k < 8; ++k)
             m_dev->SetSamplerState(5, kShadowSamplerStates[k], values[k]);
+        SetDetailNormals(terrainLight != nullptr);
     }
     else
     {
@@ -707,6 +933,12 @@ HRESULT Shadows::DrawShadowed(IDirect3DVertexShader9* vs, IDirect3DPixelShader9*
             m_dev->SetSamplerState(5, kShadowSamplerStates[k], oldSamp5[k]);
         if (oldNormals)
             oldNormals->Release();
+        m_dev->SetPixelShaderConstantF(20, oldDetail, 2);
+        m_dev->SetTexture(7, oldDetailMap);
+        for (int k = 0; k < 9; ++k)
+            m_dev->SetSamplerState(7, kDetailSamplerStates[k], oldSamp7[k]);
+        if (oldDetailMap)
+            oldDetailMap->Release();
     }
     else
         m_dev->SetPixelShaderConstantF(11, oldHillGrid, 1);

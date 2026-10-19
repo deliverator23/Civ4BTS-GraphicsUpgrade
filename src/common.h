@@ -35,6 +35,7 @@ struct Config
     std::wstring games = L"bts";  // game ids the effects run in ("bts", "col", exe name without .exe, or "*")
     bool dumpShaders = false;   // debug: save every shader the game creates
     bool tracesEnabled = false; // debug: frame traces (hotkey, trigger file, AutoFrame)
+    float waterTime = -1;       // debug: the water's clock stopped at this many seconds (< 0: running)
     UINT traceKey = '9';     // modifiers + traceKey traces the next frame(s)
     bool keyCtrl = true, keyShift = true, keyAlt = false;  // the modifiers every hotkey needs
     UINT compareKey = VK_OEM_2;  // modifiers + compareKey saves a GraphicsUpgrade on/off pair of screenshots
@@ -58,6 +59,10 @@ struct Config
     // and a screen-copy refraction.
     bool waterEnabled = false;
     UINT waterKey = '1';
+    // The water's normal maps: NormalMapToggleKey cycles water_normal.dds, water_normal_1.dds, _2...; NormalMap is
+    // the one at the start (0 = water_normal.dds).
+    UINT waterNormalKey = '7';
+    int waterNormalMap = 0;
     // The running mod's GraphicsUpgrade folder (Mods\<name>\GraphicsUpgrade), if it has one: its GraphicsUpgrade.ini
     // overrides the game folder's setting by setting, and its water textures come first. Empty: no mod, or none.
     std::wstring modDir;  // the mod's folder (Mods\<name>), empty with no mod
@@ -73,6 +78,15 @@ struct Config
     // visible just under the surface and fading out at underwaterDepth (world units; 0 = off), in bands.
     float underwaterDepth = 25.0f;
     float underwaterVisibility = 0.7f;  // 0..1, just below the surface
+    // Shoreline and shallow water (Shader Model 3): the sun's glint follows the sun; sunlight shimmering on the sea
+    // floor near the coast (caustics), a strength (0 = off). Their textures come from the
+    // GraphicsUpgrade folder, else a Civilization V install's.
+    int glintFollowsSun = 1;  // 0 = Colonization's fixed glint, 1 = follows the sun in view, 2 = exactly where it is
+    float caustics = 1.0f;
+    int waveShading = 64;  // the waves' faces lit by the glint's light, and sparkle around it: 0 (off) to 255
+    int riverGlint = 128;  // the sea's glint off the rivers: 0 (off), 128 (normal) to 255
+    float riverShimmer = 3;  // how far the rivers' ripples sway along the channel, texels of their normal map (0 = still)
+    std::wstring civ5Dir = L"C:\\Program Files (x86)\\Steam\\steamapps\\common\\Sid Meier's Civilization V";
     UINT underwaterBands = 8;
     // Sun shadows: units, ships, trees and buildings drawn from the sun into a coverage texture, blurred, and applied
     // to the ground, rivers, roads and water.
@@ -102,6 +116,13 @@ struct Config
     // capped at what the graphics card supports.
     UINT anisotropy = 8;
     UINT anisotropyKey = '5';
+    // Detail normals (DetailNormals): small bumps on the ground, lit by the sun as it is now (needs the lighting on).
+    // From a normal map shipped beside a terrain's detail texture (x detailNormalStrength), or else from the detail
+    // texture's brightness read as height (x detailBumpiness; 0 = shipped maps only).
+    bool detailNormals = true;
+    UINT detailNormalsKey = '6';  // modifiers + key switches them on and off in game
+    float detailNormalStrength = 1.0f;
+    float detailBumpiness = 1.5f;
     UINT lightCycleKey = '4';  // modifiers + key pauses and resumes the light cycle
     float lightSun[kLightGroups][3] = {};
     float lightAmbient[kLightGroups][3] = {};

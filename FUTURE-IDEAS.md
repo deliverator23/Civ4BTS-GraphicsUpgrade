@@ -52,13 +52,18 @@ Haze and colour shift towards the horizon, tinted by the time of day: golden at 
 - **How:** the depth readback from idea 4, or the terrain's own distance in the terrain shader.
 - **Effect:** a sense of scale when zoomed out.
 
-### 6. Shoreline and shallow-water detail
+### 6. Shoreline and shallow-water detail: partly done
 
 The terrain heights give the distance to shore and the water depth. From those:
 
-- **Foam:** bands that follow the actual coastline.
-- **Caustics:** light patterns shimmering on the sea floor in shallow water.
-- **Glint:** a sun glint that follows the cycle's sun, not the fixed spot in `water_env.dds`.
+- **Caustics:** done. Light patterns shimmering on the sea floor in shallow water, from Civilization V's caustic
+  textures (`[water] Caustics`).
+- **Glint:** done. The sun glint follows the cycle's sun instead of staying at the fixed spot in `water_env.dds`,
+  mirrored to the far side of the view so it stays visible (`[water] GlintFollowsSun`).
+- **Foam:** tried and dropped. Rolling bands of foam, then granular foam along the waterline: neither looked right
+  at Civ4's scale.
+
+Status: not released yet.
 
 ### 7. Animated fog of war
 

@@ -11,6 +11,7 @@
 #include <d3d9.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -28,6 +29,12 @@
 #include "test_vs.h"
 #include "test_water_vs.h"
 #include "water_ps.h"
+#include "wave_drape_ps.h"
+#include "wave_drape_vs.h"
+#include "wave_ps.h"
+#include "wave_vs.h"
+#include "water_shore_ps.h"
+#include "water_shore_vs.h"
 #include "water_vs.h"
 
 #define CHECK(expr)                                                                                                \
@@ -331,6 +338,8 @@ static int WaterScene(IDirect3DDevice9* dev, int frames)
     const float quad[6][7] = {{-1, -1, 0.5f, 0, 1, 0, 1}, {-1, 1, 0.5f, 0, 0, 0, 0}, {1, 1, 0.5f, 1, 0, 1, 0},
                               {-1, -1, 0.5f, 0, 1, 0, 1}, {1, 1, 0.5f, 1, 0, 1, 0},  {1, -1, 0.5f, 1, 1, 1, 1}};
     DWORD pixel = 0, circlePixel = 0, hiddenPixel = 0;
+    unsigned long long frameSum = 0;
+    UINT brightX = 0, brightY = 0;
     int restored = 1;
     for (int f = 0; f < frames; ++f)
     {
@@ -463,6 +472,20 @@ static int WaterScene(IDirect3DDevice9* dev, int frames)
         CHECK(sys->LockRect(&lr, nullptr, D3DLOCK_READONLY));
         pixel = reinterpret_cast<const DWORD*>(static_cast<const BYTE*>(lr.pBits) + (bd.Height / 2) * lr.Pitch)[bd.Width / 2];
         // the circle at (-0.5,-0.45), clear of the hull; and at (-0.5,-0.55), behind it
+        // The whole frame's colour channels added up, and where the brightest pixel is (the glint, if any)
+        frameSum = 0;
+        DWORD brightest = 0;
+        for (UINT y = 0; y < bd.Height; ++y)
+        {
+            const DWORD* row = reinterpret_cast<const DWORD*>(static_cast<const BYTE*>(lr.pBits) + y * lr.Pitch);
+            for (UINT x = 0; x < bd.Width; ++x)
+            {
+                const DWORD c = row[x], sum = (c >> 16 & 0xFF) + (c >> 8 & 0xFF) + (c & 0xFF);
+                frameSum += sum;
+                if (sum > brightest)
+                    brightest = sum, brightX = x, brightY = y;
+            }
+        }
         circlePixel = reinterpret_cast<const DWORD*>(static_cast<const BYTE*>(lr.pBits) +
                                                      static_cast<UINT>(bd.Height * 0.725f) * lr.Pitch)[bd.Width / 4];
         hiddenPixel = reinterpret_cast<const DWORD*>(static_cast<const BYTE*>(lr.pBits) +
@@ -470,8 +493,9 @@ static int WaterScene(IDirect3DDevice9* dev, int frames)
         sys->UnlockRect();
         CHECK(dev->Present(nullptr, nullptr, nullptr, nullptr));
     }
-    printf("WATER pixel=%08lx restored=%d circle=%08lx hidden=%08lx\n", static_cast<unsigned long>(pixel), restored,
-           static_cast<unsigned long>(circlePixel), static_cast<unsigned long>(hiddenPixel));
+    printf("WATER pixel=%08lx restored=%d circle=%08lx hidden=%08lx sum=%llu brightest=%u,%u\n",
+           static_cast<unsigned long>(pixel), restored, static_cast<unsigned long>(circlePixel),
+           static_cast<unsigned long>(hiddenPixel), frameSum, brightX, brightY);
     sys->Release();
     bb->Release();
     fog->Release();
@@ -610,6 +634,19 @@ static int ShadowScene(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS& pp, int fra
         CHECK(tex[i]->LockRect(0, &lr, nullptr, 0));
         *static_cast<DWORD*>(lr.pBits) = colours[i];
         tex[i]->UnlockRect(0);
+    }
+    // GU_TEST_DETAIL_RAMP=1: the detail texture is 256x1, grey x at texel x (brighter along u), for detail normals
+    // made from its brightness.
+    wchar_t ramp[8] = {};
+    if (GetEnvironmentVariableW(L"GU_TEST_DETAIL_RAMP", ramp, 8) > 0 && ramp[0] == L'1')
+    {
+        tex[3]->Release();
+        CHECK(dev->CreateTexture(256, 1, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &tex[3], nullptr));
+        D3DLOCKED_RECT lr;
+        CHECK(tex[3]->LockRect(0, &lr, nullptr, 0));
+        for (DWORD x = 0; x < 256; ++x)
+            static_cast<DWORD*>(lr.pBits)[x] = 0xFF000000 | x << 16 | x << 8 | x;
+        tex[3]->UnlockRect(0);
     }
     IDirect3DSurface9* sys = nullptr;
     CHECK(dev->CreateOffscreenPlainSurface(pp.BackBufferWidth, pp.BackBufferHeight, pp.BackBufferFormat,
@@ -1507,6 +1544,240 @@ static int SurfaceScene(IDirect3DDevice9* dev, const wchar_t* surfacePath)
 // view direction at every vertex. Prints "WATERCMP max=. differing=. pixels=. colours=." (the largest difference in
 // any channel, how many pixels differ at all, and how many distinct colours the original drew, to show the picture
 // isn't flat).
+// Our wave shader (wave.hlsl) against BtS's own compiled one (Civ4Wave.fx Wave_Shader P0, from gameDir), with random
+// textures, vertex colours and texture matrices, drawn alpha-blended over black (so the opacity shows in the colour):
+//   0 BtS's, the base layer offset 0.5        1 ours, the same                   = 0
+//   2 ours, the base offset 10.5 (a model's opacity 0.5)                        = 0 with the opacity halved
+//   3 ours, the base offset 10 (opacity 0)                                      = black
+// Prints "WAVECMP same=<worst difference 1 vs 0> half=<worst 2 vs 0 x 0.5> zero=<brightest of 3> lit=<channels of 0
+// above 8>".
+static int WaveCompareScene(IDirect3DDevice9* dev, const std::wstring& gameDir)
+{
+    std::vector<DWORD> vsGame, psGame;
+    if (!ReadAll(gameDir + L"\\wave_vs.bin", vsGame) || !ReadAll(gameDir + L"\\wave_ps.bin", psGame))
+    {
+        printf("FAILED: BtS's wave shaders not found in %ls\n", gameDir.c_str());
+        return 1;
+    }
+    std::vector<DWORD> vsOurs = Tokens(g_waveVS, sizeof(g_waveVS)), psOurs = Tokens(g_wavePS, sizeof(g_wavePS));
+    IDirect3DVertexShader9* vs[2] = {};
+    IDirect3DPixelShader9* ps[2] = {};
+    CHECK(dev->CreateVertexShader(vsGame.data(), &vs[0]));
+    CHECK(dev->CreatePixelShader(psGame.data(), &ps[0]));
+    CHECK(dev->CreateVertexShader(vsOurs.data(), &vs[1]));
+    CHECK(dev->CreatePixelShader(psOurs.data(), &ps[1]));
+    const D3DVERTEXELEMENT9 elems[] = {{0, 0, D3DDECLTYPE_FLOAT3, D3DDECLMETHOD_DEFAULT, D3DDECLUSAGE_POSITION, 0},
+                                       {0, 12, D3DDECLTYPE_D3DCOLOR, D3DDECLMETHOD_DEFAULT, D3DDECLUSAGE_COLOR, 0},
+                                       {0, 16, D3DDECLTYPE_FLOAT2, D3DDECLMETHOD_DEFAULT, D3DDECLUSAGE_TEXCOORD, 0},
+                                       D3DDECL_END()};
+    IDirect3DVertexDeclaration9* decl = nullptr;
+    CHECK(dev->CreateVertexDeclaration(elems, &decl));
+    unsigned seed = 4242;
+    auto rnd = [&]() { seed = seed * 1103515245u + 12345u; return (seed >> 16) & 0xFF; };
+    IDirect3DTexture9* tex[3] = {};
+    for (int st = 0; st < 3; ++st)
+    {
+        CHECK(dev->CreateTexture(32, 32, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &tex[st], nullptr));
+        D3DLOCKED_RECT lr;
+        CHECK(tex[st]->LockRect(0, &lr, nullptr, 0));
+        for (UINT y = 0; y < 32; ++y)
+            for (UINT x = 0; x < 32; ++x)
+                reinterpret_cast<DWORD*>(static_cast<BYTE*>(lr.pBits) + y * lr.Pitch)[x] =
+                    rnd() << 24 | rnd() << 16 | rnd() << 8 | rnd();
+        tex[st]->UnlockRect(0);
+    }
+    struct V
+    {
+        float x, y, z;
+        DWORD colour;
+        float u, v;
+    };
+    std::vector<V> verts;
+    for (int gy = 0; gy < 12; ++gy)
+        for (int gx = 0; gx < 12; ++gx)
+        {
+            auto at = [&](int ix, int iy) {
+                return V{-500 + 1000 * ix / 12.0f, -500 + 1000 * iy / 12.0f, 0,
+                         static_cast<DWORD>(rnd()) << 24 | 0xFFFFFF, ix / 12.0f, iy / 12.0f};
+            };
+            V a = at(gx, gy), b = at(gx + 1, gy), c = at(gx, gy + 1), d = at(gx + 1, gy + 1);
+            verts.insert(verts.end(), {a, b, d, a, d, c});
+        }
+    const float wvp[16] = {0.002f, 0, 0, 0, 0, 0.002f, 0, 0, 0, 0, 0, 0.5f, 0, 0, 0, 1};
+    const float world[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
+    const float fow[8] = {0.0008f, 0, 0, 0.5f, 0, 0.0009f, 0, 0.45f};
+    const float decal[8] = {0.3f, 1.2f, 0.1f, 0.05f, 1.4f, -0.2f, 0.2f, 0.1f};
+    IDirect3DSurface9 *bb = nullptr, *sys = nullptr;
+    CHECK(dev->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &bb));
+    D3DSURFACE_DESC bd;
+    bb->GetDesc(&bd);
+    CHECK(dev->CreateOffscreenPlainSurface(bd.Width, bd.Height, bd.Format, D3DPOOL_SYSTEMMEM, &sys, nullptr));
+    std::vector<DWORD> image[5];
+    for (int which = 0; which < 5; ++which)
+    {
+        // The base row's constant part: 0.5 split between z and w (any split adds up the same), or 10.5 or 10.
+        const float offset = which == 2 ? 10.5f : which == 3 ? 10.0f : 0.5f;
+        // Ours: the light (PS c0) unchanged, or (which 4) red 1, green 0.5, blue 0.25.
+        const float light[4] = {1, which == 4 ? 0.5f : 1.0f, which == 4 ? 0.25f : 1.0f, 1};
+        const float base[8] = {1, 0, offset * 0.25f, offset * 0.75f, 0, 3, -1, 0};
+        CHECK(dev->BeginScene());
+        CHECK(dev->Clear(0, nullptr, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER, 0xFF000000, 1.0f, 0));
+        CHECK(dev->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE));
+        CHECK(dev->SetRenderState(D3DRS_ZENABLE, FALSE));
+        CHECK(dev->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE));
+        CHECK(dev->SetRenderState(D3DRS_SRCBLEND, D3DBLEND_SRCALPHA));
+        CHECK(dev->SetRenderState(D3DRS_DESTBLEND, D3DBLEND_INVSRCALPHA));
+        CHECK(dev->SetVertexDeclaration(decl));
+        CHECK(dev->SetVertexShader(vs[which ? 1 : 0]));
+        CHECK(dev->SetPixelShader(ps[which ? 1 : 0]));
+        CHECK(dev->SetVertexShaderConstantF(0, wvp, 4));
+        CHECK(dev->SetVertexShaderConstantF(4, world, 3));
+        CHECK(dev->SetVertexShaderConstantF(7, fow, 2));
+        CHECK(dev->SetVertexShaderConstantF(9, base, 2));
+        CHECK(dev->SetVertexShaderConstantF(11, decal, 2));
+        CHECK(dev->SetPixelShaderConstantF(0, light, 1));
+        for (int st = 0; st < 3; ++st)
+        {
+            CHECK(dev->SetTexture(st, tex[st]));
+            CHECK(dev->SetSamplerState(st, D3DSAMP_ADDRESSU, D3DTADDRESS_WRAP));
+            CHECK(dev->SetSamplerState(st, D3DSAMP_ADDRESSV, D3DTADDRESS_WRAP));
+            CHECK(dev->SetSamplerState(st, D3DSAMP_MAGFILTER, D3DTEXF_POINT));
+            CHECK(dev->SetSamplerState(st, D3DSAMP_MINFILTER, D3DTEXF_POINT));
+            CHECK(dev->SetSamplerState(st, D3DSAMP_MIPFILTER, D3DTEXF_NONE));
+        }
+        CHECK(dev->DrawPrimitiveUP(D3DPT_TRIANGLELIST, static_cast<UINT>(verts.size() / 3), verts.data(), sizeof(V)));
+        CHECK(dev->EndScene());
+        CHECK(dev->GetRenderTargetData(bb, sys));
+        D3DLOCKED_RECT lr;
+        CHECK(sys->LockRect(&lr, nullptr, D3DLOCK_READONLY));
+        for (UINT y = 0; y < bd.Height; ++y)
+            for (UINT x = 0; x < bd.Width; ++x)
+                image[which].push_back(reinterpret_cast<const DWORD*>(static_cast<const BYTE*>(lr.pBits) + y * lr.Pitch)[x]);
+        sys->UnlockRect();
+        CHECK(dev->Present(nullptr, nullptr, nullptr, nullptr));
+    }
+    int same = 0, half = 0, zero = 0, tinted = 0;
+    size_t lit = 0;
+    const float tint[3] = {0.25f, 0.5f, 1.0f};  // the light of which 4: blue, green, red (the order of the bytes)
+    for (size_t i = 0; i < image[0].size(); ++i)
+        for (int k = 0; k < 3; ++k)
+        {
+            const int c0 = (image[0][i] >> (8 * k)) & 0xFF, c1 = (image[1][i] >> (8 * k)) & 0xFF,
+                      c2 = (image[2][i] >> (8 * k)) & 0xFF, c3 = (image[3][i] >> (8 * k)) & 0xFF,
+                      c4 = (image[4][i] >> (8 * k)) & 0xFF;
+            tinted = (std::max)(tinted, static_cast<int>(std::fabs(c4 - c0 * tint[k]) + 0.5f));
+            same = (std::max)(same, abs(c1 - c0));
+            // over black: colour x opacity, so half the opacity is half the colour (the colour's own alpha applied
+            // first, so the exact value can be a step off either way)
+            half = (std::max)(half, abs(2 * c2 - c0));
+            zero = (std::max)(zero, c3);
+            lit += c0 > 8;
+        }
+    printf("WAVECMP same=%d half=%d zero=%d lit=%zu tinted=%d\n", same, half, zero, lit, tinted);
+
+    // Draped (Shader Model 3, vertex textures), seen by a camera tilted so height shows (clip y takes 0.002 z):
+    //   4 ours flat                              5 draped, the ground unknown (-10000) = 4
+    //   6 draped, the ground 100 up: the waves lifted onto it, so the picture moves
+    D3DCAPS9 caps = {};
+    dev->GetDeviceCaps(&caps);
+    IDirect3D9* d3d9 = nullptr;
+    D3DDEVICE_CREATION_PARAMETERS cp = {};
+    D3DDISPLAYMODE mode = {};
+    const bool vtf = caps.VertexShaderVersion >= D3DVS_VERSION(3, 0) && SUCCEEDED(dev->GetDirect3D(&d3d9)) &&
+                     SUCCEEDED(dev->GetCreationParameters(&cp)) && SUCCEEDED(dev->GetDisplayMode(0, &mode)) &&
+                     SUCCEEDED(d3d9->CheckDeviceFormat(cp.AdapterOrdinal, cp.DeviceType, mode.Format,
+                                                       D3DUSAGE_QUERY_VERTEXTEXTURE, D3DRTYPE_TEXTURE, D3DFMT_R32F));
+    if (d3d9)
+        d3d9->Release();
+    if (!vtf)
+        printf("WAVEDRAPE skipped: no vertex textures\n");
+    else
+    {
+        std::vector<DWORD> vsDrapeCode = Tokens(g_waveDrapeVS, sizeof(g_waveDrapeVS)),
+                           psDrapeCode = Tokens(g_waveDrapePS, sizeof(g_waveDrapePS));
+        IDirect3DVertexShader9* vsDrape = nullptr;
+        IDirect3DPixelShader9* psDrape = nullptr;
+        CHECK(dev->CreateVertexShader(vsDrapeCode.data(), &vsDrape));
+        CHECK(dev->CreatePixelShader(psDrapeCode.data(), &psDrape));
+        IDirect3DTexture9* ground[2] = {};
+        for (int g = 0; g < 2; ++g)
+        {
+            CHECK(dev->CreateTexture(64, 64, 1, 0, D3DFMT_R32F, D3DPOOL_MANAGED, &ground[g], nullptr));
+            D3DLOCKED_RECT lr;
+            CHECK(ground[g]->LockRect(0, &lr, nullptr, 0));
+            for (UINT y = 0; y < 64; ++y)
+                for (UINT x = 0; x < 64; ++x)
+                    reinterpret_cast<float*>(static_cast<BYTE*>(lr.pBits) + y * lr.Pitch)[x] = g ? 100.0f : -10000.0f;
+            ground[g]->UnlockRect(0);
+        }
+        const float tilted[16] = {0.002f, 0, 0, 0, 0, 0.002f, 0.002f, 0, 0, 0, 0, 0.5f, 0, 0, 0, 1};
+        const float drapeGrid[4] = {1.0f / 22.5f, 1.0f / 64, 1.5f, 0};
+        const float base0[8] = {1, 0, 0, 0.5f, 0, 3, -1, 0};
+        std::vector<DWORD> drapeImage[3];
+        for (int which = 0; which < 3; ++which)
+        {
+            CHECK(dev->BeginScene());
+            CHECK(dev->Clear(0, nullptr, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER, 0xFF000000, 1.0f, 0));
+            CHECK(dev->SetVertexDeclaration(decl));
+            CHECK(dev->SetVertexShader(which ? vsDrape : vs[1]));
+            CHECK(dev->SetPixelShader(which ? psDrape : ps[1]));
+            CHECK(dev->SetVertexShaderConstantF(0, tilted, 4));
+            CHECK(dev->SetVertexShaderConstantF(4, world, 3));
+            CHECK(dev->SetVertexShaderConstantF(7, fow, 2));
+            CHECK(dev->SetVertexShaderConstantF(9, base0, 2));
+            CHECK(dev->SetVertexShaderConstantF(11, decal, 2));
+            const float noChange[4] = {1, 1, 1, 1};  // the light unchanged (PS c0)
+            CHECK(dev->SetPixelShaderConstantF(0, noChange, 1));
+            CHECK(dev->SetVertexShaderConstantF(13, tilted, 4));  // the placement is the identity: VP = WVP
+            CHECK(dev->SetVertexShaderConstantF(17, drapeGrid, 1));
+            CHECK(dev->SetTexture(D3DVERTEXTEXTURESAMPLER0, which ? ground[which - 1] : nullptr));
+            CHECK(dev->SetSamplerState(D3DVERTEXTEXTURESAMPLER0, D3DSAMP_MINFILTER, D3DTEXF_POINT));
+            CHECK(dev->SetSamplerState(D3DVERTEXTEXTURESAMPLER0, D3DSAMP_MAGFILTER, D3DTEXF_POINT));
+            CHECK(dev->SetSamplerState(D3DVERTEXTEXTURESAMPLER0, D3DSAMP_MIPFILTER, D3DTEXF_NONE));
+            for (int st = 0; st < 3; ++st)
+                CHECK(dev->SetTexture(st, tex[st]));
+            CHECK(dev->DrawPrimitiveUP(D3DPT_TRIANGLELIST, static_cast<UINT>(verts.size() / 3), verts.data(), sizeof(V)));
+            CHECK(dev->EndScene());
+            CHECK(dev->GetRenderTargetData(bb, sys));
+            D3DLOCKED_RECT lr;
+            CHECK(sys->LockRect(&lr, nullptr, D3DLOCK_READONLY));
+            for (UINT y = 0; y < bd.Height; ++y)
+                for (UINT x = 0; x < bd.Width; ++x)
+                    drapeImage[which].push_back(
+                        reinterpret_cast<const DWORD*>(static_cast<const BYTE*>(lr.pBits) + y * lr.Pitch)[x]);
+            sys->UnlockRect();
+            CHECK(dev->Present(nullptr, nullptr, nullptr, nullptr));
+        }
+        int flat = 0;
+        size_t moved = 0;
+        for (size_t i = 0; i < drapeImage[0].size(); ++i)
+            for (int k = 0; k < 3; ++k)
+            {
+                const int a = (drapeImage[0][i] >> (8 * k)) & 0xFF, b = (drapeImage[1][i] >> (8 * k)) & 0xFF,
+                          c = (drapeImage[2][i] >> (8 * k)) & 0xFF;
+                flat = (std::max)(flat, abs(b - a));
+                moved += c != a;
+            }
+        printf("WAVEDRAPE flat=%d moved=%zu\n", flat, moved);
+        CHECK(dev->SetTexture(D3DVERTEXTEXTURESAMPLER0, nullptr));
+        ground[0]->Release();
+        ground[1]->Release();
+        vsDrape->Release();
+        psDrape->Release();
+    }
+    for (int st = 0; st < 3; ++st)
+    {
+        CHECK(dev->SetTexture(st, nullptr));
+        tex[st]->Release();
+    }
+    for (int k = 0; k < 2; ++k)
+        vs[k]->Release(), ps[k]->Release();
+    decl->Release();
+    sys->Release();
+    bb->Release();
+    return 0;
+}
+
 static int WaterCompareScene(IDirect3DDevice9* dev, const std::wstring& colDir)
 {
     std::vector<DWORD> vsOrig, psOrig;
@@ -1736,6 +2007,167 @@ static int WaterCompareScene(IDirect3DDevice9* dev, const std::wstring& colDir)
         }
     printf("WATERADD shadow=%d glint=%d glintchanged=%zu sky=%d skychanged=%zu\n", shadowWorst, glintWorst, glintChanged,
            skyWorst, skyChanged);
+
+    // DXT5nm normal maps (f4NormalFormat, c8): random gentle normals (slopes up to about 6 degrees) drawn from rgb,
+    // the same normals stored DXT5nm-style (x in alpha, y in green, red and blue 0) with c8.x = 1, and a flat map.
+    // The first two must match (but for z, which the Shader Model 2 build takes as 1), and differ from the flat one.
+    IDirect3DTexture9* normalTex[3] = {};
+    for (int k = 0; k < 3; ++k)
+    {
+        CHECK(dev->CreateTexture(64, 64, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &normalTex[k], nullptr));
+        D3DLOCKED_RECT lr;
+        CHECK(normalTex[k]->LockRect(0, &lr, nullptr, 0));
+        unsigned nseed = 777;
+        for (UINT y = 0; y < 64; ++y)
+            for (UINT x = 0; x < 64; ++x)
+            {
+                nseed = nseed * 1103515245u + 12345u;
+                const float nx = (static_cast<int>((nseed >> 16) & 0xFF) - 128) / 1280.0f;  // -0.1 .. 0.1
+                nseed = nseed * 1103515245u + 12345u;
+                const float ny = (static_cast<int>((nseed >> 16) & 0xFF) - 128) / 1280.0f;
+                const float nz = std::sqrt(1.0f - nx * nx - ny * ny);
+                auto byte = [](float v) { return static_cast<DWORD>(std::lround((v * 0.5f + 0.5f) * 255)); };
+                DWORD c = k == 0 ? 0xFF000000 | byte(nx) << 16 | byte(ny) << 8 | byte(nz)  // a r g b
+                          : k == 1 ? byte(nx) << 24 | byte(ny) << 8                     // x in alpha, y in green
+                                   : 0xFF8080FF;                                         // flat
+                reinterpret_cast<DWORD*>(static_cast<BYTE*>(lr.pBits) + y * lr.Pitch)[x] = c;
+            }
+        normalTex[k]->UnlockRect(0);
+    }
+    std::vector<DWORD> nmImage[3];
+    for (int k = 0; k < 3; ++k)
+    {
+        const float format[4] = {k == 1 ? 1.0f : 0.0f, 0, 0, 0};
+        CHECK(dev->BeginScene());
+        CHECK(dev->Clear(0, nullptr, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER, 0xFF000000, 1.0f, 0));
+        CHECK(dev->SetVertexDeclaration(decl));
+        CHECK(dev->SetVertexShader(vs[1]));
+        CHECK(dev->SetPixelShader(ps[1]));
+        CHECK(dev->SetTexture(7, nullptr));
+        CHECK(dev->SetPixelShaderConstantF(0, water, 4));
+        CHECK(dev->SetPixelShaderConstantF(8, format, 1));
+        for (int st = 0; st < 7; ++st)
+            CHECK(dev->SetTexture(st, st == 0 ? normalTex[k] : tex[st]));
+        CHECK(dev->DrawPrimitiveUP(D3DPT_TRIANGLELIST, static_cast<UINT>(verts.size() / 3), verts.data(), sizeof(V)));
+        CHECK(dev->EndScene());
+        CHECK(dev->GetRenderTargetData(bb, sys));
+        D3DLOCKED_RECT lr;
+        CHECK(sys->LockRect(&lr, nullptr, D3DLOCK_READONLY));
+        for (UINT y = 0; y < bd.Height; ++y)
+            for (UINT x = 0; x < bd.Width; ++x)
+                nmImage[k].push_back(reinterpret_cast<const DWORD*>(static_cast<const BYTE*>(lr.pBits) + y * lr.Pitch)[x]);
+        sys->UnlockRect();
+        CHECK(dev->Present(nullptr, nullptr, nullptr, nullptr));
+    }
+    const float noFormat[4] = {};
+    CHECK(dev->SetPixelShaderConstantF(8, noFormat, 1));
+    // The sky cube is random noise, so a hair's change in a normal can land on another texel: compare the average
+    // difference (x 1000), DXT5nm against rgb, with that between rgb and the flat map.
+    double nmDiff = 0, flatDiff = 0;
+    for (size_t i = 0; i < nmImage[0].size(); ++i)
+        for (int k = 0; k < 3; ++k)
+        {
+            nmDiff += abs(channel(nmImage[0][i], k) - channel(nmImage[1][i], k));
+            flatDiff += abs(channel(nmImage[0][i], k) - channel(nmImage[2][i], k));
+        }
+    const double samples = 3.0 * nmImage[0].size();
+    printf("WATERNM mean=%d flat=%d\n", static_cast<int>(1000 * nmDiff / samples), static_cast<int>(1000 * flatDiff / samples));
+    for (IDirect3DTexture9* t : normalTex)
+        t->Release();
+
+    // The shoreline water (water.hlsl with SHORE, Shader Model 3), against our plain one (image[1]):
+    //   0 every addition off (strengths 0, the glint not turned)        = the plain picture
+    //   1 the glint turned a quarter round the vertical                  changes the glint
+    //   2 caustics, the shore 2 cells from land and 8 units deep         change the picture
+    D3DCAPS9 caps = {};
+    dev->GetDeviceCaps(&caps);
+    if (caps.PixelShaderVersion >= D3DPS_VERSION(3, 0) && caps.VertexShaderVersion >= D3DVS_VERSION(3, 0))
+    {
+        std::vector<DWORD> vsShoreCode = Tokens(g_waterShoreVS, sizeof(g_waterShoreVS)),
+                           psShoreCode = Tokens(g_waterShorePS, sizeof(g_waterShorePS));
+        IDirect3DVertexShader9* vsShore = nullptr;
+        IDirect3DPixelShader9* psShore = nullptr;
+        CHECK(dev->CreateVertexShader(vsShoreCode.data(), &vsShore));
+        CHECK(dev->CreatePixelShader(psShoreCode.data(), &psShore));
+        auto texel = [&](DWORD argb) {
+            IDirect3DTexture9* t = nullptr;
+            D3DLOCKED_RECT lr;
+            if (SUCCEEDED(dev->CreateTexture(1, 1, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &t, nullptr)) &&
+                SUCCEEDED(t->LockRect(0, &lr, nullptr, 0)))
+                *static_cast<DWORD*>(lr.pBits) = argb, t->UnlockRect(0);
+            return t;
+        };
+        IDirect3DTexture9* shallow = texel(0xFF104000);  // r 16 = 2 cells, g 64 = 8 units deep, known
+        IDirect3DTexture9* bright = texel(0xFFFFFFFF);   // caustics at full
+        if (!shallow || !bright)
+        {
+            printf("FAILED: shore test textures\n");
+            return 1;
+        }
+        std::vector<DWORD> shoreImage[3];
+        for (int which = 0; which < 3; ++which)
+        {
+            const float strengths[4] = {which == 2 ? 1.0f : 0.0f, 0.0f, 7.5f, which == 1 ? 1.0f : 0.0f};
+            const float quarter[12] = {0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1, 0};
+            const float identity3[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
+            const float shoreGrid[4] = {0.001f, 0.5f, 0.01f, 0.002f}, scroll[4] = {};
+            CHECK(dev->BeginScene());
+            CHECK(dev->Clear(0, nullptr, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER, 0xFF000000, 1.0f, 0));
+            CHECK(dev->SetVertexDeclaration(decl));
+            CHECK(dev->SetVertexShader(vsShore));
+            CHECK(dev->SetPixelShader(psShore));
+            CHECK(dev->SetTexture(7, nullptr));
+            CHECK(dev->SetVertexShaderConstantF(0, wvp, 4));
+            CHECK(dev->SetVertexShaderConstantF(4, invView, 4));
+            CHECK(dev->SetVertexShaderConstantF(7, eyeCol, 1));
+            CHECK(dev->SetVertexShaderConstantF(8, world, 4));
+            CHECK(dev->SetVertexShaderConstantF(12, reflection, 4));
+            CHECK(dev->SetVertexShaderConstantF(16, refraction, 4));
+            CHECK(dev->SetVertexShaderConstantF(20, tex1, 3));
+            CHECK(dev->SetVertexShaderConstantF(23, tex2, 3));
+            CHECK(dev->SetVertexShaderConstantF(26, grid, 3));
+            CHECK(dev->SetVertexShaderConstantF(34, shoreGrid, 1));
+            CHECK(dev->SetVertexShaderConstantF(35, scroll, 1));
+            CHECK(dev->SetPixelShaderConstantF(0, water, 4));
+            CHECK(dev->SetPixelShaderConstantF(4, strengths, 1));
+            CHECK(dev->SetPixelShaderConstantF(5, which == 1 ? quarter : identity3, 3));
+            for (int st = 0; st < 7; ++st)
+                CHECK(dev->SetTexture(st, tex[st]));
+            CHECK(dev->SetTexture(8, shallow));
+            for (int st = 9; st < 11; ++st)
+                CHECK(dev->SetTexture(st, bright));
+            CHECK(dev->DrawPrimitiveUP(D3DPT_TRIANGLELIST, static_cast<UINT>(verts.size() / 3), verts.data(), sizeof(V)));
+            CHECK(dev->EndScene());
+            CHECK(dev->GetRenderTargetData(bb, sys));
+            D3DLOCKED_RECT lr;
+            CHECK(sys->LockRect(&lr, nullptr, D3DLOCK_READONLY));
+            for (UINT y = 0; y < bd.Height; ++y)
+                for (UINT x = 0; x < bd.Width; ++x)
+                    shoreImage[which].push_back(
+                        reinterpret_cast<const DWORD*>(static_cast<const BYTE*>(lr.pBits) + y * lr.Pitch)[x]);
+            sys->UnlockRect();
+            CHECK(dev->Present(nullptr, nullptr, nullptr, nullptr));
+        }
+        int neutralWorst = 0;
+        size_t turned = 0, caustics = 0;
+        for (size_t i = 0; i < image[1].size(); ++i)
+            for (int k = 0; k < 3; ++k)
+            {
+                const int plain = channel(image[1][i], k), off = channel(shoreImage[0][i], k);
+                neutralWorst = (std::max)(neutralWorst, abs(off - plain));
+                turned += channel(shoreImage[1][i], k) != off;
+                caustics += channel(shoreImage[2][i], k) != off;
+            }
+        printf("WATERSHORE neutral=%d turned=%zu caustics=%zu\n", neutralWorst, turned, caustics);
+        for (int st = 7; st < 11; ++st)
+            CHECK(dev->SetTexture(st, nullptr));
+        shallow->Release();
+        bright->Release();
+        vsShore->Release();
+        psShore->Release();
+    }
+    else
+        printf("WATERSHORE skipped: no Shader Model 3\n");
     CHECK(dev->SetTexture(7, nullptr));
     half->Release();
     darkSky->Release();
@@ -1841,6 +2273,17 @@ int wmain(int argc, wchar_t** argv)
     }
     parent->Release();
 
+    if (argc > 3 && wcscmp(argv[2], L"wavecmp") == 0)
+    {
+        // test_proxy <dll> wavecmp <folder of BtS's extracted shaders>
+        if (WaveCompareScene(dev, argv[3]) != 0)
+            return 1;
+        ULONG devRefs = dev->Release();
+        ULONG d3dRefs = d3d->Release();
+        DestroyWindow(wnd);
+        printf("OK: wavecmp, final refs device %lu, d3d %lu\n", devRefs, d3dRefs);
+        return 0;
+    }
     if (argc > 3 && wcscmp(argv[2], L"watercmp") == 0)
     {
         // test_proxy <dll> watercmp <folder of Colonization's extracted shaders>

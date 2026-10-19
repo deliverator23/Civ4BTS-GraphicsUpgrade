@@ -146,6 +146,7 @@ private:
     double m_cycleSeconds = 0;  // time the cycle has run (it stands still while paused or with the lighting off)
     bool m_worldThisFrame = false;
     bool m_loggedCycle = false;
+    bool m_loggedFixedSun = false;  // the sun path's fixed sun (cycle not running) logged
     int m_loggedStep = -1;   // the last whole step logged
     double m_cyclePos = 0;   // where the cycle is, 0 .. step count
     std::unordered_set<const void*> m_checked;

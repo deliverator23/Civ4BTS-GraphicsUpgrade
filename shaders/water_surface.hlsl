@@ -20,6 +20,7 @@ float4 f4WaterConstants : register(c0);  // as water.hlsl: x = Fresnel pull towa
 float3 f3SunSquared : register(c1);      // the sun colour squared
 float4 f4WaterShadow : register(c2);     // y = 1: shadows on, z = darkness
 float3 f3SkyLight : register(c3);        // the reflected sky's tint (squared space)
+float4 f4NormalFormat : register(c4);    // x = 1: the normal map is DXT5nm (NormalSum)
 
 sampler2D NormalMap : register(s0);
 sampler2D BaseMap : register(s1);    // the mesh's own texture: its alpha is the water's extent
@@ -59,9 +60,18 @@ VSOut VSMain(VSIn i)
     return o;
 }
 
+// As water.hlsl's NormalSum: two texels added as normals, from rgb or DXT5nm (x from alpha, y from green, the sum's z
+// rebuilt from the summed slopes).
+float3 NormalSum(float4 a, float4 b)
+{
+    float4 s = a + b;
+    float2 xy = lerp(s.rg, s.ag, f4NormalFormat.x) * 2 - 2;
+    return float3(xy, lerp(s.b * 2 - 2, 2 * sqrt(saturate(1 - 0.25 * dot(xy, xy))), f4NormalFormat.x));
+}
+
 float4 PSMain(VSOut i) : COLOR
 {
-    float3 n = (2 * tex2D(NormalMap, i.normalUV.zw).xyz - 1) + (2 * tex2D(NormalMap, i.normalUV.xy).xyz - 1);
+    float3 n = NormalSum(tex2D(NormalMap, i.normalUV.zw), tex2D(NormalMap, i.normalUV.xy));
     float3 normal = normalize(float3(n.xy, n.z * 0.5));
     float3 toEye = normalize(i.toEye);
     float4 sky = texCUBE(EnvironmentMap, reflect(-toEye, normal));

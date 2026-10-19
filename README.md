@@ -15,10 +15,12 @@ cast shadows. These apply only while that mod is running. See [For modders](#for
 | | Plain BtS | With GraphicsUpgrade |
 |---|---|---|
 | **Water** | Flat, animated surface | Ripples that reflect the sky, show the sea floor through the waves, and sparkle in the sun |
+| **Coasts** | Flat water up to the shore | Sunlight shimmering on the shallow sea floor (with Civilization V installed), and a sun glint that follows the sun |
 | **Ship reflections** | None | Ships mirrored in the water |
 | **Under the water** | Hulls show through the semi-transparent sea | They still show through, fading out with depth like real shallows |
 | **Unit, ship and tree shadows** | Round blobs under units; nothing for trees | Real shadows cast by the sun, weapons and rigging included |
 | **Hill and peak shadows** | None | Hills and peaks shade the ground behind them |
+| **Ground detail** | Painted on, lit the same whatever the light | Small bumps (sand ripples, cracks, stones) catch the sun and turn with it |
 | **Building shadows** | Painted on, always pointing the same way | Real shadows from buildings, improvements and resources |
 | **Lighting** | BtS's white sun and grey shade | [Without day-night cycle] A warm sun and cool blue shade, as in Colonization; colours adjustable for units, ships, trees, buildings, terrain and rivers |
 | **Day and night** | None | [With day-night cycle] The light changes colour and the sun circles the sky, with shadows turning to follow it |
@@ -68,6 +70,8 @@ If the folder already has a `d3d9.dll` (ReShade, DXVK...), read [Using with ReSh
 | Ctrl+Shift+3 | Lighting                                     |
 | Ctrl+Shift+4 | Pauses and resumes the day–night cycle       |
 | Ctrl+Shift+5 | Sharper distant textures (anisotropic filtering) |
+| Ctrl+Shift+6 | Bumps on the ground that catch the sun (detail normals) |
+| Ctrl+Shift+7 | Next look for the waves, if there's more than one (`water_normal_1.dds`...) |
 | Ctrl+Shift+/ | Saves a before/after pair of screenshots     |
 
 Ctrl+Shift+/ saves two screenshots from two frames in a row, so every unit, tree and wave is in the same place:
@@ -75,7 +79,8 @@ one with GraphicsUpgrade's effects as you have them (`..._on.png`) and one with 
 (`..._off.png`). They go in `%LOCALAPPDATA%\GraphicsUpgrade\bts\screenshots`.
 
 To use other keys, change them in `GraphicsUpgrade.ini`: `ToggleKey` in the `[water]`, `[shadows]` and `[lighting]`
-sections, `LightCycleToggleKey` in `[lighting]` for pausing the day–night cycle, and `CompareKey` in `[general]` for the
+sections, `LightCycleToggleKey` in `[lighting]` for pausing the day–night cycle, `ToggleKey` and
+`DetailNormalsToggleKey` in `[textures]` for the filtering and the ground's bumps, and `CompareKey` in `[general]` for the
 screenshots. Each can be a number, a letter, a key name such as `F11` or `Numpad5`, a symbol such as `/`, or `none`.
 `KeyModifiers` in `[general]` sets the Ctrl+Shift part. Letters are best avoided: many mods' own keys ignore extra
 modifiers, so a letter can set off a mod's command too. No mod we know of uses the number keys or `/`.
@@ -90,20 +95,27 @@ The ones you're most likely to want:
 | `[shadows] Darkness` | How dark shadows are (0 to 1) |
 | `[shadows] Softness` | How soft shadow edges are (0 = hard) |
 | `[shadows] BuildingShadows` | Real building shadows on (1) or off (0) |
-| `[shadows] SunDirection` | Which way the sunlight travels while the day–night cycle is off (while it runs, the sun follows `[lighting] SunMiddayFrom` and the height settings) |
+| `[shadows] SunDirection` | Which way the sunlight travels when `[lighting] SunMiddayFrom` is empty. With `SunMiddayFrom` set, the sun follows it and the height settings; with the day–night cycle off, it stays where it is at `LightCycleStartStep` |
 | `[shadows] HillShadowLength` | How long hill and mountain shadows are (1 = true to the terrain's heights) |
 | `[shadows] WaterShadow` | How much shadow falls on the water's surface |
 | `[water] UnderwaterDepth` | How deep you can see into the water (0 = not at all) |
+| `[water] Caustics` | How strong the shimmer on the shallow sea floor is (0 = off) |
+| `[water] WaveShading` | How strongly the sun or moon lights the waves, and the sparkle around the glint (0 = off, up to 255) |
+| `[water] RiverGlint` | How bright the glint off the rivers is (0 = off, 128 = normal, up to 255) |
+| `[water] RiverShimmer` | How far the rivers' ripples sway back and forth along the channel (0 = still, up to 3) |
+| `[water] Civ5Dir` | Your Civilization V folder: the caustics use its textures |
 | `[reflection] Size` | Reflection sharpness: 1024, or 512 to save a little speed |
 | `[lighting] Enabled` | GraphicsUpgrade's lighting (1), or BtS's own (0) |
 | `[lighting] LightCycleOn` | The day–night cycle on (1) or off (0) |
 | `[textures] Anisotropy` | How sharp distant ground, roads and water stay: 2 to 16, or 1 for BtS's own filtering |
+| `[textures] DetailNormals` | Bumps on the ground that catch the sun (1) or not (0); needs the lighting on |
+| `[textures] DetailBumpiness` | How bumpy the ground looks (0 = only where a mod gives a normal map) |
 
 ### Lighting and day–night
 
-Colours are written as Red,Green,Blue from 0 to 255. You can give each group its own: units, ships and vehicles,
-terrain, rivers, trees, buildings, and the sun on the water. The `presets` folder has complete `[lighting]` sections to
-paste in place of the one in `GraphicsUpgrade.ini`:
+Colours are written as Red,Green,Blue from 0 to 255. You can give each group its own in `[lighting groups]`: units,
+ships and vehicles, terrain, rivers, trees, buildings, and the sun on the water. The `presets` folder has complete
+`[lighting]` and `[lighting groups]` sections to paste in place of the two in `GraphicsUpgrade.ini`:
 
 - **`lighting-bts.ini`**: BtS's own lighting, close to how the game looks without GraphicsUpgrade. A good starting point for your own colours.
 - **`lighting-colonization.ini`**: Colonization's warm sun and cool blue shade.
@@ -115,6 +127,11 @@ You can set:
 - the colours for each hour
 - the compass direction of the midday sun
 - how high the sun and moon climb
+
+The colours for each hour can also be painted as a small picture: `[lighting] LightCycleImage=cycle.png` (PNG or
+BMP), one pixel wide per hour, the sun's colour along the top row and the ambient's along the second. Put it in the
+`GraphicsUpgrade` folder next to the game's `GraphicsUpgrade.ini`, or in a mod's own `GraphicsUpgrade` folder. A
+24×2 picture gives a 24-hour day, and a wider one gives finer steps.
 
 ## For modders
 
@@ -136,6 +153,15 @@ reflects, with the sun's glint in its alpha) in your mod's `Assets\Art\GraphicsU
 in your mod's folder still works for these too, and there the normal map is also found under its old name,
 `water_001.dds`.
 
+More looks for the waves can go in the same places, as `water_normal_1.dds`, `water_normal_2.dds` and so on (numbered
+from 1, without gaps). Each is a normal map that covers 1440 world units (8 plots) before it repeats, where
+`water_normal.dds` covers Colonization's 480. Ctrl+Shift+7 (`[water] NormalMapToggleKey`) cycles through them,
+`water_normal.dds` first, and `[water] NormalMap` picks the one the game starts with.
+
+Any of these water normal maps can be DXT5nm instead of plain DXT5: x in the alpha channel and y in green (red and blue
+unused), marked with the `DDPF_NORMAL` flag as NVIDIA's texture tools write it. At the same size it keeps the waves'
+shape about 2.5 times more accurately.
+
 GraphicsUpgrade finds the running mod in two ways:
 - from the game's command line (`mod= "Mods\<your mod>"`, the way BtS starts a mod)
 - from the `Mod =` line in `CivilizationIV.ini`
@@ -143,8 +169,9 @@ GraphicsUpgrade finds the running mod in two ways:
 The log notes which mod it found.
 
 **Models that shouldn't cast shadows.** `[shadows] NoShadowTextures` lists textures whose models cast no shadow. By
-default these are the unit flags. Entries are separated by `;`, and each one is a `.dds` file or a folder of them. Write
-them as paths under `Assets`, just as in your XML:
+default these are the unit flags. Entries are separated by `;`, or written on more `NoShadowTextures=` lines (each
+line adds to the others), and each one is a `.dds` file or a folder of them. Write them as paths under `Assets`, just as
+in your XML:
 
 ```ini
 [shadows]
@@ -182,6 +209,22 @@ LitEffectTextures=Art\Effects\Sandstorm_P; Art\Effects\Dust\dust_cloud.dds
 GraphicsUpgrade needs that light to re-light the terrain and roads correctly. If your mod has its own `SunLight.nif`
 (loose or in an `.FPK`), it is read automatically, and the log notes what was found. The `BakedTerrain*` lines under
 `[lighting]` override it.
+
+**Normal maps for your terrain.** With the lighting on, the ground's small bumps are lit by the sun as it moves. By
+default they come from each terrain's detail texture (the `<Detail>` in `CIV4ArtDefines_Terrain.xml`), its light and
+dark areas read as high and low, and `[textures] DetailBumpiness` sets how strong they are. That works well for
+textures like rock or soil. It works less well for a detail texture with light and shadow painted into it, where a
+painted shadow would read as a dip. For those, ship a normal map: the same path and name as the detail texture with
+`_normal` added, loose or in your `.FPK` files:
+
+```
+Art\Terrain\Textures\Detail\DesertDetail.dds
+Art\Terrain\Textures\Detail\DesertDetail_normal.dds
+```
+
+The normal map is the usual kind (DirectX): red along the texture's width, green up the image, blue out of the ground.
+It is used instead of the detail texture's light and dark areas, at `[textures] DetailNormalStrength` (1 = as made).
+The log lists which detail textures have one.
 
 ## Using with ReShade or DXVK
 
@@ -248,5 +291,7 @@ GraphicsUpgrade by Deliverator.
 
 The water shader is reverse engineered from the one in Sid Meier's Civilization IV: Colonization. The water textures
 (`water_normal.dds`, which is Colonization's `water_001.dds`, and `water_env.dds`) are from Colonization, © Firaxis
-Games / 2K; `water_env.dds`'s sun glint has been redrawn to remove a seam. GraphicsUpgrade is an unofficial fan project,
+Games / 2K; `water_env.dds`'s sun glint has been redrawn to remove a seam. The caustics use textures
+from Sid Meier's Civilization V (© Firaxis Games / 2K), read from your own Civilization V installation. GraphicsUpgrade
+is an unofficial fan project,
 not affiliated with or endorsed by Firaxis Games, 2K or Take-Two Interactive.

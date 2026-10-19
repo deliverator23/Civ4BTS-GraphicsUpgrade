@@ -60,7 +60,7 @@ std::string Rect(const RECT* r)
 }
 
 ProxyDevice::ProxyDevice(IDirect3DDevice9* real, ProxyD3D9* parent)
-    : Device9Forward(real), m_parent(parent), m_trace(m_registry), m_refl(real), m_water(real), m_shadows(real), m_light(real), m_terrain(real), m_perf(real)
+    : Device9Forward(real), m_parent(parent), m_trace(m_registry), m_refl(real), m_water(real), m_shadows(real), m_light(real), m_waves(real), m_terrain(real), m_detail(real), m_perf(real)
 {
     m_effects = EffectsAllowed();
     m_refl.enabled = m_effects && g_config.reflectionEnabled;
@@ -110,12 +110,13 @@ ProxyDevice::ProxyDevice(IDirect3DDevice9* real, ProxyD3D9* parent)
                    g_config.ghostOffset[2]);
     std::string modifiers = std::string(g_config.keyCtrl ? "ctrl+" : "") + (g_config.keyShift ? "shift+" : "") +
                             (g_config.keyAlt ? "alt+" : "");
-    Log::Write("hotkeys (%skey): water %s, shadows %s, lighting %s, light cycle %s, filtering %s, reflection %s, "
-               "reflection overlay %s, shadow overlay %s, ghost %s, trace %s",
+    Log::Write("hotkeys (%skey): water %s, water normal map %s, shadows %s, lighting %s, light cycle %s, filtering %s, "
+               "detail normals %s, reflection %s, reflection overlay %s, shadow overlay %s, ghost %s, trace %s",
                modifiers.c_str(),
-               KeyName(g_config.waterKey).c_str(), KeyName(g_config.shadowsKey).c_str(),
+               KeyName(g_config.waterKey).c_str(), KeyName(g_config.waterNormalKey).c_str(),
+               KeyName(g_config.shadowsKey).c_str(),
                KeyName(g_config.lightingKey).c_str(), KeyName(g_config.lightCycleKey).c_str(),
-               KeyName(g_config.anisotropyKey).c_str(),
+               KeyName(g_config.anisotropyKey).c_str(), KeyName(g_config.detailNormalsKey).c_str(),
                KeyName(g_config.reflectionKey).c_str(),
                KeyName(g_config.overlayKey).c_str(), KeyName(g_config.shadowOverlayKey).c_str(),
                KeyName(g_config.ghostKey).c_str(), g_config.tracesEnabled ? KeyName(g_config.traceKey).c_str() : "off");
@@ -144,7 +145,8 @@ ULONG ProxyDevice::Release()
     const ULONG shotRefs = (m_compareShots[0] != nullptr) + (m_compareShots[1] != nullptr);  // a capture in progress
     bool timed = false;  // the frames since the log's last timing line, logged
     if (refs != 0 && refs == m_refl.InternalRefs() + m_water.InternalRefs() + m_shadows.InternalRefs() + m_deferRefs +
-                                 m_light.InternalRefs() + m_terrain.InternalRefs() + m_perf.InternalRefs() + shotRefs)
+                                 m_light.InternalRefs() + m_waves.InternalRefs() + m_terrain.InternalRefs() +
+                                 m_detail.InternalRefs() + m_perf.InternalRefs() + shotRefs)
     {
         // Only our own objects still hold the device: the game has let go, so release them, which destroys the
         // device, and the wrapper with it.
@@ -157,7 +159,9 @@ ULONG ProxyDevice::Release()
         m_water.ReleaseAll();
         m_shadows.ReleaseAll();
         m_light.ReleaseAll();  // last: these don't read the device's reference count
+        m_waves.ReleaseAll();
         m_terrain.ReleaseAll();
+        m_detail.ReleaseAll();
         m_perf.ReleaseAll();
         for (IDirect3DSurface9*& shot : m_compareShots)
             if (shot)
@@ -313,6 +317,8 @@ HRESULT ProxyDevice::Present(CONST RECT* pSourceRect, CONST RECT* pDestRect, HWN
         m_water.enabled = !m_water.enabled;
         Log::Write("Reflective, dynamic water %s at frame %u", m_water.enabled ? "on" : "off", m_frame);
     }
+    if (m_effects && combo(g_config.waterNormalKey, m_waterNormalKeyWasDown))
+        m_water.NextNormalMap();
     if (m_effects && combo(g_config.overlayKey, m_overlayKeyWasDown))
     {
         m_refl.overlay = !m_refl.overlay;
@@ -332,6 +338,11 @@ HRESULT ProxyDevice::Present(CONST RECT* pSourceRect, CONST RECT* pDestRect, HWN
     {
         m_aniso = !m_aniso;
         Log::Write("anisotropic filtering %s at frame %u", m_aniso ? "on" : "off", m_frame);
+    }
+    if (m_effects && combo(g_config.detailNormalsKey, m_detailKeyWasDown))
+    {
+        m_detail.enabled = !m_detail.enabled;
+        Log::Write("detail normals %s at frame %u", m_detail.enabled ? "on" : "off", m_frame);
     }
     if (m_effects && combo(g_config.lightCycleKey, m_lightCycleKeyWasDown))
     {
@@ -390,6 +401,21 @@ void ProxyDevice::NewLightFrame()
     m_shadows.sunDirection = m_light.SunDirection();
     m_shadows.darknessScale = m_light.ShadowScale();
     m_water.sunColour = m_light.WaterSun();  // the lighting's (the moon's glint at night), or Colonization's
+    // The sun the glint follows, on the sea and the rivers.
+    m_water.sunDirection = m_light.SunDirection();
+    m_water.dayFraction = m_light.CycleActive() && g_config.lightCycleStepCount > 0
+                              ? static_cast<float>(m_light.CyclePos() / g_config.lightCycleStepCount)
+                              : -1.0f;
+    // Rivers: their ripples lit from the lighting's sun, as the terrain (LightDirection, else the shadows' sun with
+    // MatchShadowDirection=1), and the glint off them (with the water on).
+    m_shadows.riverSun = !m_light.enabled              ? nullptr
+                         : g_config.haveLightDirection   ? g_config.lightDirection
+                         : g_config.matchShadowDirection ? m_light.SunDirection()
+                                                         : nullptr;
+    m_shadows.riverGlint = m_water.enabled ? g_config.riverGlint : 0;
+    m_shadows.riverShimmer = m_water.enabled ? g_config.riverShimmer : 0.0f;
+    if (!m_shadows.glintSky)
+        m_shadows.glintSky = [this](const float* vp, float* rot, float& fade) { return m_water.GlintSky(vp, rot, fade); };
 }
 
 HRESULT ProxyDevice::BeginScene()
@@ -413,6 +439,7 @@ HRESULT ProxyDevice::CreateTexture(UINT Width, UINT Height, UINT Levels, DWORD U
     if (SUCCEEDED(hr) && ppTexture && *ppTexture)
     {
         m_shadows.ForgetTexture(*ppTexture);  // a new texture at a possibly reused address
+        m_detail.ForgetTexture(*ppTexture);
         m_light.ForgetTexture(*ppTexture);
     }
     if (Usage & (D3DUSAGE_RENDERTARGET | D3DUSAGE_DEPTHSTENCIL))
@@ -830,8 +857,8 @@ HRESULT ProxyDevice::Dispatch(Draw draw)
         }
     }
     const bool hills = m_shadows.enabled && g_config.hillShadows;
-    if ((m_light.enabled || hills) && vs && vs->btsTerrain && m_refl.TargetIsBackBuffer())
-        m_terrain.Capture(*vs);  // heights from the terrain's vertex buffers: per-pixel lighting, hill shadows
+    if ((m_light.enabled || hills || m_water.enabled) && vs && vs->btsTerrain && m_refl.TargetIsBackBuffer())
+        m_terrain.Capture(*vs);  // heights from the terrain's vertex buffers: per-pixel lighting, hill shadows, the shore
     if (vs && vs->btsTerrain && m_trace.Active() && m_lightmapSavedFor != m_trace.Dir())
     {
         // Traces keep the terrain lightmap (BtS bakes it at map load), for working out how it was lit.
@@ -845,6 +872,10 @@ HRESULT ProxyDevice::Dispatch(Draw draw)
                           ",\"spacing\":" + std::to_string(m_terrain.Spacing()) + "}");
         if (m_terrain.SaveHillBmp(m_trace.Dir() + L"\\hill_shadows.bmp"))
             m_trace.Event("{\"ev\":\"hill_shadows_saved\"}");
+        // The shore the water's caustics use (red: distance to land, green: depth, alpha: known)
+        IDirect3DTexture9* shore = m_water.ShoreWanted() ? m_terrain.ShoreTexture(m_refl.WaterHeight()) : nullptr;
+        if (shore && SaveTextureBmp(shore, m_trace.Dir() + L"\\shore.bmp"))
+            m_trace.Event("{\"ev\":\"shore_saved\"}");
         if (m_terrain.SaveBmp(m_trace.Dir() + L"\\terrain_normals.bmp"))
             m_trace.Event("{\"ev\":\"terrain_normals_saved\",\"spacing\":" + std::to_string(m_terrain.Spacing()) +
                           ",\"cells\":" + std::to_string(m_terrain.Cells()) + "}");
@@ -856,6 +887,8 @@ HRESULT ProxyDevice::Dispatch(Draw draw)
     m_light.TerrainConstants(m_terrainLight, normals ? m_terrain.Spacing() : 0, m_terrain.Cells());
     m_shadows.terrainLight = m_light.enabled ? m_terrainLight : nullptr;
     m_shadows.terrainNormals = normals;
+    m_shadows.detailNormals = &m_detail;
+    m_shadows.detailAxes = m_terrain.DetailAxes();
     m_shadows.decalLight = fixedFunction ? m_light.DecalLight() : nullptr;  // roads are drawn unlit
     // (also for fixed-function draws: roads and river foam take the hill shadows through an extra texture stage)
     m_shadows.hillShadows = hills && (fixedFunction || (vs && Shadows::MaybeReceiver(*vs))) ? m_terrain.HillTexture()
@@ -893,6 +926,14 @@ HRESULT ProxyDevice::Dispatch(Draw draw)
             m_water.shadowMatrix = m_shadows.LitMatrix();
             m_water.shadowDarkness = m_shadows.Darkness();
             m_water.skyLight = m_light.SkyLight();
+            // The shoreline: the shore (distance to land, depth) worked out from the terrain's heights for the
+            // caustics (the glint's sun: NewLightFrame).
+            m_water.shoreTexture = m_water.ShoreWanted() ? m_terrain.ShoreTexture(m_refl.WaterHeight()) : nullptr;
+            if (m_terrain.Spacing() > 0)
+            {
+                m_water.shoreGrid[0] = 1.0f / (m_terrain.Spacing() * m_terrain.Cells());
+                m_water.shoreGrid[1] = 0.5f / m_terrain.Cells();
+            }
             HRESULT hr = m_water.Draw(*vs, CurrentPixelShader(), m_refl.enabled ? m_refl.Texture() : nullptr,
                                       m_refl.WaterHeight(), [&] { return draw(); });
             ++m_frameWaterDraws;
@@ -901,7 +942,7 @@ HRESULT ProxyDevice::Dispatch(Draw draw)
             return hr;
         }
     }
-    if (m_shadows.enabled || m_light.enabled)
+    if (m_shadows.enabled || m_light.enabled || m_shadows.riverGlint > 0 || m_shadows.riverShimmer > 0)
     {
         if (m_shadows.enabled && fixedFunction && m_shadows.BlobShadow() && g_config.hideBlobShadows)
         {
@@ -941,7 +982,19 @@ HRESULT ProxyDevice::Dispatch(Draw draw)
         }
     }
     const double gameDrawStart = Perf::Now();
-    HRESULT hr = draw();
+    // The coast waves (with the water on): our copy of their shader, for the opacity over time their models can carry,
+    // draped over the terrain so the foam runs up the beach.
+    HRESULT hr = D3D_OK;
+    const bool wave = m_water.enabled && vs && Waves::IsWave(*vs, CurrentPixelShader());
+    if (wave)
+    {
+        m_waves.heightTexture = m_terrain.HeightTexture();  // draped over the terrain's heights
+        m_waves.heightSpacing = m_terrain.Spacing();
+        m_waves.heightCells = m_terrain.Cells();
+        m_waves.light = m_light.DecalLight();  // the foam in the light now, as the roads
+    }
+    if (!(wave && m_waves.Draw([&] { return draw(); }, hr)))
+        hr = draw();
     m_perf.AddGameDraw(Perf::Now() - gameDrawStart);
     if (vs && vs->btsWater)
         m_shadows.ShadeWater([&] { return draw(); });  // BtS's own water (Colonization's off): shadows on it too

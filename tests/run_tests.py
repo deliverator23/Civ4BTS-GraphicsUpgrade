@@ -23,6 +23,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import zlib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -125,7 +126,8 @@ def bts_shaders(reader, shader_dir, out_dir):
     import game_shaders
     for effect, technique, passes, roles in (('ContourShader.fx', 'Contour_Shader', [0], ['tree_vs', 'tree_ps']),
                                              ('River.fx', 'River_Shader', [0, 1],
-                                              ['river0_vs', 'river0_ps', 'river1_vs', 'river1_ps'])):
+                                              ['river0_vs', 'river0_ps', 'river1_vs', 'river1_ps']),
+                                             ('Civ4Wave.fx', 'Wave_Shader', [0], ['wave_vs', 'wave_ps'])):
         names = game_shaders.extract(reader, shader_dir, effect, technique, passes, out_dir) or []
         for name, role in zip(names, roles):
             shutil.copyfile(os.path.join(out_dir, name), os.path.join(out_dir, role + '.bin'))
@@ -155,7 +157,9 @@ def game_files():
 
 # Every test's settings start from the main effects off (the release defaults turn them on), so a test only gets
 # what it asks for. Merged key by key: Windows reads only the first copy of a section.
-BASELINE = {'water': {'Enabled': '0'}, 'reflection': {'Enabled': '0'}, 'shadows': {'Enabled': '0'},
+BASELINE = {'water': {'Enabled': '0', 'GlintFollowsSun': '0', 'Caustics': '0', 'WaveShading': '0',
+                      'Civ5Dir': 'C:\\nowhere'},
+            'reflection': {'Enabled': '0'}, 'shadows': {'Enabled': '0'},
             'lighting': {'Enabled': '0', 'LightCycleOn': '0'}}
 
 
@@ -347,11 +351,12 @@ def main():
     shadow = {}
 
     def shadow_run(label, enabled, overlay='none', extra='', buildings=1, shadows_extra='', flagpole=False,
-                   old=False, game_dir=None, flag_stage=0, mod_files=None, flag_dds=None):
-        """Harness 'shadow' scene with shadows on or off; returns its SHADOW values and session log. old: the
+                   old=False, game_dir=None, flag_stage=0, mod_files=None, flag_dds=None, ramp=False, sun='-1,0,-1'):
+        """Harness 'shadow' scene with shadows on or off; returns its SHADOW values and session log. sun: [shadows]
+        SunDirection. old: the
         terrain and unit shaders named as in older BtS builds; game_dir: BtS's tree and river shaders from there;
         flag_stage: the texture stage the flag texture is on (flag_dds: another texture there); mod_files: {path in a
-        mod folder: bytes}, run with mod= that folder."""
+        mod folder: bytes}, run with mod= that folder; ramp: the detail texture brightens along u (256 texels)."""
         sdir = os.path.join(TEST, f'shadow_{overlay}_{label}')
         # extra: more INI text (e.g. a [lighting] section)
         sout_dir = os.path.join(sdir, 'out')
@@ -361,7 +366,7 @@ def main():
         shutil.copyfile(DLL, os.path.join(sdir, 'd3d9.dll'))
         with TestIni(os.path.join(sdir, 'GraphicsUpgrade.ini')) as f:
             f.write(f'[general]\nOutputDir={sout_dir}\nGames=*\n[reflection]\nWaterHeight=0\n'
-                    f'[shadows]\nEnabled={enabled}\nSunDirection=-1,0,-1\nDarkness=0.5\nOverlay=1\nBuildingShadows={buildings}\n'
+                    f'[shadows]\nEnabled={enabled}\nSunDirection={sun}\nDarkness=0.5\nOverlay=1\nBuildingShadows={buildings}\n'
                     f'HillShadowLength=1\n{textures_ini}{shadows_extra}'
                     f'{extra}')
         mod_arg = []
@@ -372,7 +377,7 @@ def main():
                 with open(os.path.join(mod, rel), 'wb') as f:
                     f.write(content)
             mod_arg = ['mod=' + mod]
-        env = dict(os.environ, GU_TEST_OLD_SHADERS='1' if old else '0')
+        env = dict(os.environ, GU_TEST_OLD_SHADERS='1' if old else '0', GU_TEST_DETAIL_RAMP='1' if ramp else '0')
         sres = run([os.path.join(TEST, 'test_proxy.exe'), os.path.join(sdir, 'd3d9.dll'), 'shadow',
                     blob_dds if blob_dds and overlay == 'none' else '-', overlay, game_dir or river_dir] +
                    ([flag_dds or flagpole_dds, str(flag_stage)] if flagpole else []) + mod_arg, env=env)
@@ -455,7 +460,7 @@ def main():
     # BtS draws roads unlit (their texture's colour, whatever the light): they take the terrain's change of light,
     # the light on flat ground over BtS's baked terrain light. Here the shadows' sun (-1,0,-1: 45 degrees up) and a
     # night's terrain colours, blue (50 + 90 x 0.707) / (133 + 222 x 0.700) = 0.394 of the decal's 173.
-    night = '[lighting]\nEnabled=1\nTerrainSun=60,70,90\nTerrainAmbient=30,35,50\n'
+    night = '[lighting groups]\nTerrainSun=60,70,90\nTerrainAmbient=30,35,50\n[lighting]\nEnabled=1\n'
     scale = (50 + 90 * 0.70711) / (133 + 222 * 0.700134)
     for overlay, label, enabled, ini, expect, name in (
             ('decal', 'night', 0, night, 173 * scale, 'unlit road at night: darkened as the terrain'),
@@ -557,12 +562,46 @@ def main():
         _, rlog = shadow_run(label, 0, 'decal', night, mod_files={sunlight: data})
         check(expect_log in rlog, f"the game's own SunLight.nif read ({label[3:]}): {expect_log}")
 
+    print('waves:')
+    # Our copy of BtS's wave shader (Civ4Wave.fx) against the game's own, and the opacity a wave model can carry in
+    # its base layer's offset (10 + opacity).
+    if not os.path.exists(os.path.join(GAME_SHADERS, 'wave_ps.bin')):
+        print(f'  skip  wave shader comparison: BtS\'s Civ4Wave.fx not found under {BTS}')
+    else:
+        wdir2 = os.path.join(TEST, 'wavecmp')
+        if os.path.isdir(wdir2):
+            shutil.rmtree(wdir2)
+        os.makedirs(wdir2)
+        shutil.copyfile(DLL, os.path.join(wdir2, 'd3d9.dll'))
+        with TestIni(os.path.join(wdir2, 'GraphicsUpgrade.ini')) as f:
+            f.write(f'[general]\nOutputDir={os.path.join(wdir2, "out")}\nGames=none\n')
+        wout2 = run([os.path.join(TEST, 'test_proxy.exe'), os.path.join(wdir2, 'd3d9.dll'), 'wavecmp', GAME_SHADERS])
+        mw = re.search(r'WAVECMP same=(\d+) half=(\d+) zero=(\d+) lit=(\d+) tinted=(\d+)', wout2)
+        check(mw and int(mw.group(1)) <= 1 and int(mw.group(4)) > 10000,
+              f"our wave shader draws what BtS's does when a model carries no opacity (largest difference "
+              f"{mw.group(1) if mw else '?'} of 255, {mw.group(4) if mw else '?'} channels lit)")
+        check(mw and int(mw.group(5)) <= 2,
+              f"the foam in the light now: scaled by the change of light (red 1, green 0.5, blue 0.25: worst "
+              f"{mw.group(5) if mw else '?'} off)")
+        check(mw and int(mw.group(2)) <= 3 and int(mw.group(3)) == 0,
+              f"a wave model's opacity: base offset 10.5 draws the foam at half opacity (worst {mw.group(2) if mw else '?'}"
+              f" off), 10 not at all (brightest {mw.group(3) if mw else '?'})")
+        md = re.search(r'WAVEDRAPE flat=(\d+) moved=(\d+)', wout2)
+        if 'WAVEDRAPE skipped' in wout2:
+            print('  skip  draped waves: no vertex textures here')
+        else:
+            check(md and int(md.group(1)) <= 1 and int(md.group(2)) > 1000,
+                  f"draped waves: where the ground is unknown or below them they're drawn as flat waves (worst "
+                  f"{md.group(1) if md else '?'}); ground above them lifts them onto it ({md.group(2) if md else '?'} "
+                  f"channels moved)")
+        check('final refs device 0, d3d 0' in wout2, 'wave comparison: device released')
+
     print('lighting:')
 
-    def light_run(label, ini, ff=False, mod_ini=None, rt=False):
+    def light_run(label, ini, ff=False, mod_ini=None, rt=False, files=None):
         """mod_ini: a mod's GraphicsUpgrade.ini (a GraphicsUpgrade folder in Mods\\TestMod, run with mod=...); rt: drawn
         into a render-target texture, like the interface's 3D views ('screen': one the size of the screen, like the map
-        behind the Civilopedia)."""
+        behind the Civilopedia); files: {path under the run's folder (the game folder): bytes}."""
         ldir = os.path.join(TEST, 'light_' + label)
         if os.path.isdir(ldir):
             shutil.rmtree(ldir)
@@ -578,6 +617,10 @@ def main():
                 with open(os.path.join(mod_gu, 'GraphicsUpgrade.ini'), 'w') as f:
                     f.write(mod_ini)
             extra = ['mod=' + os.path.join(ldir, 'Mods', 'TestMod')]
+        for rel, content in (files or {}).items():
+            os.makedirs(os.path.dirname(os.path.join(ldir, rel)), exist_ok=True)
+            with open(os.path.join(ldir, rel), 'wb') as f:
+                f.write(content)
         res = run([os.path.join(TEST, 'test_proxy.exe'), os.path.join(ldir, 'd3d9.dll'), 'light'] + (['ff'] if ff else []) +
                   ([rt if isinstance(rt, str) else 'rt'] if rt else []) + extra)
         m = re.search(r'LIGHT pixel=([0-9a-f]{8}) restored=(\d)', res)
@@ -587,7 +630,7 @@ def main():
     def near(a, b, tol=2):
         return a is not None and all(abs(x - y) <= tol for x, y in zip(a, b))
 
-    lit = '[lighting]\nEnabled=1\nUnitSun=200,100,50\nUnitAmbient=20,40,60\n'
+    lit = '[lighting groups]\nUnitSun=200,100,50\nUnitAmbient=20,40,60\n[lighting]\nEnabled=1\n'
     for label, ini, expect, what in (
             ('off', '', (153, 178, 204), "lighting off: the game's own light (diffuse 0.5, ambient 0.1,0.2,0.3)"),
             ('colours', lit + 'MatchShadowDirection=0\n', (220, 140, 110),
@@ -623,6 +666,63 @@ def main():
                         'LightChangeCycleTime=0.01\nLightChangeStepCount=24\nLightCycleSteps=12,255,0,0;0,0,0,255\n')
     check(near(rgb, (255, 0, 0)) and ok, f'the light cycle stands still while no terrain is drawn (a 0.01 s day still '
           f'at midday) -> {rgb}')
+    # With the cycle off, a sun path (SunMiddayFrom) fixes the sun where the path has it at LightCycleStartStep, and
+    # [shadows] SunDirection (straight down here) goes unused: midday from the south, 30 degrees up, travels
+    # (0, 0.866, -0.5), so the upward-facing unit gets sin 30 = 0.5 of the sun 200,100,50, plus ambient 20,40,60.
+    rgb, ok = light_run('fixed_sun', lit + 'LightCycleOn=0\nSunMiddayFrom=S\nSunMiddayHeight=30\nSunriseHeight=10\n'
+                                            'LightCycleStartStep=12\n[shadows]\nSunDirection=0,0,-1\n')
+    flog = open(os.path.join(TEST, 'light_fixed_sun', 'out', 'test_proxy', 'session.log'), encoding='latin-1').read()
+    m = re.search(r'sun fixed on the sun path at step 12 of 24 .*direction ([-\d.]+),([-\d.]+),([-\d.]+)', flog)
+    fixed = [float(g) for g in m.groups()] if m else []
+    check(near(rgb, (120, 90, 85)) and ok and len(fixed) == 3 and
+          all(abs(a - b) < 0.002 for a, b in zip(fixed, (0, 0.866, -0.5))),
+          f'cycle off: the sun stands on the sun path at LightCycleStartStep (south, 30 degrees up), not at '
+          f'SunDirection -> {rgb}, expected (120, 90, 85)')
+    # LightCycleImage: a column per step, the top row the sun, the second the ambient. A 24x2 PNG in the game folder's
+    # GraphicsUpgrade folder: at midday (column 12) sun 200,0,0 and ambient 0,0,60, so the unit is 200,0,60; the other
+    # columns are green with no ambient.
+    def png(width, rows):
+        raw = b''.join(b'\0' + bytes(c for px in row for c in px) for row in rows)
+        chunk = lambda kind, data: (struct.pack('>I', len(data)) + kind + data +
+                                    struct.pack('>I', zlib.crc32(kind + data) & 0xFFFFFFFF))
+        return (b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', width, len(rows), 8, 2, 0, 0, 0)) +
+                chunk(b'IDAT', zlib.compress(raw)) + chunk(b'IEND', b''))
+
+    def bmp(width, rows):
+        """24-bit, bottom row first, rows padded to 4 bytes."""
+        pad = (4 - width * 3 % 4) % 4
+        data = b''.join(bytes(c for px in row for c in reversed(px)) + b'\0' * pad for row in reversed(rows))
+        head = struct.pack('<2sIHHI', b'BM', 54 + len(data), 0, 0, 54)
+        return head + struct.pack('<IiiHHIIiiII', 40, width, len(rows), 1, 24, 0, len(data), 2835, 2835, 0, 0) + data
+
+    sun_row = [(200, 0, 0) if x == 12 else (0, 255, 0) for x in range(24)]
+    amb_row = [(0, 0, 60) if x == 12 else (0, 0, 0) for x in range(24)]
+    img_ini = ('[lighting]\nEnabled=1\nAmbientColour=90,90,90\nMatchShadowDirection=0\nLightCycleOn=1\n'
+               'LightChangeCycleTime=100000\nLightChangeStepCount=24\nLightCycleImage=cycle.png\n'
+               'LightCycleSteps=12,255,255,255\n')
+    rgb, ok = light_run('cycle_image', img_ini, files={'GraphicsUpgrade/cycle.png': png(24, [sun_row, amb_row])})
+    ilog = open(os.path.join(TEST, 'light_cycle_image', 'out', 'test_proxy', 'session.log'), encoding='latin-1').read()
+    check(near(rgb, (200, 0, 60)) and ok and '24x2: 24 steps, sun from the top row, ambient from the second' in ilog and
+          'light cycle, 24 sun, 24 ambient' in ilog,
+          f'LightCycleImage (a 24x2 PNG): at midday column 12, sun 200,0,0 + ambient 0,0,60 -> {rgb}; it replaces '
+          f'LightCycleSteps and AmbientColour')
+    # A mod's own, in its GraphicsUpgrade folder: a 12x1 BMP makes 12 steps (whatever LightChangeStepCount says), and
+    # with no second row the ambient keeps AmbientColour. Step 6 is blue.
+    row12 = [(0, 0, 255) if x == 6 else (255, 0, 0) for x in range(12)]
+    rgb, ok = light_run('cycle_image_mod', img_ini.replace('LightCycleImage=cycle.png\n', '') + 'LightCycleStartStep=6\n',
+                        mod_ini='[lighting]\nLightCycleImage=cycle.bmp\n',
+                        files={'Mods/TestMod/GraphicsUpgrade/cycle.bmp': bmp(12, [row12])})
+    mlog = open(os.path.join(TEST, 'light_cycle_image_mod', 'out', 'test_proxy', 'session.log'), encoding='latin-1').read()
+    check(near(rgb, (90, 90, 255)) and ok and '12x1: 12 steps' in mlog and
+          "no second row: the ambient doesn't cycle" in mlog and 'over 12 steps' in mlog,
+          f"a mod's LightCycleImage (a 12x1 BMP in its GraphicsUpgrade folder): 12 steps, step 6 blue, ambient "
+          f"AmbientColour 90,90,90 -> {rgb}, expected (90, 90, 255)")
+    # Not found: a warning, and the lists as before.
+    rgb, ok = light_run('cycle_image_missing', img_ini.replace('cycle.png', 'nothere.png'))
+    xlog = open(os.path.join(TEST, 'light_cycle_image_missing', 'out', 'test_proxy', 'session.log'),
+                encoding='latin-1').read()
+    check(near(rgb, (255, 255, 255)) and ok and 'LightCycleImage=nothere.png not found' in xlog,
+          f'LightCycleImage not found: warned, and LightCycleSteps used instead -> {rgb}')
     # Sun angles go round, not across: halfway from azimuth 90 (step 18) to 0 (step 6) at 30 degrees up is azimuth 45,
     # still 30 degrees up, so the upward-facing triangle gets sin 30 = 0.5 of the sun. (Blending the two directions as
     # vectors would lift it to 39 degrees: 0.63.) An entry below the horizon is skipped.
@@ -645,7 +745,7 @@ def main():
           'sun path from 157.5 degrees (compass) at midday' in plog and "SunMiddayFrom=up isn't a compass point" in blog,
           f'simple sun path: 30 degrees up at midday {rgb_noon} (expected (120, 90, 85)), the moon overhead at midnight '
           f'{rgb_night} (expected (220, 140, 110)); SSE read as 157.5; an unknown compass point warned about')
-    rgb, ok = light_run('cycle_own', cycle + 'UnitSun=10,20,30\n')
+    rgb, ok = light_run('cycle_own', cycle + '[lighting groups]\nUnitSun=10,20,30\n')
     check(near(rgb, (10, 20, 30)) and ok, f'a group with its own *Sun key keeps it through the cycle -> {rgb}')
     # The ambient cycles the same way (no sun: the pixel is the ambient), unless the group has its own *Ambient key.
     amb_cycle = ('[lighting]\nEnabled=1\nSunColour=0,0,0\nMatchShadowDirection=0\nLightCycleOn=1\n'
@@ -653,7 +753,7 @@ def main():
     rgb, ok = light_run('cycle_amb', amb_cycle)
     check(near(rgb, (0, 50, 50)) and ok, f'ambient colour cycle: halfway from step 18 round to step 6 -> {rgb}, '
           'expected (0, 50, 50)')
-    rgb, ok = light_run('cycle_amb_own', amb_cycle + 'UnitAmbient=10,20,30\n')
+    rgb, ok = light_run('cycle_amb_own', amb_cycle + '[lighting groups]\nUnitAmbient=10,20,30\n')
     check(near(rgb, (10, 20, 30)) and ok, f'a group with its own *Ambient key keeps it through the cycle -> {rgb}')
     # The sun's direction cycles too: halfway from (1,0,-1) at step 18 round to straight down at step 6 is 22.5
     # degrees off vertical, so the upward-facing triangle gets cos 22.5 = 0.924 of the sun.
@@ -668,7 +768,7 @@ def main():
     # A mod's own settings: run with mod=<its folder>, its GraphicsUpgrade\\GraphicsUpgrade.ini overrides the game
     # folder's setting by setting (here the unit sun only; the ambient still comes from the game folder's).
     base = lit + 'MatchShadowDirection=0\n'
-    rgb_mod, ok_mod = light_run('mod', base, mod_ini='[lighting]\nUnitSun=100,100,100\n')
+    rgb_mod, ok_mod = light_run('mod', base, mod_ini='[lighting groups]\nUnitSun=100,100,100\n')
     mlog = open(os.path.join(TEST, 'light_mod', 'out', 'test_proxy', 'session.log'), encoding='latin-1').read()
     rgb_nomod, _ = light_run('mod_none', base, mod_ini='')
     nlog = open(os.path.join(TEST, 'light_mod_none', 'out', 'test_proxy', 'session.log'), encoding='latin-1').read()
@@ -679,16 +779,21 @@ def main():
           f"-> {rgb_nomod}")
 
     # Hotkeys written as keys: letters (any case), F-keys, numpad, names, hex codes, empty = none, junk = none + warning.
-    keys_ini = ('[water]\nToggleKey=Numpad5\n[shadows]\nToggleKey=F11\n[lighting]\nToggleKey=\nLightCycleToggleKey=f12\n'
+    keys_ini = ('[water]\nToggleKey=Numpad5\nNormalMapToggleKey=F9\n[shadows]\nToggleKey=F11\n[lighting]\nToggleKey=\nLightCycleToggleKey=f12\n'
                 '[reflection]\nToggleKey=0x4C\nOverlayToggleKey=PrintScreen\n[ghost]\nToggleKey=bogus\n'
-                '[textures]\nToggleKey=Home\n[debug]\nTraces=1\n[trace]\nKey=t\n')
+                '[textures]\nToggleKey=Home\nDetailNormalsToggleKey=F7\n[debug]\nTraces=1\n[trace]\nKey=t\n')
     light_run('keys', keys_ini)
     klog = open(os.path.join(TEST, 'light_keys', 'out', 'test_proxy', 'session.log'), encoding='latin-1').read()
-    expect_keys = ('water Numpad5, shadows F11, lighting none, light cycle F12, filtering Home, reflection L, '
-                   'reflection overlay PrintScreen, shadow overlay none, ghost none, trace T')
+    expect_keys = ('water Numpad5, water normal map F9, shadows F11, lighting none, light cycle F12, filtering Home, '
+                   'detail normals F7, reflection L, reflection overlay PrintScreen, shadow overlay none, ghost none, '
+                   'trace T')
     check(expect_keys in klog and "[ghost] ToggleKey=bogus isn't a key" in klog,
-          f'hotkeys written as keys (t, F11, f12, Numpad5, Home, PrintScreen, 0x4C, empty, a bogus name) read as '
+          f'hotkeys written as keys (t, F11, f12, F7, F9, Numpad5, Home, PrintScreen, 0x4C, empty, a bogus name) read as '
           f'{expect_keys}')
+    light_run('defkeys', '')
+    dlog = open(os.path.join(TEST, 'light_defkeys', 'out', 'test_proxy', 'session.log'), encoding='latin-1').read()
+    check('water 1, water normal map 7, ' in dlog and 'filtering 5, detail normals 6, ' in dlog,
+          'by default Ctrl+Shift+7 cycles the water normal maps and Ctrl+Shift+6 switches the detail normals')
     # Anisotropic filtering: on by default at the INI's 8 (or the card's most, if less); Anisotropy=1 turns it off.
     alog = open(os.path.join(TEST, 'light_keys', 'out', 'test_proxy', 'session.log'), encoding='latin-1').read()
     light_run('noaniso', '[textures]\nAnisotropy=1\n')
@@ -700,18 +805,18 @@ def main():
     # Buildings: fixed-function lights (a directional light and D3DRS_AMBIENT) take the Building colours.
     for label, ini, expect, what in (
             ('ff_off', '', (144, 160, 176), "fixed-function (building) lit by the game's light and ambient"),
-            ('ff_on', '[lighting]\nEnabled=1\nBuildingSun=200,100,50\nBuildingAmbient=20,40,60\nMatchShadowDirection=0\n',
+            ('ff_on', '[lighting groups]\nBuildingSun=200,100,50\nBuildingAmbient=20,40,60\n[lighting]\nEnabled=1\nMatchShadowDirection=0\n',
              (236, 172, 158), 'fixed-function lights take the INI Building colours, the way BtS uses them: sun as the '
              "light's diffuse (200,100,50), ambient as the light's own ambient (20,40,60) on top of the global "
              'ambient (16,32,48)'),
-            ('ff_unit', '[lighting]\nEnabled=1\nUnitSun=200,100,50\nUnitAmbient=20,40,60\n', (144, 160, 176),
+            ('ff_unit', '[lighting groups]\nUnitSun=200,100,50\nUnitAmbient=20,40,60\n[lighting]\nEnabled=1\n', (144, 160, 176),
              'a building is left alone when only the Unit colours are set (unset groups keep the game\'s light)')):
         rgb, ok = light_run(label, ini, ff=True)
         check(near(rgb, expect) and ok, f'{what} -> {rgb}, expected {expect}; light and ambient restored')
 
     # The interface's 3D views (the unit in the lower-left corner, the Civilopedia's models) are drawn into textures of
     # their own: they keep the game's light, whatever the INI and the time of day on the map.
-    building = '[lighting]\nEnabled=1\nBuildingSun=200,100,50\nBuildingAmbient=20,40,60\nMatchShadowDirection=0\n'
+    building = '[lighting groups]\nBuildingSun=200,100,50\nBuildingAmbient=20,40,60\n[lighting]\nEnabled=1\nMatchShadowDirection=0\n'
     for label, ini, ff, expect, what in (('rt_unit', lit + 'MatchShadowDirection=0\n', False, (153, 178, 204), 'a unit'),
                                          ('rt_building', building, True, (144, 160, 176), 'a building')):
         rgb, ok = light_run(label, ini, ff=ff, rt=True)
@@ -740,14 +845,14 @@ def main():
     amount = sum((2 * 204 - a) / s_ for a, s_ in zip((89, 103, 133), (246, 239, 222))) / 3
     lm_b = min(1.0, max(0.0, 0.5 * (amb[2] + sun[2] * amount)))
     expect_b = round(255 * min(1.0, max(0.0, (0xE6 / 255) * (0x66 / 255 + 0x80 / 255 + lm_b - 1))))
-    terrain_light = '[lighting]\nEnabled=1\nTerrainSun=200,100,50\nTerrainAmbient=20,40,60\n'
-    river_light = '[lighting]\nEnabled=1\nRiverSun=200,100,50\nRiverAmbient=20,40,60\n'
+    terrain_light = '[lighting groups]\nTerrainSun=200,100,50\nTerrainAmbient=20,40,60\n[lighting]\nEnabled=1\n'
+    river_light = '[lighting groups]\nRiverSun=200,100,50\nRiverAmbient=20,40,60\n[lighting]\nEnabled=1\n'
     tl, _ = shadow_run('lit', 0, 'none', terrain_light)
     check(abs(tl.get('lit', 0) - expect_b) <= 3 and tl.get('restored') == 1 and tl['released'],
           f'terrain lightmap re-lit with the INI colours (blue {tl.get("lit")}, expected {expect_b}, '
           f'BtS {shadow["off"].get("lit")})')
     # Terrain colours equal to the baked ones (the BtS preset): the lightmap exactly as BtS baked it.
-    tb, _ = shadow_run('baked', 0, 'none', '[lighting]\nEnabled=1\nTerrainSun=246,239,222\nTerrainAmbient=89,103,133\n')
+    tb, _ = shadow_run('baked', 0, 'none', '[lighting groups]\nTerrainSun=246,239,222\nTerrainAmbient=89,103,133\n[lighting]\nEnabled=1\n')
     check(tb.get('lit') == shadow['off'].get('lit') and tb.get('restored') == 1 and tb['released'],
           f'terrain colours equal to the baked ones leave the lightmap exactly as BtS baked it '
           f'({tb.get("lit")} = {shadow["off"].get("lit")})')
@@ -756,14 +861,14 @@ def main():
     have_trees = os.path.exists(os.path.join(river_dir, 'tree_vs.bin'))
     if have_trees:
         t_off, _ = shadow_run('lit', 0, 'tree')
-        t_on, _ = shadow_run('lit', 0, 'tree', '[lighting]\nEnabled=1\nTreeSun=200,100,50\nTreeAmbient=20,40,60\n')
+        t_on, _ = shadow_run('lit', 0, 'tree', '[lighting groups]\nTreeSun=200,100,50\nTreeAmbient=20,40,60\n[lighting]\nEnabled=1\n')
         unlit = round(255 * (0x80 / 255) * (0xE6 / 255))
         lit_b = round(255 * (0x80 / 255) * (0xE6 / 255) * (50 / 255 * 0.70711 + 60 / 255))
         check(abs(t_off.get('lit', 0) - unlit) <= 2, f'trees unlit as in BtS ({t_off.get("lit")}, expected {unlit})')
         check(abs(t_on.get('lit', 0) - lit_b) <= 3 and t_on.get('restored') == 1 and t_on['released'],
               f'trees lit with the INI Tree colours by our copy of their vertex shader ({t_on.get("lit")}, '
               f'expected {lit_b}); the game\'s shader restored')
-        t_bts, _ = shadow_run('lit', 0, 'tree', '[lighting]\nEnabled=1\nTreeSun=0,0,0\nTreeAmbient=255,255,255\n')
+        t_bts, _ = shadow_run('lit', 0, 'tree', '[lighting groups]\nTreeSun=0,0,0\nTreeAmbient=255,255,255\n[lighting]\nEnabled=1\n')
         check(t_bts.get('lit') == t_off.get('lit'), f'BtS preset trees (no sun, full ambient) look exactly as BtS '
               f'({t_bts.get("lit")} = {t_off.get("lit")})')
         # BtS's painted tree shadows (tree cards using the atlas's shadow images) go while sun shadows are on, even
@@ -781,7 +886,7 @@ def main():
 
     # Terrain normals for per-pixel lighting: heights read from the terrain's vertex buffer (a 5x5 grid, 250 apart,
     # z = 0.2 x), normals from neighbouring heights: (-0.196, 0, 0.981) -> colour (102, 128, 252) at cell (0,0).
-    _, nlog = shadow_run('normals', 0, 'slope', '[lighting]\nEnabled=1\nTerrainSun=255,255,255\n[debug]\nTraces=1\n'
+    _, nlog = shadow_run('normals', 0, 'slope', '[lighting groups]\nTerrainSun=255,255,255\n[lighting]\nEnabled=1\n[debug]\nTraces=1\n'
                                                  '[trace]\nAutoFrame=1\n')
     ndir = os.path.join(TEST, 'shadow_slope_normals', 'out', 'test_proxy', 'traces')
     nbmp_path = os.path.join(ndir, os.listdir(ndir)[0], 'terrain_normals.bmp') if os.path.isdir(ndir) else ''
@@ -800,7 +905,7 @@ def main():
     # amount changes by N.L(new) - N.L(BtS's sun), N from its normal map texel (102,128,253); BtS's sun direction
     # leaves it exactly as baked.
     import math
-    baked = '[lighting]\nEnabled=1\nTerrainSun=246,239,222\nTerrainAmbient=89,103,133\n'
+    baked = '[lighting groups]\nTerrainSun=246,239,222\nTerrainAmbient=89,103,133\n[lighting]\nEnabled=1\n'
     pp, _ = shadow_run('pp_turned', 0, 'slope', baked + 'LightDirection=0,0,-1\n')
     pb, _ = shadow_run('pp_baked', 0, 'slope', baked + 'MatchShadowDirection=0\n')
     n = [102 / 255 * 2 - 1, 128 / 255 * 2 - 1, 253 / 255 * 2 - 1]
@@ -815,6 +920,59 @@ def main():
           f'(blue {pp.get("lit")}, expected {expect_pp}, as baked {pb.get("lit")})')
     check(pb.get('lit') == shadow['off'].get('lit'),
           f'sun where BtS baked it: terrain exactly as baked ({pb.get("lit")} = {shadow["off"].get("lit")})')
+
+    # Detail normals ([textures] DetailNormals): the detail texture's directions on the ground are read from the
+    # terrain's TEXCOORD1 (here u = (x + 500) / 1000, v = 1 - (y + 500) / 1000). A flat detail texture adds no bumps
+    # (the checks above ran with detail normals on, at their defaults). With the sun overhead, a detail texture that
+    # brightens along u by 1/255 a texel tilts the slope's normal by DetailBumpiness x -1/255 along +x:
+    # amount += N_detail . L - N . L, N the slope's normal (102,128,253), L straight up.
+    _, dlog = shadow_run('detail_axes', 0, 'slope', baked)
+    m = re.search(r'detail texture uv per world unit: u = (\S+) x \+ (\S+) y, v = (\S+) x \+ (\S+) y', dlog)
+    axes = [float(g) for g in m.groups()] if m else []
+    check(len(axes) == 4 and all(abs(a - b) < 1e-5 for a, b in zip(axes, (0.001, 0, 0, -0.001))),
+          f"detail normals: the detail texture's directions on the ground read from the terrain's TEXCOORD1 {axes}")
+    turned = baked + 'LightDirection=0,0,-1\n'
+    bump = 100
+    d_on, _ = shadow_run('detail_on', 0, 'slope', turned + f'[textures]\nDetailBumpiness={bump}\n', ramp=True)
+    d_off, _ = shadow_run('detail_off', 0, 'slope', turned + '[textures]\nDetailNormals=0\n', ramp=True)
+    d_zero, _ = shadow_run('detail_zero', 0, 'slope', turned + '[textures]\nDetailBumpiness=0\n', ramp=True)
+
+    def bumped_change(slope_x, slope_y):
+        """Blue change from detail normals on the slope, sun overhead (terrain_shadow.hlsl, axes u +x, v -y)."""
+        flat = n
+        b = [flat[0] + slope_x, flat[1] + slope_y, flat[2]]  # slope.x * u_axis - slope.y * v_axis, v_axis = (0, -1)
+        bl = math.sqrt(sum(x * x for x in b))
+        return 255 * (0xE6 / 255) * 0.5 * sun_b * (b[2] / bl - flat[2])
+
+    want = bumped_change(bump * -1 / 255, 0)
+    got = d_on.get('lit', 0) - d_off.get('lit', 0)
+    check(abs(got - want) <= 2 and abs(want) > 5 and d_zero.get('lit') == d_off.get('lit') and
+          d_on.get('restored') == 1 and d_on['released'],
+          f"detail normals from the detail texture's brightness: blue {d_on.get('lit')} vs {d_off.get('lit')} without "
+          f'(change {got}, expected {want:.1f}); DetailBumpiness=0 changes nothing ({d_zero.get("lit")})')
+    # A mod's own normal map for a detail texture: named in its CIV4ArtDefines_Terrain.xml's <Detail>, with _normal
+    # before .dds. The harness's detail texture (1x1 grey 128) is recognised by its content; the map's texel
+    # (64,128,255) tilts the normal 0.5 against u (-x), at DetailNormalStrength 1.
+    def dds_1x1(argb):
+        head = struct.pack('<4sIIIIIII44x', b'DDS ', 124, 0x100F, 1, 1, 4, 0, 1)
+        head += struct.pack('<II4sIIIII', 32, 0x41, b'\0\0\0\0', 32, 0xFF0000, 0xFF00, 0xFF, 0xFF000000)
+        return head + struct.pack('<IIIII', 0x1000, 0, 0, 0, 0) + struct.pack('<I', argb)
+    art = (b'<?xml version="1.0"?>\n<Civ4ArtDefines><TerrainArtInfos><TerrainArtInfo><Type>ART_DEF_TERRAIN_TEST</Type>'
+           b'<Detail>Art/Terrain/Textures/Detail/TestDetail.dds</Detail></TerrainArtInfo></TerrainArtInfos>'
+           b'</Civ4ArtDefines>\n')
+    shipped_files = {'Assets/XML/Art/CIV4ArtDefines_Terrain.xml': art,
+                     'Assets/Art/Terrain/Textures/Detail/TestDetail.dds': dds_1x1(0xFF808080),
+                     'Assets/Art/Terrain/Textures/Detail/TestDetail_normal.dds': dds_1x1(0xFF4080FF)}
+    s_on, slog2 = shadow_run('detail_map', 0, 'slope', turned, mod_files=shipped_files)
+    s_off, _ = shadow_run('detail_map_off', 0, 'slope', turned + '[textures]\nDetailNormals=0\n',
+                          mod_files=shipped_files)
+    tilt = 0x40 / 255 * 2 - 1
+    want = bumped_change(tilt, 0x80 / 255 * 2 - 1)
+    got = s_on.get('lit', 0) - s_off.get('lit', 0)
+    check('1 with their own normal map' in slog2 and 'testdetail_normal.dds in use for' in slog2.lower() and
+          abs(got - want) <= 2 and abs(want) > 10 and s_on.get('restored') == 1 and s_on['released'],
+          f"a mod's own normal map for a detail texture found and used (blue {s_on.get('lit')} vs {s_off.get('lit')} "
+          f"without: change {got}, expected {want:.1f})")
 
     # Hill shadows: a 300-high ridge along x = 0, sun going towards -x at 45 degrees: the ground behind it (-250,0) is
     # shaded (Darkness 0.5), the sunny side (200,0) isn't; HillShadows=0 turns it off.
@@ -913,12 +1071,30 @@ def main():
     check(abs(b_on.get('ui', 0) - b_on.get('lit', 0) // 2) <= 2,
           f"a black interface overlay (no fog of war) is not taken for a painted shadow ({b_on.get('ui')})")
 
-    # River (P1, BtS's own shader): f3SunLightDiffuse/AmbientColor in its pixel shader take the River colours.
+    # River (P1, BtS's own shader): f3SunLightDiffuse/AmbientColor in its pixel shader take the River colours, and its
+    # ripples are lit from the shadows' sun (MatchShadowDirection=1; -1,0,-1: 45 degrees up, so 0.707 of the sun on
+    # the flat river) instead of the game's (straight down here).
     if have_rivers:
         rl, _ = shadow_run('lit', 0, 'river1', river_light)
-        expect_r = round(255 * (0xE6 / 255) * min(1.0, (0x80 / 255) * min(1.0, sun[2] + amb[2])))
+        up = 0.5 ** 0.5 + 0.5 ** 0.5 * (2 * 0x80 / 255 - 1)  # the normal map's 0x80 is a hair off flat
+        expect_r = round(255 * (0xE6 / 255) * min(1.0, (0x80 / 255) * min(1.0, sun[2] * up + amb[2])))
         check(abs(rl.get('lit', 0) - expect_r) <= 3 and rl.get('restored') == 1 and rl['released'],
-              f'river lit with the INI colours (blue {rl.get("lit")}, expected {expect_r}, BtS 92)')
+              f'river lit with the INI colours, from the shadows\' sun (blue {rl.get("lit")}, expected {expect_r}, BtS 92)')
+        # The sea's glint off the river: with the sun straight up and the view straight down, the river mirrors the
+        # middle of the sky texture's painted sun (alpha 1) into the camera: the river's sun (0.6) at RiverGlint=128 added
+        # as the sea adds it, in squared colours (and times the fog of war, 0xE6).
+        # RiverGlint=0 (or the view not lined up, as in the checks above): as BtS draws it.
+        rg, rglog = shadow_run('glint', 0, 'river1', '[water]\nEnabled=1\nGlintFollowsSun=1\n', sun='0,0,-1')
+        rg0, _ = shadow_run('glint0', 0, 'river1', '[water]\nEnabled=1\nGlintFollowsSun=1\nRiverGlint=0\n', sun='0,0,-1')
+        expect_g = round(255 * ((0xE6 / 255 * 0x80 / 255 * 0.8) ** 2 + 0.6 ** 2 * 0xE6 / 255) ** 0.5)
+        check(abs(rg.get('lit', 0) - expect_g) <= 4 and abs(rg0.get('lit', 0) - 92) <= 3 and rg.get('restored') == 1 and
+              rg['released'],
+              f'the glint off the river where it mirrors the sun into the view (blue {rg.get("lit")}, expected '
+              f'{expect_g}); RiverGlint=0: none ({rg0.get("lit")}, BtS 92)')
+        # The ripples sway along the channel (RiverShimmer, 3 texels by default): the flow map made and used. Here the
+        # river's texture coordinates sit at the atlas' corner, off any channel, so the colour above isn't moved.
+        check('their ripples sway along the channels, 3 texels each way (flow map 128x256)' in rglog,
+              "the rivers' ripples sway along the channels (flow map made)")
 
     print('older (non-Steam) BtS builds:')
     # Their terrain shader names its base texture TerrainBase0, and their unit shaders take the model's own bones
@@ -937,9 +1113,9 @@ def main():
             check(ov.get('lit') == sv.get('lit') and ov.get('shadowed') == sv.get('shadowed') and ov['released'],
                   f"older build's {overlay} shader shadowed as Steam's ({ov.get('shadowed')} of {ov.get('lit')}; "
                   f"Steam's {sv.get('shadowed')} of {sv.get('lit')})")
-        tl_old, _ = shadow_run('old_lit', 0, 'tree', '[lighting]\nEnabled=1\nTreeSun=200,100,50\nTreeAmbient=20,40,60\n',
+        tl_old, _ = shadow_run('old_lit', 0, 'tree', '[lighting groups]\nTreeSun=200,100,50\nTreeAmbient=20,40,60\n[lighting]\nEnabled=1\n',
                                game_dir=OLD_GAME_SHADERS)
-        tl_new, _ = shadow_run('lit', 0, 'tree', '[lighting]\nEnabled=1\nTreeSun=200,100,50\nTreeAmbient=20,40,60\n')
+        tl_new, _ = shadow_run('lit', 0, 'tree', '[lighting groups]\nTreeSun=200,100,50\nTreeAmbient=20,40,60\n[lighting]\nEnabled=1\n')
         check(tl_old.get('lit') == tl_new.get('lit') and tl_old['released'],
               f"older build's tree shader lit as Steam's ({tl_old.get('lit')} = {tl_new.get('lit')})")
     else:
@@ -1000,6 +1176,20 @@ def main():
                   f"{ma.group(2) if ma else '?'}, {ma.group(3) if ma else '?'} channels changed); a sky light of 0 "
                   f"is exactly a black sky (worst {ma.group(4) if ma else '?'}, {ma.group(5) if ma else '?'} channels "
                   f"changed)")
+            mn = re.search(r'WATERNM mean=(\d+) flat=(\d+)', cout)
+            nm_mean, flat_mean = (int(mn.group(1)) / 1000, int(mn.group(2)) / 1000) if mn else (99, 0)
+            check(mn and nm_mean < 0.1 * flat_mean and flat_mean > 1,
+                  f"DXT5nm normal maps (x in alpha, y in green, f4NormalFormat c8 = 1) draw the same water as the same "
+                  f"normals in rgb: on average {nm_mean:.2f} of 255 apart, against {flat_mean:.2f} for a flat map "
+                  f"(the test sky is random noise, so single pixels can differ)")
+            ms = re.search(r'WATERSHORE neutral=(\d+) turned=(\d+) caustics=(\d+)', cout)
+            if 'WATERSHORE skipped' in cout:
+                print('  skip  shoreline water shader: no Shader Model 3 here')
+            else:
+                check(ms and int(ms.group(1)) <= 1 and int(ms.group(2)) > 1000 and int(ms.group(3)) > 1000,
+                      f"the shoreline water shader: with its additions off it draws the plain water (worst "
+                      f"{ms.group(1) if ms else '?'}); the glint turned changes {ms.group(2) if ms else '?'} channels; "
+                      f"caustics in shallow water change {ms.group(3) if ms else '?'}")
         else:
             print(f"  skip  water shader comparison: Colonization's Water.fx not found under {COL}")
         m = re.search(r'WATER pixel=([0-9a-f]{8}) restored=(\d)', wout)
@@ -1014,18 +1204,82 @@ def main():
               f'{mc.group(2) if mc else "?"}, not the circle\'s red)')
         check('final refs device 0, d3d 0' in wout, 'device and Direct3D fully released')
 
+        # The shoreline water (Shader Model 3) through the proxy. The glint follows the sun: with the sun exactly where
+        # the sky texture painted it, the picture is as before. (This scene's camera has no eye to reflect a sun to;
+        # the water comparison scene above checks that a turned glint moves.)
+        def shore_run(label, water_ini, sun='', extra_files=None):
+            sdir = os.path.join(TEST, 'water_shore_' + label)
+            if os.path.isdir(sdir):
+                shutil.rmtree(sdir)
+            os.makedirs(sdir)
+            shutil.copyfile(DLL, os.path.join(sdir, 'd3d9.dll'))
+            install_water(sdir)
+            for src, name in (extra_files or []):
+                shutil.copyfile(src, os.path.join(sdir, 'GraphicsUpgrade', name))
+            with TestIni(os.path.join(sdir, 'GraphicsUpgrade.ini')) as f:
+                f.write(f'[general]\nOutputDir={os.path.join(sdir, "out")}\nGames=*\n[water]\nEnabled=1\n'
+                        f'ColonizationDir={col_dir}\n{water_ini}[shadows]\nSunDirection={sun or "-1,0,-1"}\n'
+                        f'[debug]\nWaterTime=7.5\n')  # the water's clock stopped: every run draws the same frame
+            out = run([os.path.join(TEST, 'test_proxy.exe'), os.path.join(sdir, 'd3d9.dll'), 'water'])
+            log = open(os.path.join(sdir, 'out', 'test_proxy', 'session.log'), encoding='latin-1').read()
+            m = re.search(r'sum=(\d+) brightest=(\d+),(\d+)', out)
+            return (int(m.group(1)), (int(m.group(2)), int(m.group(3)))) if m else (0, (0, 0)), log, out
+
+        painted = '-0.4531,-0.5757,-0.6807'  # the sun painted in water_env.dds, as a travel direction
+        (base_sum, base_bright), _, _ = shore_run('off', 'GlintFollowsSun=0\n')
+        (same_sum, same_bright), slog, sout = shore_run('painted', 'GlintFollowsSun=1\nCaustics=1\n', painted)
+        if 'Shader Model 3; left out' in slog:
+            print('  skip  shoreline water: no Shader Model 3 here')
+        else:
+            check('drawn with the shoreline water (glint follows the sun on' in slog and
+                  'no caustics; the glint still follows the sun' in slog and
+                  'final refs device 0, d3d 0' in sout,
+                  'glint follows the sun: the Shader Model 3 water drawn; without Civ 5 textures no caustics; '
+                  'device released')
+            check(abs(same_sum - base_sum) <= base_sum * 0.001,
+                  f'glint follows the sun: with the sun where the sky texture painted it, the picture is as before '
+                  f'(frame {same_sum} vs {base_sum})')
+            # Caustics: Civ 5's textures from the GraphicsUpgrade folder load (no terrain here, so no shore
+            # is known and the picture is the glint's alone).
+            civ5 = os.path.join(ROOT, 'work', 'civ5')
+            files = [(os.path.join(civ5, 'EffectTextures', a), b) for a, b in
+                     (('fx_caustics_base_01.dds', 'water_caustics1.dds'), ('fx_caustics_base_02.dds', 'water_caustics2.dds'))]
+            if all(os.path.exists(f) for f, _ in files):
+                (tex_sum, _), tlog, tout = shore_run('textures', 'GlintFollowsSun=1\nCaustics=1\n', painted, files)
+                check('shoreline and shallow water ready' in tlog and 'shore not read yet or off' in tlog and
+                      abs(tex_sum - base_sum) <= base_sum * 0.001 and 'final refs device 0, d3d 0' in tout,
+                      f'caustics: their textures load from the GraphicsUpgrade folder; with no shore '
+                      f'known the water is unchanged (frame {tex_sum} vs {base_sum}); device released')
+            else:
+                print(f'  skip  caustics textures: Civ 5 textures not extracted to {civ5}')
+            # Wave shading: the waves lit by the glint's light change the picture; off, it's as before.
+            (wave_sum, _), wlog, wout = shore_run('wave_shading', 'GlintFollowsSun=0\nWaveShading=255\n')
+            check('wave shading 255/255' in wlog and wave_sum != base_sum and 'final refs device 0, d3d 0' in wout,
+                  f'wave shading: the Shader Model 3 water drawn with the waves lit, so the picture changes '
+                  f'(frame {wave_sum} vs {base_sum}); device released')
+
+
         # The water's sun colour comes from the lighting (WaterSun, else SunColour, else the cycle); without the
         # lighting, Colonization's own.
-        def water_sun(label, light):
+        def water_sun(label, light, water='', numbered=0, nm=()):
+            """water: more [water] keys (a second [water] section would be ignored); numbered: that many
+            water_normal_1.dds, _2... (copies of water_normal.dds) in the GraphicsUpgrade folder too, those numbered
+            in nm marked DXT5nm (DDPF_NORMAL)."""
             sdir = os.path.join(TEST, 'water_sun_' + label)
             if os.path.isdir(sdir):
                 shutil.rmtree(sdir)
             os.makedirs(sdir)
             shutil.copyfile(DLL, os.path.join(sdir, 'd3d9.dll'))
             install_water(sdir)
+            for i in range(1, numbered + 1):
+                data = bytearray(open(os.path.join(water_assets, 'water_normal.dds'), 'rb').read())
+                if i in nm:
+                    data[83] |= 0x80  # the pixel format's flags (offset 80): DDPF_NORMAL
+                with open(os.path.join(sdir, 'GraphicsUpgrade', f'water_normal_{i}.dds'), 'wb') as f:
+                    f.write(data)
             with TestIni(os.path.join(sdir, 'GraphicsUpgrade.ini')) as f:
                 f.write(f'[general]\nOutputDir={os.path.join(sdir, "out")}\nGames=*\n[water]\nEnabled=1\n'
-                        f'ColonizationDir={col_dir}\n[lighting]\nEnabled=1\n{light}')
+                        f'ColonizationDir={col_dir}\n{water}[lighting]\nEnabled=1\n{light}')
             run([os.path.join(TEST, 'test_proxy.exe'), os.path.join(sdir, 'd3d9.dll'), 'water'])
             return open(os.path.join(sdir, 'out', 'test_proxy', 'session.log'), encoding='latin-1').read()
         sky_col = water_sun('sky_col', 'AmbientColour=89,103,133\n')
@@ -1051,9 +1305,47 @@ def main():
               "the moon's glint: the water's sun is the cycle's by day (100), MoonGlint at midnight (255), and the "
               "cycle's still at sunset (18 h: halfway between its 100 and 10,20,30)")
         check("water: sun 255,235,188 (Colonization's)" in wlog and
-              "water: sun 10,20,30 (the lighting's)" in water_sun('own', 'SunColour=1,2,3\nWaterSun=10,20,30\n') and
+              "water: sun 10,20,30 (the lighting's)" in water_sun('own', 'SunColour=1,2,3\n[lighting groups]\nWaterSun=10,20,30\n') and
               "water: sun 1,2,3 (the lighting's)" in water_sun('shared', 'SunColour=1,2,3\n'),
               "water sun: Colonization's without the lighting, else WaterSun, else SunColour")
+        # The water's look, one key each (Colonization's by default).
+        check('reflection evenness 0.22995, reflection ripple 0.238738, refraction ripple 0.0954951' in wlog and
+              'reflection evenness 1, reflection ripple 0.5, refraction ripple 0' in
+              water_sun('constants', '', water='ReflectionEvenness=1\nReflectionRipple=0.5\nRefractionRipple=0\n'),
+              "water: ReflectionEvenness, ReflectionRipple and RefractionRipple read (Colonization's by default)")
+        # GlintFollowsSun=1 with the light cycle: the glint crosses the view right to left by day (sunrise 6 h to sunset
+        # 18 h) and again by night (the moon's, 18 h to 6 h), so it goes off the left edge and comes back on the right.
+        arc = ('LightCycleOn=1\nLightChangeCycleTime=100000\nLightChangeStepCount=24\n'
+               'LightCycleSteps=12,100,100,100;0,10,20,30\n')
+        # It crosses the view at a steady pace, in full from about 8:20 to 15:40, and goes round the back quickly, behind
+        # the camera at sunrise and sunset, out of view (brightness 0 at 6:15, 0.02 of the way round).
+        arc_logs = {h: water_sun(f'glint_arc_{h}', arc + f'LightCycleStartStep={h}\n', water='GlintFollowsSun=1\n')
+                    for h in (9, 12, 21, 0, 6.25)}
+        expect_arc = {9: "the sun's glint, 0.25 of the way round (right to left), brightness 1.00",
+                      12: "the sun's glint, 0.50 of the way round (right to left), brightness 1.00",
+                      21: "the moon's glint, 0.25 of the way round (right to left), brightness 1.00",
+                      0: "the moon's glint, 0.50 of the way round (right to left), brightness 1.00",
+                      6.25: "the sun's glint, 0.02 of the way round (right to left), brightness 0.00"}
+        got_arc = {h: (re.search(r"the (?:sun|moon)'s glint, .*brightness [\d.]+", log) or [None])[0]
+                   for h, log in arc_logs.items()}
+        check(all(expect_arc[h] in (got_arc[h] or '') for h in expect_arc) and 'glint, ' not in wlog,
+              f"the glint crosses right to left by day and again by night, fading in and out at the ends: {got_arc} "
+              f"(expected 9 h the sun's 0.25 of the way, 12 h 0.50, 21 h the moon's 0.25, 0 h 0.50, all at full "
+              f"brightness; 6:15 0.02 of the way round, behind the camera, at 0); none without the cycle")
+        # More normal maps beside water_normal.dds: water_normal_1.dds, _2... loaded (at 1440 world units per repeat);
+        # NormalMap picks the one at the start, falling back to water_normal.dds when there's no such file.
+        two = water_sun('normals', '', water='NormalMap=2\n', numbered=2, nm=(2,))
+        bad = water_sun('normals_bad', '', water='NormalMap=3\n', numbered=2)
+        check(re.search(r'water: normal map 1: .*water_normal_1\.dds \(1440 world units per repeat\)', two) is not None
+              and 'water_normal_2.dds' in two and 'water_normal_3.dds' not in two.replace('NormalMap=3', '') and
+              'water: starting with normal map 2' in two and
+              re.search(r'water_normal_2\.dds \(1440 world units per repeat, DXT5nm\)', two) is not None and
+              re.search(r'water_normal_1\.dds \(1440 world units per repeat\)', two) is not None and
+              "NormalMap=3, but there's no water_normal_3.dds; water_normal.dds instead" in bad and
+              'normal map 1:' not in wlog,
+              'water normal maps: water_normal_1.dds and _2 found beside water_normal.dds (none in the plain run); '
+              'NormalMap=2 starts with the second, NormalMap=3 falls back to water_normal.dds; a DXT5nm one '
+              '(DDPF_NORMAL) is recognised')
 
         # Under the water: a "submarine" 0.04 below the surface (z 0.5) shows in the refraction at band 1 of 8 over
         # a depth of 0.2: red 255 x 0.7 x (1 - 1.5/8); a ship above the surface doesn't; with UnderwaterDepth=0, nothing.
@@ -1151,6 +1443,20 @@ def main():
               'water: water on a model (SurfaceTextures) drawn with the surface water (fvf 0x142, vertex alpha)' in on_log,
               f'water on models: a listed texture gets the sky reflected on top ({on}, from green); game state restored')
         check(clear == (0, 0, 0) and clear_ok, f'water on models: nothing where the texture is clear ({clear})')
+
+        # SurfaceTextures written on two lines (a mod's lake texture added under the oasis'): both lines count, and
+        # the log says so. An ordinary setting written twice: only its first line counts, and the log says that.
+        twice = ('Enabled=1\nSurfaceTextures=Art\\Terrain\\Features\\BodyOfWater\\lake_water.dds\nSurfaceTextures={dds}\n'
+                 'UnderwaterBands=8\nUnderwaterBands=4\n')
+        two, two_ok, two_log = surface_run('twolines', 15, twice)
+        check(two is not None and two_ok and two[1] < 250 and two[0] > 5 and
+              'settings: [water] SurfaceTextures is set on 2 lines' in two_log and
+              'the entries of all of them are used' in two_log and
+              'BodyOfWater\\lake_water.dds: no .dds textures found' in two_log,
+              f'SurfaceTextures on two lines: the second line still counts ({two}), and the log warns')
+        check('settings: [water] UnderwaterBands is set on 2 lines' in two_log and
+              'only the first counts, so remove the others' in two_log,
+              'an ordinary setting written twice: the log says only the first line counts')
 
         # A mod's own water textures, each on its own: water_env.dds packed in an FPK under Assets\Art\GraphicsUpgrade,
         # water_normal.dds from the bundled folder.

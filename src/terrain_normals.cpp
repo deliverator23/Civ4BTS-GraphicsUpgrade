@@ -46,6 +46,8 @@ void TerrainNormals::Capture(const ShaderInfo& vs)
         for (int r = 0; r < 3; ++r)
             world[i * 3 + r] = w[r * 4] * p[0] + w[r * 4 + 1] * p[1] + w[r * 4 + 2] * p[2] + w[r * 4 + 3];
     }
+    if (!m_haveDetailAxes)
+        FitDetailAxes(base, count, stride, world);
     vb->Unlock();
 
     if (m_spacing <= 0)
@@ -94,9 +96,229 @@ void TerrainNormals::Capture(const ShaderInfo& vs)
     if (x1 >= x0)
     {
         UpdateNormals(x0 - 1, y0 - 1, x1 + 1, y1 + 1);
-        m_heightsDirty = true;  // hill shadows: the height texture is uploaded again
+        m_heightsDirty = true;  // hill shadows: worked out again
+        m_heightTexDirty = true;  // and the height texture uploaded again
+        m_shoreDirty = true;    // and the shore worked out again
+        m_readX0 = (std::min)(m_readX0, x0), m_readY0 = (std::min)(m_readY0, y0);
+        m_readX1 = (std::max)(m_readX1, x1), m_readY1 = (std::max)(m_readY1, y1);
     }
     vb->Release();
+}
+
+void TerrainNormals::FitDetailAxes(const BYTE* vertices, UINT count, UINT stride, const std::vector<float>& world)
+{
+    // Where TEXCOORD1 (the detail texture's uv, before BtS's fDetailTexScaling) is in a vertex.
+    IDirect3DVertexDeclaration9* decl = nullptr;
+    D3DVERTEXELEMENT9 elements[MAXD3DDECLLENGTH + 1];
+    UINT n = 0;
+    int offset = -1;
+    if (SUCCEEDED(m_dev->GetVertexDeclaration(&decl)) && decl && SUCCEEDED(decl->GetDeclaration(elements, &n)))
+        for (UINT i = 0; i < n && elements[i].Stream != 0xFF; ++i)
+            if (elements[i].Stream == 0 && elements[i].Usage == D3DDECLUSAGE_TEXCOORD && elements[i].UsageIndex == 1 &&
+                elements[i].Type == D3DDECLTYPE_FLOAT2)
+                offset = elements[i].Offset;
+    if (decl)
+        decl->Release();
+    DWORD fvf = 0;
+    if (offset < 0 && SUCCEEDED(m_dev->GetFVF(&fvf)) && (fvf & D3DFVF_POSITION_MASK) == D3DFVF_XYZ &&
+        ((fvf & D3DFVF_TEXCOUNT_MASK) >> D3DFVF_TEXCOUNT_SHIFT) >= 2 && !(fvf & 0xFFFF0000))  // two-float uvs
+        offset = 12 + ((fvf & D3DFVF_NORMAL) ? 12 : 0) + ((fvf & D3DFVF_PSIZE) ? 4 : 0) +
+                 ((fvf & D3DFVF_DIFFUSE) ? 4 : 0) + ((fvf & D3DFVF_SPECULAR) ? 4 : 0) + 8;
+    if (offset < 0 || static_cast<UINT>(offset) + 8 > stride || count < 3)
+    {
+        if (!m_loggedNoDetailUv)
+            Log::Write("terrain normals: no detail uv (TEXCOORD1) in the terrain's vertices; no detail normals");
+        m_loggedNoDetailUv = true;
+        return;
+    }
+    // Least squares, u and v each = a x + b y + c over the buffer's vertices (x, y relative to the first one).
+    double m[3][3] = {}, ru[3] = {}, rv[3] = {};
+    for (UINT i = 0; i < count; ++i)
+    {
+        const float* uv = reinterpret_cast<const float*>(vertices + i * stride + offset);
+        const double row[3] = {world[i * 3] - world[0], world[i * 3 + 1] - world[1], 1.0};
+        for (int r = 0; r < 3; ++r)
+        {
+            for (int c = 0; c < 3; ++c)
+                m[r][c] += row[r] * row[c];
+            ru[r] += row[r] * uv[0];
+            rv[r] += row[r] * uv[1];
+        }
+    }
+    auto solve = [&](const double* rhs, double* out) {
+        double a[3][4];
+        for (int r = 0; r < 3; ++r)
+        {
+            for (int c = 0; c < 3; ++c)
+                a[r][c] = m[r][c];
+            a[r][3] = rhs[r];
+        }
+        for (int c = 0; c < 3; ++c)
+        {
+            int pivot = c;
+            for (int r = c + 1; r < 3; ++r)
+                if (std::fabs(a[r][c]) > std::fabs(a[pivot][c]))
+                    pivot = r;
+            if (std::fabs(a[pivot][c]) < 1e-9)
+                return false;
+            for (int k = 0; k < 4; ++k)
+                std::swap(a[c][k], a[pivot][k]);
+            for (int r = 0; r < 3; ++r)
+                if (r != c)
+                {
+                    const double f = a[r][c] / a[c][c];
+                    for (int k = 0; k < 4; ++k)
+                        a[r][k] -= f * a[c][k];
+                }
+        }
+        for (int r = 0; r < 3; ++r)
+            out[r] = a[r][3] / a[r][r];
+        return true;
+    };
+    double fu[3], fv[3];
+    if (!solve(ru, fu) || !solve(rv, fv))
+        return;
+    const double lu = std::hypot(fu[0], fu[1]), lv = std::hypot(fv[0], fv[1]);
+    if (lu < 1e-9 || lv < 1e-9)
+        return;
+    m_detailAxes[0] = static_cast<float>(fu[0] / lu), m_detailAxes[1] = static_cast<float>(fu[1] / lu);
+    m_detailAxes[2] = static_cast<float>(fv[0] / lv), m_detailAxes[3] = static_cast<float>(fv[1] / lv);
+    m_haveDetailAxes = true;
+    Log::Write("terrain normals: detail texture uv per world unit: u = %.5f x + %.5f y, v = %.5f x + %.5f y",
+               fu[0], fu[1], fv[0], fv[1]);
+}
+
+IDirect3DTexture9* TerrainNormals::ShoreTexture(float waterHeight)
+{
+    if (m_spacing <= 0 || m_readX1 < m_readX0)
+        return nullptr;
+    if (!m_shoreTex)
+    {
+        ULONG before = DeviceRefs(m_dev);
+        if (FAILED(m_dev->CreateTexture(kCells, kCells, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &m_shoreTex, nullptr)))
+        {
+            m_shoreTex = nullptr;
+            return nullptr;
+        }
+        m_internalRefs += DeviceRefs(m_dev) - before;
+        m_shoreDirty = true;
+    }
+    if (!m_shoreDirty && waterHeight == m_shoreHeight)
+        return m_shoreTex;
+    // The terrain read so far and a margin (32 cells: as far as the distance is kept), at most the whole grid.
+    const int kMargin = 32;
+    int x0 = m_readX0 - kMargin, y0 = m_readY0 - kMargin, x1 = m_readX1 + kMargin, y1 = m_readY1 + kMargin;
+    if (x1 - x0 + 1 > static_cast<int>(kCells))
+        x0 = 0, x1 = kCells - 1;
+    if (y1 - y0 + 1 > static_cast<int>(kCells))
+        y0 = 0, y1 = kCells - 1;
+    const int w = x1 - x0 + 1, h = y1 - y0 + 1;
+    // Distance to the nearest land cell: a two-pass chamfer (1 straight, 1.414 diagonally), in cells.
+    const float kFar = 1e9f, kDiagonal = 1.41421356f;
+    std::vector<float> dist(static_cast<size_t>(w) * h);
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x)
+        {
+            const float v = Height(x0 + x, y0 + y);
+            dist[static_cast<size_t>(y) * w + x] = !std::isnan(v) && v >= waterHeight ? 0.0f : kFar;
+        }
+    auto at = [&](int x, int y) -> float& { return dist[static_cast<size_t>(y) * w + x]; };
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x)
+        {
+            float& d = at(x, y);
+            if (x > 0)
+                d = (std::min)(d, at(x - 1, y) + 1);
+            if (y > 0)
+            {
+                d = (std::min)(d, at(x, y - 1) + 1);
+                if (x > 0)
+                    d = (std::min)(d, at(x - 1, y - 1) + kDiagonal);
+                if (x < w - 1)
+                    d = (std::min)(d, at(x + 1, y - 1) + kDiagonal);
+            }
+        }
+    for (int y = h - 1; y >= 0; --y)
+        for (int x = w - 1; x >= 0; --x)
+        {
+            float& d = at(x, y);
+            if (x < w - 1)
+                d = (std::min)(d, at(x + 1, y) + 1);
+            if (y < h - 1)
+            {
+                d = (std::min)(d, at(x, y + 1) + 1);
+                if (x < w - 1)
+                    d = (std::min)(d, at(x + 1, y + 1) + kDiagonal);
+                if (x > 0)
+                    d = (std::min)(d, at(x - 1, y + 1) + kDiagonal);
+            }
+        }
+    D3DLOCKED_RECT lr;
+    if (FAILED(m_shoreTex->LockRect(0, &lr, nullptr, 0)))
+        return m_shoreTex;
+    for (UINT y = 0; y < kCells; ++y)
+        memset(static_cast<BYTE*>(lr.pBits) + y * lr.Pitch, 0, kCells * 4);  // unknown everywhere else
+    auto byte = [](float v) { return static_cast<DWORD>((std::min)(255.0f, (std::max)(0.0f, v * 8.0f + 0.5f))); };
+    for (int y = 0; y < h; ++y)
+    {
+        DWORD* row = reinterpret_cast<DWORD*>(static_cast<BYTE*>(lr.pBits) + ((y0 + y) & (kCells - 1)) * lr.Pitch);
+        for (int x = 0; x < w; ++x)
+        {
+            const float v = Height(x0 + x, y0 + y);
+            if (std::isnan(v))
+                continue;
+            const DWORD r = byte(at(x, y)), g = byte(waterHeight - v);  // x 8: 32 cells / units fill the byte
+            row[(x0 + x) & (kCells - 1)] = 0xFF000000u | r << 16 | g << 8;
+        }
+    }
+    m_shoreTex->UnlockRect(0);
+    m_shoreDirty = false;
+    m_shoreHeight = waterHeight;
+    return m_shoreTex;
+}
+
+bool TerrainNormals::EnsureHeightTexture()
+{
+    if (!m_heightTex)
+    {
+        ULONG before = DeviceRefs(m_dev);
+        if (FAILED(m_dev->CreateTexture(kCells, kCells, 1, 0, D3DFMT_R32F, D3DPOOL_MANAGED, &m_heightTex, nullptr)))
+        {
+            m_heightTex = nullptr;
+            return false;
+        }
+        // Bilinear heights where the card can filter R32F (any recent one), else nearest.
+        IDirect3D9* d3d = nullptr;
+        D3DDEVICE_CREATION_PARAMETERS cp = {};
+        D3DDISPLAYMODE mode = {};
+        if (SUCCEEDED(m_dev->GetDirect3D(&d3d)) && SUCCEEDED(m_dev->GetCreationParameters(&cp)) &&
+            SUCCEEDED(m_dev->GetDisplayMode(0, &mode)))
+            m_heightFilter = SUCCEEDED(d3d->CheckDeviceFormat(cp.AdapterOrdinal, cp.DeviceType, mode.Format,
+                                                              D3DUSAGE_QUERY_FILTER, D3DRTYPE_TEXTURE, D3DFMT_R32F));
+        if (d3d)
+            d3d->Release();
+        m_internalRefs += DeviceRefs(m_dev) - before;
+        m_heightTexDirty = true;
+    }
+    if (m_heightTexDirty && !m_heights.empty())
+    {
+        D3DLOCKED_RECT lr;
+        if (SUCCEEDED(m_heightTex->LockRect(0, &lr, nullptr, 0)))
+        {
+            for (UINT y = 0; y < kCells; ++y)
+            {
+                float* row = reinterpret_cast<float*>(static_cast<BYTE*>(lr.pBits) + y * lr.Pitch);
+                for (UINT x = 0; x < kCells; ++x)
+                {
+                    const float v = m_heights[y * kCells + x];
+                    row[x] = std::isnan(v) ? -10000.0f : v;
+                }
+            }
+            m_heightTex->UnlockRect(0);
+            m_heightTexDirty = false;
+        }
+    }
+    return true;
 }
 
 bool TerrainNormals::EnsureHillResources()
@@ -105,6 +327,12 @@ bool TerrainNormals::EnsureHillResources()
         return false;
     if (m_hillTex && m_heightTex && m_hillPs)
         return true;
+    if (!EnsureHeightTexture())
+    {
+        m_hillFailed = true;
+        Log::Write("terrain: hill shadows need an R32F texture; creating it failed, so no hill shadows");
+        return false;
+    }
     ULONG before = DeviceRefs(m_dev);
     auto tokens = [](const BYTE* code, size_t size) {
         std::vector<DWORD> t(size / sizeof(DWORD));
@@ -116,21 +344,6 @@ bool TerrainNormals::EnsureHillResources()
         ok = SUCCEEDED(m_dev->CreateVertexShader(tokens(g_hillShadowVS, sizeof(g_hillShadowVS)).data(), &m_hillVs));
     if (ok && !m_hillPs)
         ok = SUCCEEDED(m_dev->CreatePixelShader(tokens(g_hillShadowPS, sizeof(g_hillShadowPS)).data(), &m_hillPs));
-    if (ok && !m_heightTex)
-    {
-        ok = SUCCEEDED(m_dev->CreateTexture(kCells, kCells, 1, 0, D3DFMT_R32F, D3DPOOL_MANAGED, &m_heightTex, nullptr));
-        // Bilinear heights where the card can filter R32F (any recent one), else nearest.
-        IDirect3D9* d3d = nullptr;
-        D3DDEVICE_CREATION_PARAMETERS cp = {};
-        D3DDISPLAYMODE mode = {};
-        if (ok && SUCCEEDED(m_dev->GetDirect3D(&d3d)) && SUCCEEDED(m_dev->GetCreationParameters(&cp)) &&
-            SUCCEEDED(m_dev->GetDisplayMode(0, &mode)))
-            m_heightFilter = SUCCEEDED(d3d->CheckDeviceFormat(cp.AdapterOrdinal, cp.DeviceType, mode.Format,
-                                                              D3DUSAGE_QUERY_FILTER, D3DRTYPE_TEXTURE, D3DFMT_R32F));
-        if (d3d)
-            d3d->Release();
-        m_heightsDirty = true;
-    }
     if (ok && !m_hillTex)
         ok = SUCCEEDED(m_dev->CreateTexture(kHillCells, kHillCells, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT,
                                             &m_hillTex, nullptr)) &&
@@ -176,20 +389,7 @@ bool TerrainNormals::UpdateHills(const float* sunDirection, float darkness, cons
         return false;
     if (m_heightsDirty)
     {
-        D3DLOCKED_RECT lr;
-        if (SUCCEEDED(m_heightTex->LockRect(0, &lr, nullptr, 0)))
-        {
-            for (UINT y = 0; y < kCells; ++y)
-            {
-                float* row = reinterpret_cast<float*>(static_cast<BYTE*>(lr.pBits) + y * lr.Pitch);
-                for (UINT x = 0; x < kCells; ++x)
-                {
-                    const float v = m_heights[y * kCells + x];
-                    row[x] = std::isnan(v) ? -10000.0f : v;
-                }
-            }
-            m_heightTex->UnlockRect(0);
-        }
+        EnsureHeightTexture();  // the new heights uploaded (unless the waves' draping already has)
         m_heightsDirty = false;
     }
     // Half a cell per step towards the sun (so a one-vertex ridge isn't stepped over); the beam rises by the sun's
@@ -353,7 +553,7 @@ void TerrainNormals::ReleaseDefault()
 void TerrainNormals::ReleaseAll()
 {
     // No reference counting afterwards: this can be the device's last object.
-    IUnknown* objects[] = {m_tex, m_hillSurf, m_hillTex, m_hillState, m_heightTex, m_hillVs, m_hillPs};
+    IUnknown* objects[] = {m_tex, m_hillSurf, m_hillTex, m_hillState, m_heightTex, m_hillVs, m_hillPs, m_shoreTex};
     for (IUnknown* o : objects)
         if (o)
             o->Release();
@@ -362,6 +562,9 @@ void TerrainNormals::ReleaseAll()
     m_hillTex = nullptr;
     m_hillState = nullptr;
     m_heightTex = nullptr;
+    m_heightTexDirty = true;
+    m_shoreTex = nullptr;
+    m_shoreDirty = true;
     m_hillVs = nullptr;
     m_hillPs = nullptr;
     m_hillReady = false;

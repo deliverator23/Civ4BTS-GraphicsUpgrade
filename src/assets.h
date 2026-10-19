@@ -18,11 +18,17 @@ struct FpkEntry
 std::vector<FpkEntry> FpkEntries(const std::wstring& fpk);
 bool ReadFpkEntry(const std::wstring& fpk, const FpkEntry& entry, std::vector<uint8_t>& out);
 bool ReadFromFpk(const std::wstring& fpk, const std::string& name, std::vector<uint8_t>& out);
+// A file from a Civilization V .fpk archive (version 6: plain names; name compared ignoring case).
+bool ReadFromCiv5Fpk(const std::wstring& fpk, const std::string& name, std::vector<uint8_t>& out);
 
 // The copy of an art file the game uses (name: a path under Assets): the first of the running mod's, Beyond the
 // Sword's, Warlords' and Civilization IV's, loose before packed (modOnly: the running mod's only). from: the file or
 // archive it came from.
 bool ReadAsset(const std::wstring& name, std::vector<uint8_t>& out, std::wstring& from, bool modOnly = false);
+
+// An image file (PNG, BMP, or anything else Windows' imaging component reads) as 8-bit RGBA rows, top row first.
+// False if it can't be read, or is bigger than 4096 on a side.
+bool DecodeImage(const std::vector<uint8_t>& file, UINT& width, UINT& height, std::vector<uint8_t>& rgba);
 
 // The lights of a light rig .nif like SunLight.nif: its directional light's colour (diffuse x dimmer, 0..1) and
 // direction in the scene (the way the light travels), and the ambient (every light's ambient x dimmer). Reads NIF 10.1

@@ -10,6 +10,8 @@
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
+#include <cwctype>
+#include <map>
 #include <vector>
 
 Config g_config;
@@ -84,6 +86,93 @@ static int IniInt(const std::wstring& ini, const wchar_t* section, const wchar_t
 
 // Problems found while reading the INI; written to the log once it's open (Log::Init).
 static std::vector<std::string> g_settingsWarnings;
+
+// Every setting line of a section, key and value trimmed, in file order. (GetPrivateProfileString gives only a key's
+// first line.)
+static std::vector<std::pair<std::wstring, std::wstring>> IniSection(const std::wstring& ini, const wchar_t* section)
+{
+    auto trim = [](const std::wstring& t) {
+        size_t a = t.find_first_not_of(L" \t"), b = t.find_last_not_of(L" \t");
+        return a == std::wstring::npos ? std::wstring() : t.substr(a, b - a + 1);
+    };
+    std::vector<wchar_t> buf(65536);
+    const DWORD n = GetPrivateProfileSectionW(section, buf.data(), static_cast<DWORD>(buf.size()), ini.c_str());
+    std::vector<std::pair<std::wstring, std::wstring>> lines;
+    for (const wchar_t* line = buf.data(); line < buf.data() + n && *line; line += wcslen(line) + 1)
+    {
+        const std::wstring text = line;
+        const size_t eq = text.find(L'=');
+        if (eq != std::wstring::npos && text[0] != L';' && text[0] != L'#')
+            lines.emplace_back(trim(text.substr(0, eq)), trim(text.substr(eq + 1)));
+    }
+    return lines;
+}
+
+// Settings that are lists of entries separated by ';' (TextureList): every line of the key counts, so a second
+// SurfaceTextures= line adds to the first instead of being ignored.
+static bool IsListSetting(const std::wstring& key)
+{
+    for (const wchar_t* name : {L"SurfaceTextures", L"NoShadowTextures", L"BlobShadowTexture"})
+        if (_wcsicmp(key.c_str(), name) == 0)
+            return true;
+    return false;
+}
+
+// A list setting: the entries of every line of the key, joined with ';', from the mod's INI if it has the key at all
+// (as IniString), else the game folder's.
+static std::wstring IniList(const std::wstring& ini, const wchar_t* section, const wchar_t* key, const wchar_t* def)
+{
+    const std::wstring* const files[] = {&g_modIni, &ini};
+    for (const std::wstring* file : files)
+    {
+        if (file->empty())
+            continue;
+        std::wstring entries;
+        bool found = false;
+        for (const auto& line : IniSection(*file, section))
+            if (_wcsicmp(line.first.c_str(), key) == 0)
+            {
+                found = true;
+                if (!line.second.empty())
+                    entries += (entries.empty() ? L"" : L"; ") + line.second;
+            }
+        if (found)
+            return entries;
+    }
+    return def;
+}
+
+// A setting written more than once in one file: say so in the log. Of an ordinary setting only the first line
+// counts; of a list setting, all of them.
+static void WarnDuplicates(const std::wstring& file)
+{
+    std::vector<wchar_t> names(16384);
+    const DWORD n = GetPrivateProfileSectionNamesW(names.data(), static_cast<DWORD>(names.size()), file.c_str());
+    for (const wchar_t* section = names.data(); section < names.data() + n && *section; section += wcslen(section) + 1)
+    {
+        std::map<std::wstring, std::pair<std::wstring, int>> seen;  // lower-case key -> as written, how many lines
+        for (const auto& line : IniSection(file, section))
+        {
+            std::wstring lower = line.first;
+            for (wchar_t& c : lower)
+                c = static_cast<wchar_t>(towlower(c));
+            auto& entry = seen[lower];
+            if (entry.second++ == 0)
+                entry.first = line.first;
+        }
+        for (const auto& kv : seen)
+        {
+            if (kv.second.second < 2)
+                continue;
+            char msg[600];
+            snprintf(msg, sizeof(msg), "settings: [%ls] %ls is set on %d lines in %ls; %s", section,
+                     kv.second.first.c_str(), kv.second.second, file.c_str(),
+                     IsListSetting(kv.second.first) ? "the entries of all of them are used"
+                                                    : "only the first counts, so remove the others");
+            g_settingsWarnings.push_back(msg);
+        }
+    }
+}
 
 // A hotkey as written in the INI: a letter or digit (W, 5), a key name (F11, PrintScreen, Pause, Space, Tab,
 // Insert, Delete, Home, End, PageUp, PageDown, Numpad0-Numpad9), a virtual-key code (0x57 or 87), or none / empty / 0
@@ -226,6 +315,64 @@ static std::vector<Config::LightCycleKey> CycleKeys(const std::wstring& ini, con
     return keys;
 }
 
+// [lighting] LightCycleImage: the file named (a full path; or a name looked for in the running mod's GraphicsUpgrade
+// folder, then under Assets as the game finds art, the mod's first, then the game folder's GraphicsUpgrade folder and
+// the game folder itself) as cycle keyframes, one per column (step = column), sun from the top row, ambient from the
+// second (none if it has one row). gameDir: the folder with d3d9.dll. False (and a warning) if it can't be used.
+static bool CycleImage(std::wstring name, const std::wstring& gameDir, std::vector<Config::LightCycleKey>& sun,
+                       std::vector<Config::LightCycleKey>& ambient)
+{
+    name.erase(0, name.find_first_not_of(L" \t\""));
+    name.erase(name.find_last_not_of(L" \t\"") + 1);
+    if (name.empty())
+        return false;
+    std::replace(name.begin(), name.end(), L'/', L'\\');
+    std::vector<uint8_t> bytes;
+    std::wstring from;
+    const bool full = name.size() > 2 && (name[1] == L':' || (name[0] == L'\\' && name[1] == L'\\'));
+    if (full)
+        from = ReadFileBytes(name, bytes) ? name : L"";
+    else if (!g_config.modGraphicsDir.empty() && ReadFileBytes(g_config.modGraphicsDir + L"\\" + name, bytes))
+        from = g_config.modGraphicsDir + L"\\" + name;
+    else if (!ReadAsset(name, bytes, from))
+    {
+        for (const std::wstring& dir : {gameDir + L"\\GraphicsUpgrade", gameDir})
+            if (ReadFileBytes(dir + L"\\" + name, bytes))
+            {
+                from = dir + L"\\" + name;
+                break;
+            }
+    }
+    char msg[700];
+    UINT w = 0, h = 0;
+    std::vector<uint8_t> rgba;
+    if (from.empty() || !DecodeImage(bytes, w, h, rgba))
+    {
+        snprintf(msg, sizeof(msg), "settings: [lighting] LightCycleImage=%ls %s; LightCycleSteps and "
+                 "LightCycleAmbientSteps used instead", name.c_str(), from.empty() ? "not found" : "can't be read as an image");
+        g_settingsWarnings.push_back(msg);
+        return false;
+    }
+    sun.clear();
+    ambient.clear();
+    for (UINT x = 0; x < w; ++x)
+    {
+        Config::LightCycleKey k;
+        k.step = static_cast<float>(x);
+        for (UINT row = 0; row < (std::min)(h, 2u); ++row)
+        {
+            const uint8_t* p = &rgba[(static_cast<size_t>(row) * w + x) * 4];
+            for (int c = 0; c < 3; ++c)
+                k.value[c] = p[c] / 255.0f;
+            (row == 0 ? sun : ambient).push_back(k);
+        }
+    }
+    snprintf(msg, sizeof(msg), "settings: [lighting] LightCycleImage: %ls, %ux%u: %u steps, sun from the top row%s",
+             from.c_str(), w, h, w, h > 1 ? ", ambient from the second" : " (no second row: the ambient doesn't cycle)");
+    g_settingsWarnings.push_back(msg);
+    return true;
+}
+
 // The running mod's folder: BtS runs a mod with "mod= Mods\<name>" (or mod=\Mods\<name>, quoted or not) on its
 // command line, or loads the one in CivilizationIV.ini's [CONFIG] Mod (0 = none) at startup. Empty: no mod.
 static std::wstring ModFolder(const std::wstring& gameDir)
@@ -301,6 +448,9 @@ void LoadConfig()
                                   : L"its GraphicsUpgrade\\GraphicsUpgrade.ini overrides the game folder's, setting by setting");
         g_settingsWarnings.push_back(msg);
     }
+    WarnDuplicates(ini);
+    if (!g_modIni.empty())
+        WarnDuplicates(g_modIni);
     g_config.outputDir = IniString(ini, L"general", L"OutputDir", L"");
     if (g_config.outputDir.empty())
     {
@@ -313,6 +463,7 @@ void LoadConfig()
     g_config.games = IniString(ini, L"general", L"Games", L"bts");
     g_config.dumpShaders = IniInt(ini, L"debug", L"DumpShaders", 0) != 0;
     g_config.tracesEnabled = IniInt(ini, L"debug", L"Traces", 0) != 0;
+    g_config.waterTime = static_cast<float>(_wtof(IniString(ini, L"debug", L"WaterTime", L"-1").c_str()));
     g_config.traceKey = IniKey(ini, L"trace", L"Key", '9');
     std::wstring mods = IniString(ini, L"general", L"KeyModifiers", L"ctrl+shift");
     for (auto& c : mods)
@@ -337,19 +488,37 @@ void LoadConfig()
     g_config.overlayKey = IniKey(ini, L"reflection", L"OverlayToggleKey", 0);
     g_config.waterEnabled = IniInt(ini, L"water", L"Enabled", 1) != 0;
     g_config.waterKey = IniKey(ini, L"water", L"ToggleKey", '1');
+    g_config.waterNormalKey = IniKey(ini, L"water", L"NormalMapToggleKey", '7');
+    g_config.waterNormalMap = IniInt(ini, L"water", L"NormalMap", 0);
     std::wstring colDir = IniString(ini, L"water", L"ColonizationDir", L"");
     if (!colDir.empty())
         g_config.colonizationDir = colDir;
     g_config.waterSurfaceTextures =
-        IniString(ini, L"water", L"SurfaceTextures", L"Art\\Terrain\\Features\\Oasis\\oasis_water.dds");
+        IniList(ini, L"water", L"SurfaceTextures", L"Art\\Terrain\\Features\\Oasis\\oasis_water.dds");
     g_config.underwaterDepth = static_cast<float>(_wtof(IniString(ini, L"water", L"UnderwaterDepth", L"25").c_str()));
     g_config.underwaterVisibility =
         static_cast<float>(_wtof(IniString(ini, L"water", L"UnderwaterVisibility", L"0.7").c_str()));
     g_config.underwaterBands = static_cast<UINT>((std::max)(1, (std::min)(16, IniInt(ini, L"water", L"UnderwaterBands", 8))));
-    std::wstring wc = IniString(ini, L"water", L"WaterConstants", L"");
-    if (!wc.empty())
-        swscanf_s(wc.c_str(), L"%f,%f,%f,%f", &g_config.waterConstants[0], &g_config.waterConstants[1],
-                  &g_config.waterConstants[2], &g_config.waterConstants[3]);
+    g_config.glintFollowsSun = (std::max)(0, (std::min)(2, IniInt(ini, L"water", L"GlintFollowsSun", 1)));
+    auto strength = [&](const wchar_t* key) {
+        return (std::max)(0.0f, (std::min)(4.0f, static_cast<float>(_wtof(IniString(ini, L"water", key, L"1").c_str()))));
+    };
+    g_config.caustics = strength(L"Caustics");
+    g_config.waveShading = (std::max)(0, (std::min)(255, IniInt(ini, L"water", L"WaveShading", 64)));
+    g_config.riverGlint = (std::max)(0, (std::min)(255, IniInt(ini, L"water", L"RiverGlint", 128)));
+    g_config.riverShimmer = (std::max)(0.0f, (std::min)(3.0f, static_cast<float>(_wtof(
+                                                              IniString(ini, L"water", L"RiverShimmer", L"3").c_str()))));
+    std::wstring civ5Dir = IniString(ini, L"water", L"Civ5Dir", L"");
+    if (!civ5Dir.empty())
+        g_config.civ5Dir = civ5Dir;
+    // The water shader's f4WaterConstants: x = ReflectionEvenness, y = ReflectionRipple, z = RefractionRipple (w unused).
+    const wchar_t* waterKeys[3] = {L"ReflectionEvenness", L"ReflectionRipple", L"RefractionRipple"};
+    for (int i = 0; i < 3; ++i)
+    {
+        std::wstring v = IniString(ini, L"water", waterKeys[i], L"");
+        if (!v.empty())
+            g_config.waterConstants[i] = (std::max)(0.0f, static_cast<float>(_wtof(v.c_str())));
+    }
     g_config.shadowsEnabled = IniInt(ini, L"shadows", L"Enabled", 1) != 0;
     g_config.shadowsKey = IniKey(ini, L"shadows", L"ToggleKey", '2');
     g_config.shadowSize = static_cast<UINT>(IniInt(ini, L"shadows", L"Size", 2048));
@@ -358,8 +527,8 @@ void LoadConfig()
     g_config.shadowDarkness = static_cast<float>(_wtof(IniString(ini, L"shadows", L"Darkness", L"0.45").c_str()));
     g_config.hideBlobShadows = IniInt(ini, L"shadows", L"HideBlobShadows", 1) != 0;
     g_config.blobShadowTexture =
-        IniString(ini, L"shadows", L"BlobShadowTexture", L"Art\\Units\\01_UnitShadows\\unit_shadows.dds");
-    g_config.noShadowTextures = IniString(ini, L"shadows", L"NoShadowTextures", L"");
+        IniList(ini, L"shadows", L"BlobShadowTexture", L"Art\\Units\\01_UnitShadows\\unit_shadows.dds");
+    g_config.noShadowTextures = IniList(ini, L"shadows", L"NoShadowTextures", L"");
     g_config.buildingShadows = IniInt(ini, L"shadows", L"BuildingShadows", 1) != 0;
     g_config.buildingDarkness =
         static_cast<float>(_wtof(IniString(ini, L"shadows", L"BuildingDarkness", L"0.68").c_str()));
@@ -376,10 +545,10 @@ void LoadConfig()
     if (!sunDir.empty())
         swscanf_s(sunDir.c_str(), L"%f,%f,%f", &g_config.sunDirection[0], &g_config.sunDirection[1],
                   &g_config.sunDirection[2]);
-    // [lighting]: colours as R,G,B in 0..255. SunColour/AmbientColour apply to every group unless a group's own key
-    // is set.
-    auto rgb = [&](const wchar_t* key, float* out) {
-        std::wstring v = IniString(ini, L"lighting", key, L"");
+    // [lighting]: colours as R,G,B in 0..255. SunColour/AmbientColour apply to every group unless the group's own key
+    // in [lighting groups] is set.
+    auto rgb = [&](const wchar_t* key, float* out, const wchar_t* section = L"lighting") {
+        std::wstring v = IniString(ini, section, key, L"");
         int c[3];
         if (v.empty() || swscanf_s(v.c_str(), L"%d,%d,%d", &c[0], &c[1], &c[2]) != 3)
             return false;
@@ -389,6 +558,12 @@ void LoadConfig()
     };
     g_config.anisotropy = static_cast<UINT>((std::max)(1, (std::min)(16, IniInt(ini, L"textures", L"Anisotropy", 8))));
     g_config.anisotropyKey = IniKey(ini, L"textures", L"ToggleKey", '5');
+    g_config.detailNormals = IniInt(ini, L"textures", L"DetailNormals", 1) != 0;
+    g_config.detailNormalsKey = IniKey(ini, L"textures", L"DetailNormalsToggleKey", '6');
+    g_config.detailNormalStrength = (std::max)(
+        0.0f, static_cast<float>(_wtof(IniString(ini, L"textures", L"DetailNormalStrength", L"1").c_str())));
+    g_config.detailBumpiness =
+        (std::max)(0.0f, static_cast<float>(_wtof(IniString(ini, L"textures", L"DetailBumpiness", L"1.5").c_str())));
     g_config.lightingEnabled = IniInt(ini, L"lighting", L"Enabled", 1) != 0;
     g_config.lightingKey = IniKey(ini, L"lighting", L"ToggleKey", '3');
     g_config.lightCycleKey = IniKey(ini, L"lighting", L"LightCycleToggleKey", '4');
@@ -405,12 +580,13 @@ void LoadConfig()
                                                 L"TreeAmbient", L"BuildingAmbient", nullptr};  // water: no ambient
     for (int g = 0; g < kLightGroups; ++g)
     {
-        g_config.lightSunSet[g] = g_config.lightSunOwn[g] = rgb(sunKeys[g], g_config.lightSun[g]);
+        g_config.lightSunSet[g] = g_config.lightSunOwn[g] = rgb(sunKeys[g], g_config.lightSun[g], L"lighting groups");
         if (!g_config.lightSunSet[g] && haveSun)
             memcpy(g_config.lightSun[g], sunAll, sizeof(sunAll)), g_config.lightSunSet[g] = true;
         if (!ambientKeys[g])
             continue;
-        g_config.lightAmbientSet[g] = g_config.lightAmbientOwn[g] = rgb(ambientKeys[g], g_config.lightAmbient[g]);
+        g_config.lightAmbientSet[g] = g_config.lightAmbientOwn[g] =
+            rgb(ambientKeys[g], g_config.lightAmbient[g], L"lighting groups");
         if (!g_config.lightAmbientSet[g] && haveAmbient)
             memcpy(g_config.lightAmbient[g], ambientAll, sizeof(ambientAll)), g_config.lightAmbientSet[g] = true;
     }
@@ -424,6 +600,12 @@ void LoadConfig()
         static_cast<float>(_wtof(IniString(ini, L"lighting", L"LightChangeStepCount", L"24").c_str()));
     g_config.lightCycleStart =
         static_cast<float>(_wtof(IniString(ini, L"lighting", L"LightCycleStartStep", L"12").c_str()));
+    // LightCycleImage: a small picture, a column per step (its width is the step count), the top row the sun's colour
+    // and the second the ambient's. It replaces LightCycleSteps and LightCycleAmbientSteps.
+    std::vector<Config::LightCycleKey> imageSun, imageAmbient;
+    const bool image = CycleImage(IniString(ini, L"lighting", L"LightCycleImage", L""), dir, imageSun, imageAmbient);
+    if (image)
+        g_config.lightCycleStepCount = static_cast<float>(imageSun.size());
     if (g_config.lightCycleStart < 0 || g_config.lightCycleStart > g_config.lightCycleStepCount)
     {
         char msg[160];
@@ -432,8 +614,9 @@ void LoadConfig()
         g_settingsWarnings.push_back(msg);
         g_config.lightCycleStart = 0;
     }
-    g_config.lightCycle = CycleKeys(ini, L"LightCycleSteps", g_config.lightCycleStepCount);
-    g_config.lightCycleAmbient = CycleKeys(ini, L"LightCycleAmbientSteps", g_config.lightCycleStepCount);
+    g_config.lightCycle = image ? imageSun : CycleKeys(ini, L"LightCycleSteps", g_config.lightCycleStepCount);
+    g_config.lightCycleAmbient =
+        image ? imageAmbient : CycleKeys(ini, L"LightCycleAmbientSteps", g_config.lightCycleStepCount);
     g_config.lightCycleDirection = CycleKeys(ini, L"LightCycleDirections", g_config.lightCycleStepCount, kCycleDirection);
     g_config.lightCycleAngles = CycleKeys(ini, L"LightCycleSunAngles", g_config.lightCycleStepCount, kCycleAngles);
     // The simple sun path: SunMiddayFrom = a compass point (N, NNE, NE ... NNW) or a bearing in degrees.

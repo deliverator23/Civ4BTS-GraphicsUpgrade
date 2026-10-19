@@ -17,6 +17,7 @@
 #include "trace.h"
 
 #include <functional>
+#include <vector>
 
 class Water
 {
@@ -33,6 +34,30 @@ public:
     const float* shadowMatrix = nullptr;
     float shadowDarkness = 0;
     const float* skyLight = nullptr;
+    // Shoreline and shallow water (water.hlsl built with SHORE): set before each water draw. The sun's travel
+    // direction (the glint follows it), and the shore texture (TerrainNormals::ShoreTexture; null: no caustics or
+    // the caustics) with world xy -> its uv (scale, offset).
+    const float* sunDirection = nullptr;
+    // Where the light cycle is in its day: 0 = midnight, 0.5 = midday (-1: no cycle running). With GlintFollowsSun=1
+    // the glint crosses the view by this.
+    float dayFraction = -1;
+    IDirect3DTexture9* shoreTexture = nullptr;
+    float shoreGrid[2] = {};
+    // Caustics can be drawn (their shaders and textures loaded, and switched on): the shore texture is wanted.
+    bool ShoreWanted() const { return m_shorePs && m_caustic[0] && g_config.caustics > 0; }
+    // Where the glint's light is for a view (vp: world -> clip, register form), from sunDirection and dayFraction
+    // ([water] GlintFollowsSun): xyz towards it (unit), w how bright the glint is (GlintFade). Colonization's painted
+    // sun without a sun to follow. The sea's glint and wave shading use it, and the rivers' glint.
+    void GlintLight(const float vp[16], float toLight[4]) const;
+    // The sea's glint for a view, for the rivers' too: the sky texture (its alpha the painted sun; null if the water
+    // can't be loaded), and the turn (water.hlsl's mtxGlint, 3 registers) that puts the painted sun where the glint is
+    // now and how bright the glint is (GlintFade).
+    IDirect3DBaseTexture9* GlintSky(const float vp[16], float rot[12], float& fade);
+    // The normal maps: water_normal.dds (0, at Colonization's tiling) and any water_normal_1.dds, _2... found where it
+    // is, each drawn at 1440 world units (8 plots) per repeat. NextNormalMap cycles through them ([water]
+    // NormalMapToggleKey); [water] NormalMap picks the one at the start.
+    size_t NormalMapCount() const { return 1 + m_numbered.size(); }
+    void NextNormalMap();
 
     // Loads the shaders and textures on first use. False if the water textures can't be found (logged once); the
     // caller then leaves BtS's water alone.
@@ -64,6 +89,7 @@ public:
 private:
     bool m_loggedSun = false;
     bool Load();
+    void LoadShore(const std::function<bool(const std::vector<uint8_t>&, IDirect3DTexture9**)>& texture);
     bool EnsureRefraction();
 
     IDirect3DDevice9* m_dev;
@@ -74,7 +100,34 @@ private:
     IDirect3DVertexShader9* m_surfaceVs = nullptr;  // water_surface.hlsl
     IDirect3DPixelShader9* m_surfacePs = nullptr;
     bool m_loggedSurface = false;
+    IDirect3DVertexShader9* m_shoreVs = nullptr;  // water.hlsl with SHORE (Shader Model 3)
+    IDirect3DPixelShader9* m_shorePs = nullptr;
+    ShaderInfo m_shoreVsInfo, m_shorePsInfo;
+    IDirect3DTexture9* m_caustic[2] = {};  // Civilization V's caustic networks
+    bool m_loggedShore = false;
+    // GlintFollowsSun=1 with the light cycle: how far round the glint has gone, right to left (0 and 1 behind the
+    // camera, 0.5 the middle of the view), the sun's by day and the moon's by night (from dayFraction).
+    float GlintAcross() const;
+    // Where that puts it: radians to the right of the camera's heading (steady across the view, fast round the back)...
+    float GlintSide() const;
+    // ...and how low on the screen, 0 (the middle of the view) to 1 (its edges, and round the back).
+    float GlintLow() const;
+    // And how bright it is: dimming near the edges of the view, gone out of it (1 otherwise).
+    float GlintFade() const;
+    // The turn (mtxGlint, 3 registers, left alone when there is none) that puts the painted sun at toSun (unit).
+    static void GlintTurn(const float toSun[3], float rot[12]);
+    int m_glintNight = -1;  // the glint last logged: 0 the sun's, 1 the moon's
     IDirect3DTexture9* m_normal = nullptr;
+    std::vector<IDirect3DTexture9*> m_numbered;  // water_normal_1.dds, _2...
+    std::vector<std::wstring> m_numberedFrom;
+    size_t m_normalMap = 0;                      // in use: 0 = m_normal, i = m_numbered[i - 1]
+    IDirect3DTexture9* CurrentNormal() const { return m_normalMap ? m_numbered[m_normalMap - 1] : m_normal; }
+    // Whether each map is DXT5nm (x in alpha, y in green; the shaders' f4WaterConstants.w).
+    bool m_normalNm = false;
+    std::vector<bool> m_numberedNm;
+    bool CurrentNormalNm() const { return m_normalMap ? m_numberedNm[m_normalMap - 1] : m_normalNm; }
+    // The two normal-map layers' texture matrices (mtxWaterTexture1/2) at this time, for the map in use.
+    void NormalLayers(float time, float tex1[12], float tex2[12]) const;
     IDirect3DCubeTexture9* m_env = nullptr;
     IDirect3DTexture9* m_black = nullptr;  // grid (off) and refraction fallback
     IDirect3DTexture9* m_clear = nullptr;  // reflection fallback: alpha 0 = sky only
