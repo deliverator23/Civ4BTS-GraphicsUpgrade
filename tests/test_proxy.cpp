@@ -1392,10 +1392,13 @@ static int ShadowScene(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS& pp, int fra
 // With ff: the triangle is fixed function instead, like a building: lit by a directional light in slot 11 (BtS's
 // slots are 9 and up; diffuse 0.5, straight down) and D3DRS_AMBIENT (16,32,48), so BtS's colour is (144,160,176);
 // restored = light 11 and the ambient back.
+// With tex (and ff): the triangle is textured with a 1x1 grey 64 (0.25) texture, modulated by its lit colour, and its
+// material has an emissive 0.1, so BtS's colour is (64,64,64) under a light adding up past 1; restored also = the
+// material, the texture factor and texture stage 1 back.
 // With rt: drawn into a 64x64 render-target texture instead of the back buffer, as BtS draws the interface's 3D views
 // (the unit in the lower-left corner, the Civilopedia's models); pixel is its centre. With screen: the same into a
 // texture the size of the back buffer, as BtS draws the map behind the Civilopedia.
-static int LightScene(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS& pp, bool ff, bool rt, bool screen)
+static int LightScene(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS& pp, bool ff, bool rt, bool screen, bool tex)
 {
     rt = rt || screen;
     std::vector<DWORD> code = Tokens(g_litVS, sizeof(g_litVS));
@@ -1426,6 +1429,19 @@ static int LightScene(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS& pp, bool ff,
     const float light[12] = {0, 0, -1, 0, 0.5f, 0.5f, 0.5f, 0, 0.1f, 0.2f, 0.3f, 0};  // direction, diffuse, ambient
     // x, y, z, normal (facing +z, towards the light)
     const float tri[3][6] = {{-0.5f, -0.5f, 0.5f, 0, 0, 1}, {0, 0.5f, 0.5f, 0, 0, 1}, {0.5f, -0.5f, 0.5f, 0, 0, 1}};
+    // ...with a texture coordinate (tex)
+    float triUv[3][8] = {};
+    for (int v = 0; v < 3; ++v)
+        memcpy(triUv[v], tri[v], sizeof(tri[v]));
+    IDirect3DTexture9* grey = nullptr;
+    if (tex)
+    {
+        CHECK(dev->CreateTexture(1, 1, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &grey, nullptr));
+        D3DLOCKED_RECT glr;
+        CHECK(grey->LockRect(0, &glr, nullptr, 0));
+        *static_cast<DWORD*>(glr.pBits) = 0xFF404040;
+        grey->UnlockRect(0);
+    }
     DWORD pixel = 0;
     int restored = 1;
     for (int f = 0; f < 2; ++f)
@@ -1455,8 +1471,17 @@ static int LightScene(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS& pp, bool ff,
             D3DMATERIAL9 material = {};
             material.Diffuse.r = material.Diffuse.g = material.Diffuse.b = material.Diffuse.a = 1;
             material.Ambient = material.Diffuse;
+            if (tex)
+            {
+                material.Emissive.r = material.Emissive.g = material.Emissive.b = 0.1f;
+                CHECK(dev->SetTexture(0, grey));
+                CHECK(dev->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_MODULATE));
+                CHECK(dev->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_TEXTURE));
+                CHECK(dev->SetTextureStageState(0, D3DTSS_COLORARG2, D3DTA_DIFFUSE));
+                CHECK(dev->SetRenderState(D3DRS_TEXTUREFACTOR, 0xFF123456));
+            }
             CHECK(dev->SetVertexShader(nullptr));
-            CHECK(dev->SetFVF(D3DFVF_XYZ | D3DFVF_NORMAL));
+            CHECK(dev->SetFVF(D3DFVF_XYZ | D3DFVF_NORMAL | (tex ? D3DFVF_TEX1 : 0)));
             CHECK(dev->SetTransform(D3DTS_WORLD, &id));
             CHECK(dev->SetTransform(D3DTS_VIEW, &id));
             CHECK(dev->SetTransform(D3DTS_PROJECTION, &id));
@@ -1465,7 +1490,10 @@ static int LightScene(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS& pp, bool ff,
             CHECK(dev->SetMaterial(&material));
             CHECK(dev->SetRenderState(D3DRS_AMBIENT, 0x00102030));
             CHECK(dev->SetRenderState(D3DRS_LIGHTING, TRUE));
-            CHECK(dev->DrawPrimitiveUP(D3DPT_TRIANGLELIST, 1, tri, 24));
+            if (tex)
+                CHECK(dev->DrawPrimitiveUP(D3DPT_TRIANGLELIST, 1, triUv, 32));
+            else
+                CHECK(dev->DrawPrimitiveUP(D3DPT_TRIANGLELIST, 1, tri, 24));
             CHECK(dev->SetRenderState(D3DRS_LIGHTING, FALSE));
             D3DLIGHT9 after = {};
             DWORD ambient = 0;
@@ -1486,6 +1514,19 @@ static int LightScene(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS& pp, bool ff,
             dev->GetVertexShaderConstantF(64, after, 3);
             if (memcmp(after, light, sizeof(after)) != 0)
                 restored = 0;
+            if (tex)
+            {
+                D3DMATERIAL9 m = {};
+                DWORD factor = 0, op1 = 0;
+                dev->GetMaterial(&m);
+                dev->GetRenderState(D3DRS_TEXTUREFACTOR, &factor);
+                dev->GetTextureStageState(1, D3DTSS_COLOROP, &op1);
+                if (m.Emissive.r != 0.1f || factor != 0xFF123456 || op1 != D3DTOP_DISABLE)
+                    restored = 0;
+                CHECK(dev->SetTexture(0, nullptr));
+                CHECK(dev->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_SELECTARG1));
+                CHECK(dev->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_DIFFUSE));
+            }
         }
         if (rt)
             CHECK(dev->SetRenderTarget(0, bb));
@@ -1500,6 +1541,8 @@ static int LightScene(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS& pp, bool ff,
     printf("LIGHT pixel=%08lx restored=%d\n", static_cast<unsigned long>(pixel), restored);
     CHECK(dev->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_MODULATE));
     CHECK(dev->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_TEXTURE));
+    if (grey)
+        grey->Release();
     if (viewSurf)
         viewSurf->Release();
     if (view)
@@ -3041,15 +3084,16 @@ int wmain(int argc, wchar_t** argv)
     }
     if (argc > 2 && wcscmp(argv[2], L"light") == 0)
     {
-        // test_proxy <dll> light [ff] [rt | screen]
-        bool ff = false, rt = false, screen = false;
+        // test_proxy <dll> light [ff [tex]] [rt | screen]
+        bool ff = false, rt = false, screen = false, tex = false;
         for (int a = 3; a < argc; ++a)
         {
             ff = ff || wcscmp(argv[a], L"ff") == 0;
+            tex = tex || wcscmp(argv[a], L"tex") == 0;
             rt = rt || wcscmp(argv[a], L"rt") == 0;
             screen = screen || wcscmp(argv[a], L"screen") == 0;
         }
-        if (LightScene(dev, pp, ff, rt, screen) != 0)
+        if (LightScene(dev, pp, ff, rt, screen, tex) != 0)
             return 1;
         ULONG devRefs = dev->Release();
         ULONG d3dRefs = d3d->Release();

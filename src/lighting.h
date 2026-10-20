@@ -14,6 +14,10 @@
 // group's colours through Direct3D's lights, the way BtS sets them (its D3DRS_AMBIENT is white and each light
 // carries its own ambient): each enabled directional light's diffuse and specular = sun, its ambient = ambient, and
 // its direction. A colour left unset keeps the game's own.
+// Direct3D's lighting stops at 1, so with a sun and ambient adding up past it whatever faces the sun is lit to its
+// texture's colour at any hour. [lighting] BuildingLightRange (above 1) gives the Building group's draws (buildings,
+// improvements, resources) room above that, as BtS gives the terrain: their lights and emissive colour at 1 / range,
+// and a texture stage after the draw's own multiplying it by range (Headroom).
 #pragma once
 #include "assets.h"
 #include "common.h"
@@ -112,6 +116,12 @@ private:
     bool EnsureTreeShader();
     void ApplyFixedFunction(int group);
     bool UnlitEffect();  // DrawEffect's tests of the draw's state
+    // BuildingLightRange: the stage multiplying the draw by range after its own (the first unused), the material's
+    // emissive and D3DRS_AMBIENT at 1 / range, the game's values kept for RestoreHeadroom. False (nothing changed) if
+    // it doesn't apply: a pixel shader, the lights adding nothing (an unlit effect: DrawEffect's), an emissive colour
+    // from the vertices (it can't be scaled down), no stage reading the lit colour, or no stage free.
+    bool Headroom(float range);
+    void RestoreHeadroom();
 
     struct Saved
     {
@@ -133,6 +143,14 @@ private:
     };
     SavedLight m_lights[8] = {};
     int m_lightCount = 0;
+    struct SavedHeadroom
+    {
+        bool on;
+        DWORD stage, states[8], nextColor, nextAlpha, factor, ambient;
+        IDirect3DBaseTexture9* texture;
+        D3DMATERIAL9 material;
+    } m_headroom = {};
+    bool m_loggedHeadroom = false;
     std::vector<DWORD> m_slots;  // light slots the game has enabled
     bool m_cycleActive = false;
     float m_cycleSun[3] = {}, m_cycleAmbient[3] = {}, m_cycleDir[3] = {};

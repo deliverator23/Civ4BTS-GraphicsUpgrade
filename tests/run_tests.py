@@ -718,7 +718,8 @@ def main():
             os.makedirs(os.path.dirname(os.path.join(ldir, rel)), exist_ok=True)
             with open(os.path.join(ldir, rel), 'wb') as f:
                 f.write(content)
-        res = run([os.path.join(TEST, 'test_proxy.exe'), os.path.join(ldir, 'd3d9.dll'), 'light'] + (['ff'] if ff else []) +
+        res = run([os.path.join(TEST, 'test_proxy.exe'), os.path.join(ldir, 'd3d9.dll'), 'light'] +
+                  (['ff'] + (['tex'] if ff == 'tex' else []) if ff else []) +
                   ([rt if isinstance(rt, str) else 'rt'] if rt else []) + extra)
         m = re.search(r'LIGHT pixel=([0-9a-f]{8}) restored=(\d)', res)
         rgb = tuple(int(m.group(1)[i:i + 2], 16) for i in (2, 4, 6)) if m else None
@@ -927,6 +928,28 @@ def main():
              'a building is left alone when only the Unit colours are set (unset groups keep the game\'s light)')):
         rgb, ok = light_run(label, ini, ff=True)
         check(near(rgb, expect) and ok, f'{what} -> {rgb}, expected {expect}; light and ambient restored')
+
+    # BuildingLightRange: a textured building (grey 64, emissive 0.1) under a light adding up past 1 (emissive 0.1 +
+    # global ambient 16,32,48 + ambient 150,100,50 + sun 200: 1.54, 1.40, 1.27) is lit to its texture's colour at
+    # range 1, as by BtS; at 2 to 64 x the light, as the ground is; at 1.5 up to 1.5 x 64 (red).
+    hot = ('[lighting groups]\nBuildingSun=200,200,200\nBuildingAmbient=150,100,50\n[lighting]\nEnabled=1\n'
+           'MatchShadowDirection=0\n')
+    for label, ini, expect, what in (
+            ('ff_range1', hot, (64, 64, 64), "BuildingLightRange 1 (the default): Direct3D's lighting stops at 1, "
+             "the texture's own colour"),
+            ('ff_range2', hot + 'BuildingLightRange=2\n', (98, 90, 81), 'BuildingLightRange 2: lights, emissive and '
+             'global ambient at half strength, the draw doubled after its own texture stages'),
+            ('ff_range15', hot + 'BuildingLightRange=1.5\n', (96, 90, 81), 'BuildingLightRange 1.5: up to 1.5 times '
+             'the texture (red capped)'),
+            ('ff_range_off', hot.replace('Enabled=1', 'Enabled=0') + 'BuildingLightRange=2\n', (42, 46, 50),
+             "BuildingLightRange with the lighting off: as BtS, under the game's own light (sun 0.5, ambient "
+             '16,32,48, emissive 0.1)')):
+        rgb, ok = light_run(label, ini, ff='tex')
+        check(near(rgb, expect) and ok, f'{what} -> {rgb}, expected {expect}; light, ambient, material, texture '
+              f'factor and stages restored')
+    light_run('ff_range_bad', hot + 'BuildingLightRange=3\n', ff='tex')
+    rlog = open(os.path.join(TEST, 'light_ff_range_bad', 'out', 'test_proxy', 'session.log'), encoding='latin-1').read()
+    check("BuildingLightRange=3 isn't 1..2; using 2" in rlog, 'BuildingLightRange outside 1..2 warned about and capped')
 
     # The interface's 3D views (the unit in the lower-left corner, the Civilopedia's models) are drawn into textures of
     # their own: they keep the game's light, whatever the INI and the time of day on the map.

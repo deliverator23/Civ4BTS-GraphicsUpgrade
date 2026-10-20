@@ -745,6 +745,16 @@ void LoadConfig()
     g_config.litEffectsAll = allEffects == L"*";
     if (g_config.litEffectsAll)
         g_config.litEffectTextures.clear();
+    const float range =
+        static_cast<float>(_wtof(IniString(ini, L"lighting", L"BuildingLightRange", L"1").c_str()));
+    g_config.buildingLightRange = (std::min)(2.0f, (std::max)(1.0f, range));
+    if (range < 1 || range > 2)
+    {
+        char msg[160];
+        snprintf(msg, sizeof(msg), "settings: [lighting] BuildingLightRange=%g isn't 1..2; using %g", range,
+                 g_config.buildingLightRange);
+        g_settingsWarnings.push_back(msg);
+    }
     if (g_config.lightCycleOn && ((g_config.lightCycle.empty() && g_config.lightCycleAmbient.empty() &&
                                    g_config.lightCycleDirection.empty() && g_config.lightCycleAngles.empty() &&
                                    !g_config.sunPath) ||

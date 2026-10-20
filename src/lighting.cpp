@@ -19,6 +19,9 @@ Lighting::Lighting(IDirect3DDevice9* device) : m_dev(device)
         Log::Write("settings: [lighting] LitEffectTextures: * (every blended, unlit effect takes the light)");
     else
         m_effectTextures.Load(g_config.litEffectTextures, "[lighting] LitEffectTextures");
+    if (g_config.buildingLightRange > 1.001f)
+        Log::Write("settings: [lighting] BuildingLightRange: buildings, improvements and resources lit up to %.2f "
+                   "times their textures' colours", g_config.buildingLightRange);
 }
 
 void Lighting::Set(bool vs, int reg, const float* rgb)
@@ -546,36 +549,196 @@ void Lighting::ApplyFixedFunction(int g)
 {
     DWORD lighting = FALSE;
     m_dev->GetRenderState(D3DRS_LIGHTING, &lighting);
-    if (!lighting || (!SunSet(g) && !AmbientSet(g)))
+    if (!lighting)
         return;
+    const bool colours = SunSet(g) || AmbientSet(g);
+    const float range = g == kLightBuilding ? g_config.buildingLightRange : 1.0f;
+    const bool headroom = range > 1.001f && Headroom(range);
+    if (!colours && !headroom)
+        return;
+    const float scale = headroom ? 1.0f / range : 1.0f;
     float dir[3];
-    const bool newDir = Direction(g, dir);
+    const bool newDir = colours && Direction(g, dir);
     for (DWORD i : m_slots)
     {
         BOOL on = FALSE;
         D3DLIGHT9 l;
         if (m_lightCount == 8 || FAILED(m_dev->GetLightEnable(i, &on)) || !on || FAILED(m_dev->GetLight(i, &l)))
             continue;
+        const bool directional = l.Type == D3DLIGHT_DIRECTIONAL;
+        if (!directional && !headroom)
+            continue;  // point lights (effects) keep their colours
         m_lights[m_lightCount++] = {i, l};
         // BtS puts each light's shade in the light itself (its global D3DRS_AMBIENT is white), so the INI colours
         // go there too: diffuse (and specular, which BtS keeps equal to it) = sun, the light's ambient = ambient.
-        if (l.Type != D3DLIGHT_DIRECTIONAL)
-        {
-            --m_lightCount;  // point lights (effects) stay as they are
-            continue;
-        }
-        if (SunSet(g))
+        if (directional && SunSet(g))
         {
             l.Diffuse.r = l.Specular.r = Sun(g)[0];
             l.Diffuse.g = l.Specular.g = Sun(g)[1];
             l.Diffuse.b = l.Specular.b = Sun(g)[2];
         }
-        if (AmbientSet(g))
+        if (directional && AmbientSet(g))
             l.Ambient.r = Ambient(g)[0], l.Ambient.g = Ambient(g)[1], l.Ambient.b = Ambient(g)[2];
-        if (newDir)
+        if (directional && newDir)
             l.Direction.x = dir[0], l.Direction.y = dir[1], l.Direction.z = dir[2];
+        // Headroom: every light at 1 / range, but not the specular, which Direct3D adds after the texture stages.
+        l.Diffuse.r *= scale, l.Diffuse.g *= scale, l.Diffuse.b *= scale;
+        l.Ambient.r *= scale, l.Ambient.g *= scale, l.Ambient.b *= scale;
         m_dev->SetLight(i, &l);
     }
+}
+
+bool Lighting::Headroom(float range)
+{
+    IDirect3DPixelShader9* ps = nullptr;
+    m_dev->GetPixelShader(&ps);
+    if (ps)
+    {
+        ps->Release();
+        return false;
+    }
+    D3DMATERIAL9 m = {};
+    DWORD colorVertex = FALSE, diffuseSrc = D3DMCS_MATERIAL, ambientSrc = D3DMCS_MATERIAL,
+          emissiveSrc = D3DMCS_MATERIAL, fvf = 0;
+    m_dev->GetMaterial(&m);
+    m_dev->GetRenderState(D3DRS_COLORVERTEX, &colorVertex);
+    m_dev->GetRenderState(D3DRS_DIFFUSEMATERIALSOURCE, &diffuseSrc);
+    m_dev->GetRenderState(D3DRS_AMBIENTMATERIALSOURCE, &ambientSrc);
+    m_dev->GetRenderState(D3DRS_EMISSIVEMATERIALSOURCE, &emissiveSrc);
+    m_dev->GetFVF(&fvf);
+    auto fromVertex = [&](DWORD src) {
+        return colorVertex && ((src == D3DMCS_COLOR1 && (!fvf || (fvf & D3DFVF_DIFFUSE))) ||
+                               (src == D3DMCS_COLOR2 && (!fvf || (fvf & D3DFVF_SPECULAR))));
+    };
+    auto dark = [](const D3DCOLORVALUE& c) { return c.r < 0.5f / 255 && c.g < 0.5f / 255 && c.b < 0.5f / 255; };
+    if (fromVertex(emissiveSrc) ||
+        (!fromVertex(diffuseSrc) && !fromVertex(ambientSrc) && dark(m.Diffuse) && dark(m.Ambient)))
+        return false;
+
+    // The draw's own stages: one of them reads the lit colour (else the lights don't show, and the texture would
+    // just be brightened), none the texture factor, all into the current colour. Ours goes after them.
+    if (!m_maxStages)
+    {
+        D3DCAPS9 caps = {};
+        m_dev->GetDeviceCaps(&caps);
+        m_maxStages = (std::min)((std::min)(caps.MaxTextureBlendStages, caps.MaxSimultaneousTextures), DWORD(8));
+    }
+    static const D3DTEXTURESTAGESTATETYPE kAlphaArgs[3] = {D3DTSS_ALPHAARG0, D3DTSS_ALPHAARG1, D3DTSS_ALPHAARG2};
+    bool readsLit = false;
+    DWORD stage = 0;
+    for (; stage < m_maxStages; ++stage)
+    {
+        DWORD op = D3DTOP_DISABLE, a0 = 0, a1 = 0, a2 = 0, result = D3DTA_CURRENT;
+        if (FAILED(m_dev->GetTextureStageState(stage, D3DTSS_COLOROP, &op)) || op == D3DTOP_DISABLE)
+            break;
+        m_dev->GetTextureStageState(stage, D3DTSS_COLORARG0, &a0);
+        m_dev->GetTextureStageState(stage, D3DTSS_COLORARG1, &a1);
+        m_dev->GetTextureStageState(stage, D3DTSS_COLORARG2, &a2);
+        m_dev->GetTextureStageState(stage, D3DTSS_RESULTARG, &result);
+        if (result != D3DTA_CURRENT)
+            return false;
+        for (DWORD a : {a0, a1, a2})
+            if ((a & D3DTA_SELECTMASK) == D3DTA_TFACTOR)
+                return false;
+        for (D3DTEXTURESTAGESTATETYPE s : kAlphaArgs)
+        {
+            DWORD a = 0;
+            m_dev->GetTextureStageState(stage, s, &a);
+            if ((a & D3DTA_SELECTMASK) == D3DTA_TFACTOR)
+                return false;
+        }
+        // The lit colour: DIFFUSE, or CURRENT in the first stage. Its complement would come out wrong.
+        auto lit = [&](DWORD a) {
+            const DWORD sel = a & D3DTA_SELECTMASK;
+            return sel == D3DTA_DIFFUSE || (stage == 0 && sel == D3DTA_CURRENT);
+        };
+        const bool r0 = (op == D3DTOP_MULTIPLYADD || op == D3DTOP_LERP) && lit(a0);
+        const bool r1 = op != D3DTOP_SELECTARG2 && lit(a1);
+        const bool r2 = op != D3DTOP_SELECTARG1 && lit(a2);
+        if ((r0 && (a0 & D3DTA_COMPLEMENT)) || (r1 && (a1 & D3DTA_COMPLEMENT)) || (r2 && (a2 & D3DTA_COMPLEMENT)))
+            return false;
+        readsLit = readsLit || r0 || r1 || r2;
+    }
+    if (!readsLit || stage >= m_maxStages)
+        return false;
+
+    SavedHeadroom& h = m_headroom;
+    static const D3DTEXTURESTAGESTATETYPE kStates[8] = {D3DTSS_COLOROP,   D3DTSS_COLORARG1, D3DTSS_COLORARG2,
+                                                        D3DTSS_ALPHAOP,   D3DTSS_ALPHAARG1, D3DTSS_ALPHAARG2,
+                                                        D3DTSS_RESULTARG, D3DTSS_TEXTURETRANSFORMFLAGS};
+    h.stage = stage;
+    for (int k = 0; k < 8; ++k)
+        m_dev->GetTextureStageState(stage, kStates[k], &h.states[k]);
+    h.texture = nullptr;
+    m_dev->GetTexture(stage, &h.texture);
+    h.nextColor = h.nextAlpha = D3DTOP_DISABLE;
+    if (stage + 1 < 8)
+    {
+        m_dev->GetTextureStageState(stage + 1, D3DTSS_COLOROP, &h.nextColor);
+        m_dev->GetTextureStageState(stage + 1, D3DTSS_ALPHAOP, &h.nextAlpha);
+    }
+    m_dev->GetRenderState(D3DRS_TEXTUREFACTOR, &h.factor);
+    m_dev->GetRenderState(D3DRS_AMBIENT, &h.ambient);
+    h.material = m;
+    h.on = true;
+
+    // current x 2 x (range / 2). Alpha as it is.
+    const DWORD f = static_cast<DWORD>((std::min)(255.0f, range * 127.5f + 0.5f));
+    m_dev->SetRenderState(D3DRS_TEXTUREFACTOR, D3DCOLOR_ARGB(255, f, f, f));
+    m_dev->SetTexture(stage, nullptr);
+    m_dev->SetTextureStageState(stage, D3DTSS_COLOROP, D3DTOP_MODULATE2X);
+    m_dev->SetTextureStageState(stage, D3DTSS_COLORARG1, D3DTA_TFACTOR);
+    m_dev->SetTextureStageState(stage, D3DTSS_COLORARG2, D3DTA_CURRENT);
+    m_dev->SetTextureStageState(stage, D3DTSS_ALPHAOP, D3DTOP_SELECTARG1);
+    m_dev->SetTextureStageState(stage, D3DTSS_ALPHAARG1, D3DTA_CURRENT);
+    m_dev->SetTextureStageState(stage, D3DTSS_ALPHAARG2, D3DTA_CURRENT);
+    m_dev->SetTextureStageState(stage, D3DTSS_RESULTARG, D3DTA_CURRENT);
+    m_dev->SetTextureStageState(stage, D3DTSS_TEXTURETRANSFORMFLAGS, D3DTTFF_DISABLE);
+    if (stage + 1 < 8)
+    {
+        m_dev->SetTextureStageState(stage + 1, D3DTSS_COLOROP, D3DTOP_DISABLE);
+        m_dev->SetTextureStageState(stage + 1, D3DTSS_ALPHAOP, D3DTOP_DISABLE);
+    }
+    // The rest of the light Direct3D adds before the stages: the material's emissive and the global ambient.
+    const float scale = 1.0f / range;
+    D3DMATERIAL9 scaled = m;
+    scaled.Emissive.r *= scale, scaled.Emissive.g *= scale, scaled.Emissive.b *= scale;
+    m_dev->SetMaterial(&scaled);
+    auto channel = [&](int shift) {
+        return static_cast<DWORD>(((h.ambient >> shift) & 0xFF) * scale + 0.5f) << shift;
+    };
+    m_dev->SetRenderState(D3DRS_AMBIENT, (h.ambient & 0xFF000000) | channel(16) | channel(8) | channel(0));
+    if (!m_loggedHeadroom)
+    {
+        m_loggedHeadroom = true;
+        Log::Write("lighting: first building lit with BuildingLightRange %.2f (texture stage %u)", range, stage);
+    }
+    return true;
+}
+
+void Lighting::RestoreHeadroom()
+{
+    SavedHeadroom& h = m_headroom;
+    if (!h.on)
+        return;
+    h.on = false;
+    static const D3DTEXTURESTAGESTATETYPE kStates[8] = {D3DTSS_COLOROP,   D3DTSS_COLORARG1, D3DTSS_COLORARG2,
+                                                        D3DTSS_ALPHAOP,   D3DTSS_ALPHAARG1, D3DTSS_ALPHAARG2,
+                                                        D3DTSS_RESULTARG, D3DTSS_TEXTURETRANSFORMFLAGS};
+    for (int k = 0; k < 8; ++k)
+        m_dev->SetTextureStageState(h.stage, kStates[k], h.states[k]);
+    m_dev->SetTexture(h.stage, h.texture);
+    if (h.texture)
+        h.texture->Release();
+    h.texture = nullptr;
+    if (h.stage + 1 < 8)
+    {
+        m_dev->SetTextureStageState(h.stage + 1, D3DTSS_COLOROP, h.nextColor);
+        m_dev->SetTextureStageState(h.stage + 1, D3DTSS_ALPHAOP, h.nextAlpha);
+    }
+    m_dev->SetRenderState(D3DRS_TEXTUREFACTOR, h.factor);
+    m_dev->SetRenderState(D3DRS_AMBIENT, h.ambient);
+    m_dev->SetMaterial(&h.material);
 }
 
 void Lighting::Restore()
@@ -598,6 +761,7 @@ void Lighting::Restore()
     for (int i = m_lightCount - 1; i >= 0; --i)
         m_dev->SetLight(m_lights[i].index, &m_lights[i].light);
     m_lightCount = 0;
+    RestoreHeadroom();
 }
 
 void Lighting::TerrainConstants(float* out, float normalSpacing, UINT normalCells) const

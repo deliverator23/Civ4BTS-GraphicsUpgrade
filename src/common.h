@@ -184,6 +184,11 @@ struct Config
     // does (Lighting::DrawEffect). litEffectsAll: the INI says "*", every such draw.
     std::wstring litEffectTextures;
     bool litEffectsAll = false;
+    // How bright the lights can make buildings, improvements and resources (the Building group's fixed-function
+    // draws), in multiples of their textures' colours: 1 = BtS's (Direct3D's lighting stops at 1), up to 2 = as the
+    // ground (BtS bakes the terrain's light at half strength and doubles it). When sun and ambient add up past 1,
+    // whatever faces up stays at its texture's colour whatever the light, unless this is above 1 (Lighting::Headroom).
+    float buildingLightRange = 1.0f;
     bool matchShadowDirection = true;  // light units and ships from the shadows' sun direction
     bool haveLightDirection = false;   // LightDirection set: light units and ships from it instead
     float lightDirection[3] = {0, 0, -1};  // direction the light travels, like SunDirection

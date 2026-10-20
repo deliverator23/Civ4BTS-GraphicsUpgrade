@@ -211,6 +211,18 @@ are left as they are. The interface and the Civilopedia are never changed. Entri
 LitEffectTextures=Art\Effects\Sandstorm_P; Art\Effects\Dust\dust_cloud.dds
 ```
 
+**Buildings and resources under a bright light.** BtS lights buildings, improvements and resources in a way that
+stops at the colour of their textures. When the sun and the ambient add up to more than that, as they do in BtS's own
+light and in bright day–night cycles, whatever faces the sky shows its texture's colour whatever the time of day,
+while the ground around it darkens and changes colour. `[lighting] BuildingLightRange` lets them be lit brighter than
+their textures, up to 2 times, as the game lights the ground. Then they follow the light as the ground does. The
+default of 1 keeps BtS's look. Units are not changed:
+
+```ini
+[lighting]
+BuildingLightRange=2
+```
+
 **Your own terrain lighting.** BtS bakes the terrain's light from `Art\Terrain\Lights\SunLight.nif`, and
 GraphicsUpgrade needs that light to re-light the terrain and roads correctly. If your mod has its own `SunLight.nif`
 (loose or in an `.FPK`), it is read automatically, and the log notes what was found. The `BakedTerrain*` lines under
