@@ -112,6 +112,11 @@ The ones you're most likely to want:
 | `[textures] DetailNormals` | Bumps on the ground that catch the sun (1) or not (0); needs the lighting on |
 | `[textures] DetailBumpiness` | How bumpy the ground looks (0 = only where a mod gives a normal map) |
 
+**Settings files from 1.0.** Two things have moved, and a `GraphicsUpgrade.ini` (yours or a mod's) that still has them
+the old way keeps working, with a line in the log saying what to change: the group colours (`UnitSun`, `TerrainAmbient`
+and so on) are now in `[lighting groups]` rather than `[lighting]`, and `[water] WaterConstants` is now three settings,
+`ReflectionEvenness`, `ReflectionRipple` and `RefractionRipple`.
+
 ### Lighting and day–night
 
 Colours are written as Red,Green,Blue from 0 to 255. You can give each group its own in `[lighting groups]`: units,

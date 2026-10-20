@@ -29,6 +29,7 @@ static void Init()
     StartWatchdog();
     ApplyTerrainPatch();
     ApplyTileSets();
+    ApplyLandBlends();
     if (!g_config.chainDll.empty())
     {
         g_real = LoadLibraryW(g_config.chainDll.c_str());

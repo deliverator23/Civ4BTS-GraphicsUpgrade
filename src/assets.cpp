@@ -49,6 +49,15 @@ bool DecodeImage(const std::vector<uint8_t>& file, UINT& width, UINT& height, st
     return true;
 }
 
+bool IsDxt5nm(const std::vector<uint8_t>& dds)
+{
+    if (dds.size() < 128 || memcmp(dds.data(), "DDS ", 4) != 0)
+        return false;
+    uint32_t flags;
+    memcpy(&flags, dds.data() + 80, 4);
+    return (flags & 0x80000000u) && memcmp(dds.data() + 84, "DXT5", 4) == 0;
+}
+
 bool ReadFileBytes(const std::wstring& path, std::vector<uint8_t>& out)
 {
     FILE* f = nullptr;

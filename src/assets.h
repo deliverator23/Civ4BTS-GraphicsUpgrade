@@ -8,6 +8,8 @@
 #include <vector>
 
 bool ReadFileBytes(const std::wstring& path, std::vector<uint8_t>& out);
+// A .dds normal map in DXT5nm: DXT5 with the pixel format's DDPF_NORMAL flag (0x80000000), x in alpha and y in green.
+bool IsDxt5nm(const std::vector<uint8_t>& dds);
 
 // The files in a Civ4 FPK archive. Names are lower case with backslashes.
 struct FpkEntry

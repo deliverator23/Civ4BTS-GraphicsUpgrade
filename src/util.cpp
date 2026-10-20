@@ -87,6 +87,38 @@ static int IniInt(const std::wstring& ini, const wchar_t* section, const wchar_t
 // Problems found while reading the INI; written to the log once it's open (Log::Init).
 static std::vector<std::string> g_settingsWarnings;
 
+// A setting that 1.0's INIs wrote under another name or section. Each file is read in turn (the mod's first, as
+// IniString): its new key if set, else its old one, else an empty new key still counts as set (no value). The old key
+// is read only while the file sets none of `blockers` (the other new keys that replaced it). Returns the value, and
+// sets `old` when it came from the old key.
+static std::wstring IniRenamed(const std::wstring& ini, const wchar_t* section, const wchar_t* key,
+                               const wchar_t* oldSection, const wchar_t* oldKey, bool& old,
+                               std::initializer_list<const wchar_t*> blockers = {})
+{
+    old = false;
+    const std::wstring* const files[] = {&g_modIni, &ini};
+    for (const std::wstring* file : files)
+    {
+        if (file->empty())
+            continue;
+        std::wstring value, oldValue;
+        const bool have = IniRaw(*file, section, key, value);
+        if (!value.empty())
+            return value;
+        bool blocked = false;
+        for (const wchar_t* b : blockers)
+            blocked = blocked || (IniRaw(*file, section, b, oldValue) && !oldValue.empty());
+        if (!blocked && IniRaw(*file, oldSection, oldKey, oldValue) && !oldValue.empty())
+        {
+            old = true;
+            return oldValue;
+        }
+        if (have)
+            return value;
+    }
+    return L"";
+}
+
 // Every setting line of a section, key and value trimmed, in file order. (GetPrivateProfileString gives only a key's
 // first line.)
 static std::vector<std::pair<std::wstring, std::wstring>> IniSection(const std::wstring& ini, const wchar_t* section)
@@ -466,6 +498,7 @@ void LoadConfig()
     g_config.waterTime = static_cast<float>(_wtof(IniString(ini, L"debug", L"WaterTime", L"-1").c_str()));
     g_config.terrainVertsPerPlot = IniInt(ini, L"debug", L"TerrainVertsPerPlot", 17);
     g_config.tileSetsPatch = IniInt(ini, L"terrain tiles", L"Patch", 0) != 0;
+    g_config.hillField = IniInt(ini, L"terrain tiles", L"HillField", 0) != 0;
     g_config.tileSets = (std::max)(1, (std::min)(8, IniInt(ini, L"terrain tiles", L"Sets", 1)));
     for (int s = 0; s < 8; ++s)  // the INI numbers sets from 1: Set1 is set 0
         g_config.tileSetTerrains[s] = IniString(ini, L"terrain tiles", (L"Set" + std::to_wstring(s + 1)).c_str(), L"");
@@ -477,6 +510,9 @@ void LoadConfig()
     };
     fourInts(L"CoastAtlasCells", g_config.coastAtlasCells);
     fourInts(L"CoastWaveModels", g_config.coastWaveModels);
+    for (int k = 0; k < 8; ++k)
+        g_config.landBlends[k] = IniString(ini, L"terrain tiles", (L"LandBlend" + std::to_wstring(k + 1)).c_str(), L"");
+    g_config.landBlendTerrains = IniString(ini, L"terrain tiles", L"LandBlend", L"");
     g_config.traceKey = IniKey(ini, L"trace", L"Key", '9');
     std::wstring mods = IniString(ini, L"general", L"KeyModifiers", L"ctrl+shift");
     for (auto& c : mods)
@@ -527,13 +563,23 @@ void LoadConfig()
     if (!civ5Dir.empty())
         g_config.civ5Dir = civ5Dir;
     // The water shader's f4WaterConstants: x = ReflectionEvenness, y = ReflectionRipple, z = RefractionRipple (w unused).
+    // 1.0's INIs had them as one setting, WaterConstants=x,y,z,w, read when none of the three is set.
     const wchar_t* waterKeys[3] = {L"ReflectionEvenness", L"ReflectionRipple", L"RefractionRipple"};
+    bool oldWaterConstants = false;
     for (int i = 0; i < 3; ++i)
     {
-        std::wstring v = IniString(ini, L"water", waterKeys[i], L"");
-        if (!v.empty())
+        bool old;
+        std::wstring v = IniRenamed(ini, L"water", waterKeys[i], L"water", L"WaterConstants", old,
+                                    {waterKeys[0], waterKeys[1], waterKeys[2]});
+        float c[4];
+        if (old && swscanf_s(v.c_str(), L"%f,%f,%f,%f", &c[0], &c[1], &c[2], &c[3]) >= i + 1)
+            g_config.waterConstants[i] = (std::max)(0.0f, c[i]), oldWaterConstants = true;
+        else if (!old && !v.empty())
             g_config.waterConstants[i] = (std::max)(0.0f, static_cast<float>(_wtof(v.c_str())));
     }
+    if (oldWaterConstants)
+        g_settingsWarnings.push_back("settings: [water] WaterConstants is the old name; use ReflectionEvenness, "
+                                     "ReflectionRipple and RefractionRipple");
     g_config.shadowsEnabled = IniInt(ini, L"shadows", L"Enabled", 1) != 0;
     g_config.shadowsKey = IniKey(ini, L"shadows", L"ToggleKey", '2');
     g_config.shadowSize = static_cast<UINT>(IniInt(ini, L"shadows", L"Size", 2048));
@@ -562,8 +608,7 @@ void LoadConfig()
                   &g_config.sunDirection[2]);
     // [lighting]: colours as R,G,B in 0..255. SunColour/AmbientColour apply to every group unless the group's own key
     // in [lighting groups] is set.
-    auto rgb = [&](const wchar_t* key, float* out, const wchar_t* section = L"lighting") {
-        std::wstring v = IniString(ini, section, key, L"");
+    auto parseRgb = [](const std::wstring& v, float* out) {
         int c[3];
         if (v.empty() || swscanf_s(v.c_str(), L"%d,%d,%d", &c[0], &c[1], &c[2]) != 3)
             return false;
@@ -571,12 +616,27 @@ void LoadConfig()
             out[i] = static_cast<float>((std::max)(0, (std::min)(255, c[i]))) / 255.0f;
         return true;
     };
+    auto rgb = [&](const wchar_t* key, float* out) { return parseRgb(IniString(ini, L"lighting", key, L""), out); };
+    // A group's colour; 1.0's INIs had these in [lighting].
+    auto groupRgb = [&](const wchar_t* key, float* out) {
+        bool old;
+        std::wstring v = IniRenamed(ini, L"lighting groups", key, L"lighting", key, old);
+        if (old)
+        {
+            char msg[256];
+            snprintf(msg, sizeof(msg), "settings: [lighting] %ls has moved; set it in [lighting groups]", key);
+            g_settingsWarnings.push_back(msg);
+        }
+        return parseRgb(v, out);
+    };
     g_config.anisotropy = static_cast<UINT>((std::max)(1, (std::min)(16, IniInt(ini, L"textures", L"Anisotropy", 8))));
     g_config.anisotropyKey = IniKey(ini, L"textures", L"ToggleKey", '5');
     g_config.detailNormals = IniInt(ini, L"textures", L"DetailNormals", 1) != 0;
     g_config.detailNormalsKey = IniKey(ini, L"textures", L"DetailNormalsToggleKey", '6');
     g_config.detailNormalStrength = (std::max)(
         0.0f, static_cast<float>(_wtof(IniString(ini, L"textures", L"DetailNormalStrength", L"1").c_str())));
+    g_config.blendNormalStrength = (std::max)(
+        0.0f, static_cast<float>(_wtof(IniString(ini, L"textures", L"BlendNormalStrength", L"1").c_str())));
     g_config.detailBumpiness =
         (std::max)(0.0f, static_cast<float>(_wtof(IniString(ini, L"textures", L"DetailBumpiness", L"1.5").c_str())));
     g_config.lightingEnabled = IniInt(ini, L"lighting", L"Enabled", 1) != 0;
@@ -595,13 +655,13 @@ void LoadConfig()
                                                 L"TreeAmbient", L"BuildingAmbient", nullptr};  // water: no ambient
     for (int g = 0; g < kLightGroups; ++g)
     {
-        g_config.lightSunSet[g] = g_config.lightSunOwn[g] = rgb(sunKeys[g], g_config.lightSun[g], L"lighting groups");
+        g_config.lightSunSet[g] = g_config.lightSunOwn[g] = groupRgb(sunKeys[g], g_config.lightSun[g]);
         if (!g_config.lightSunSet[g] && haveSun)
             memcpy(g_config.lightSun[g], sunAll, sizeof(sunAll)), g_config.lightSunSet[g] = true;
         if (!ambientKeys[g])
             continue;
         g_config.lightAmbientSet[g] = g_config.lightAmbientOwn[g] =
-            rgb(ambientKeys[g], g_config.lightAmbient[g], L"lighting groups");
+            groupRgb(ambientKeys[g], g_config.lightAmbient[g]);
         if (!g_config.lightAmbientSet[g] && haveAmbient)
             memcpy(g_config.lightAmbient[g], ambientAll, sizeof(ambientAll)), g_config.lightAmbientSet[g] = true;
     }

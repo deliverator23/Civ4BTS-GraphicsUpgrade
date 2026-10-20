@@ -6,7 +6,11 @@
 //   - the hill and peak lookups call HillThunk / PeakThunk (EAX = corner mask, EBP = x, EBX = y), which return the
 //     tile in EDX / ESI.
 // Map, plot and terrain come from the game DLL's exports (thiscall, called as fastcall with an unused EDX).
+//
+// [terrain tiles] HillField (experimental, hill_field.h): the hill lookup hands back a tile cut from one map-wide
+// field of hill stamps instead of hill1_<mask>.
 #include "common.h"
+#include "hill_field.h"
 #include "terrain_sets.h"
 
 #include <algorithm>
@@ -28,7 +32,7 @@ struct GameDll
     GetInstance getInstance = nullptr;
     Member getMap = nullptr;
     MemberInt width = nullptr, height = nullptr, numTerrains = nullptr, terrainType = nullptr;
-    MemberBool wrapX = nullptr, wrapY = nullptr, isWater = nullptr;
+    MemberBool wrapX = nullptr, wrapY = nullptr, isWater = nullptr, isHills = nullptr;
     MemberArgs plot = nullptr;
     MemberArg terrainInfo = nullptr;
     MemberStr type = nullptr;
@@ -52,6 +56,7 @@ struct GameDll
         plot = reinterpret_cast<MemberArgs>(get("?plot@CvMap@@QBEPAVCvPlot@@HH@Z"));
         terrainType = reinterpret_cast<MemberInt>(get("?getTerrainType@CvPlot@@QBE?AW4TerrainTypes@@XZ"));
         isWater = reinterpret_cast<MemberBool>(get("?isWater@CvPlot@@QBE_NXZ"));  // optional
+        isHills = reinterpret_cast<MemberBool>(get("?isHills@CvPlot@@QBE_NXZ"));  // optional: the hill field
         numTerrains = reinterpret_cast<MemberInt>(get("?getNumTerrainInfos@CvGlobals@@QAEHXZ"));
         terrainInfo = reinterpret_cast<MemberArg>(get("?getTerrainInfo@CvGlobals@@QAEAAVCvTerrainInfo@@W4TerrainTypes@@@Z"));
         type = reinterpret_cast<MemberStr>(get("?getType@CvInfoBase@@QBEPBDXZ"));
@@ -195,6 +200,90 @@ int RandAfter(unsigned seed)
 }
 }  // namespace
 
+// [terrain tiles] HillField: the map's hills as one field of stamps (hill_field.h). The engine stamps hills square by
+// square, row by row (a whole map from GenerateTerrainHeights; the four squares round a changed plot after that), so
+// whenever a call comes before the last one, a new pass has begun: the map's hills are read again and the fit brought
+// up to date before any of its tiles is cut. The tile is the engine's to read at once, so one serves every call.
+HillField::Field g_hillField;
+HillField::EngineTile g_hillTile;
+bool g_hillStampsSet = false, g_hillLoggedOff = false;
+int g_hillLastX = -1, g_hillLastY = -1;
+unsigned g_hillCut = 0, g_hillStock = 0, g_hillRefits = 0, g_hillUpdates = 0;
+
+bool HillSync()
+{
+    void* map = g_dll.Map();
+    HillField::Map m;
+    m.width = g_dll.width(map, nullptr);
+    m.height = g_dll.height(map, nullptr);
+    m.wrapX = g_dll.wrapX(map, nullptr);
+    m.wrapY = g_dll.wrapY(map, nullptr);
+    if (m.width <= 0 || m.height <= 0 || m.width > 1024 || m.height > 1024)
+        return false;
+    m.hills.assign(static_cast<size_t>(m.width) * m.height, 0);
+    for (int y = 0; y < m.height; ++y)
+        for (int x = 0; x < m.width; ++x)
+            if (void* plot = g_dll.plot(map, nullptr, x, y))
+                m.hills[static_cast<size_t>(y) * m.width + x] = g_dll.isHills(plot, nullptr) ? 1 : 0;
+    const int how = g_hillField.Update(m);
+    if (how == 2)
+    {
+        ++g_hillRefits;
+        int sizes[4] = {}, hills = 0;
+        for (const auto& p : g_hillField.Placements())
+            ++sizes[(std::min)(3, static_cast<int>(p.frame.size()))];
+        for (uint8_t h : m.hills)
+            hills += h;
+        Log::Write("terrain tiles: hill field fitted to a %dx%d map (%d hill plots): %d three-plot, %d two-plot and %d "
+                   "one-plot stamps",
+                   m.width, m.height, hills, sizes[3], sizes[2], sizes[1]);
+    }
+    else if (how == 1)
+        ++g_hillUpdates;
+    return true;
+}
+
+// Square (x, y)'s hill tile from the field, or null for the engine's own (stock: its size and format).
+void* HillFieldTile(int mask, int x, int y, void* stock)
+{
+    if (!g_dll.Resolve() || !g_dll.isHills)
+    {
+        if (!g_hillLoggedOff)
+            Log::Write("terrain tiles: HillField off: the game DLL lacks CvPlot::isHills");
+        g_hillLoggedOff = true;
+        return nullptr;
+    }
+    if (!g_hillStampsSet)
+    {
+        g_hillStampsSet = true;
+        g_hillField.SetStamps(HillField::SyntheticStamps());
+        Log::Write("terrain tiles: HillField on, with %u made-up stamps (synthetic_*; gain %.2f)",
+                   static_cast<unsigned>(g_hillField.Stamps().size()), g_hillField.Gain());
+    }
+    int w = 0, h = 0, bpp = 0;
+    if (!HillField::TileFormat(stock, w, h, bpp) || w != h || bpp != 1 || w < 2 || w > 256)
+    {
+        ++g_hillStock;
+        return nullptr;
+    }
+    if (!g_hillField.Built() || y < g_hillLastY || (y == g_hillLastY && x <= g_hillLastX))
+        HillSync();
+    g_hillLastX = x;
+    g_hillLastY = y;
+    if (g_hillField.Mask(x, y) != mask && (!HillSync() || g_hillField.Mask(x, y) != mask))
+    {
+        ++g_hillStock;
+        return nullptr;
+    }
+    if (!g_hillField.Tile(x, y, w, g_hillTile.Pixels(w)))
+    {
+        ++g_hillStock;
+        return nullptr;
+    }
+    ++g_hillCut;
+    return g_hillTile.Texture();
+}
+
 // The engine's picker, set-aware. Same seed and the exe's own srand/rand, so with one set it picks what BtS picks.
 extern "C" int __stdcall TileSetsPicker(int x, int y, int lo, int hi, uint32_t returnAddress, uint32_t esi)
 {
@@ -235,6 +324,9 @@ extern "C" void* __stdcall TileSetsTile(int family, int mask, int x, int y)
     void** begin = *reinterpret_cast<void***>(list + 4);
     void** end = *reinterpret_cast<void***>(list + 8);
     const int n = begin ? static_cast<int>(end - begin) : 0;
+    if (!family && g_config.hillField && mask >= 1 && mask <= n)
+        if (void* tile = HillFieldTile(mask, x, y, begin[mask - 1]))
+            return tile;
     const int variants = n / TileSets::kMasks;
     if (mask < 1 || mask > n || variants <= 1)
         return begin ? begin[mask - 1] : nullptr;  // as the engine does
@@ -334,7 +426,7 @@ extern "C" __declspec(naked) void TileSetsPeakThunk()
 
 void ApplyTileSets()
 {
-    if (!g_config.tileSetsPatch)
+    if (!g_config.tileSetsPatch && !g_config.hillField)
         return;
     g_sets = (std::max)(1, (std::min)(TileSets::kMaxSets, g_config.tileSets));
     wchar_t exe[MAX_PATH] = {};
@@ -387,6 +479,234 @@ void ApplyTileSets()
                    g_config.coastWaveModels[2], g_config.coastWaveModels[3]);
 }
 
+// [terrain tiles] LandBlend1..8 (terrain_sets.h): the engine's blend pick, then on a square with no water corner a land
+// entry for terrains that have them.
+extern "C" uint32_t g_blendPickFn = 0;  // FUN_00479920, called by the thunk below
+namespace
+{
+std::vector<TileSets::LandBlend> g_landBlends;
+std::vector<int> g_landBlendFor;  // by TerrainTypes: index into g_landBlends, or -1
+bool g_landTableBuilt = false;
+std::vector<unsigned> g_landPicks;  // by g_landBlends index: entries replaced on land squares
+
+void BuildLandTable()
+{
+    g_landTableBuilt = true;
+    if (!g_dll.Resolve() || !g_dll.isWater)
+    {
+        Log::Write("terrain land blends: the game DLL lacks the plot exports; the engine's picks stand");
+        return;
+    }
+    void* gc = g_dll.getInstance();
+    const int n = g_dll.numTerrains(gc, nullptr);
+    g_landBlendFor.assign(n > 0 ? n : 0, -1);
+    std::string found, missing;
+    for (size_t k = 0; k < g_landBlends.size(); ++k)
+    {
+        int at = -1;
+        for (int t = 0; t < n && at < 0; ++t)
+        {
+            std::string name = g_dll.type(g_dll.terrainInfo(gc, nullptr, t), nullptr);
+            for (char& c : name)
+                c = static_cast<char>(toupper(static_cast<unsigned char>(c)));
+            if (name == g_landBlends[k].terrain)
+                at = t;
+        }
+        if (at >= 0)
+            g_landBlendFor[at] = static_cast<int>(k);
+        (at >= 0 ? found : missing) += (at >= 0 ? (found.empty() ? "" : ", ") : (missing.empty() ? "" : ", ")) +
+                                       g_landBlends[k].terrain;
+    }
+    Log::Write("terrain land blends: %s%s%s", found.empty() ? "no terrain found" : ("for " + found).c_str(),
+               missing.empty() ? "" : "; not terrains of this game: ", missing.c_str());
+}
+}  // namespace
+
+namespace
+{
+TileSets::BlendSquare g_blendSquare;
+unsigned g_mixedSquares = 0;    // mixed-land coast squares given the full-mask pick
+unsigned g_overlaySquares = 0;  // coast squares where an overlay (peaks) covering part of the land took the full mask
+}  // namespace
+
+// The engine's blend pick (FUN_00479920) called again, for another mask: EAX = terrain, EDI = where it writes its
+// list index (a scratch here; the hook only replaces the tile and rotation).
+extern "C" __declspec(naked) void __stdcall CallBlendPick(int terrain, int mask, int* tile, int* rotation, int x, int y)
+{
+    __asm {
+        push ebp
+        mov ebp, esp
+        push edi
+        sub esp, 4
+        mov edi, esp                 // the index, discarded
+        push dword ptr [ebp + 0x1c]  // y
+        push dword ptr [ebp + 0x18]  // x
+        push dword ptr [ebp + 0x14]  // &rotation
+        push dword ptr [ebp + 0x10]  // &tile
+        push dword ptr [ebp + 0x0c]  // mask
+        mov eax, [ebp + 0x08]        // terrain
+        call dword ptr [g_blendPickFn]  // pops its five
+        add esp, 4
+        pop edi
+        pop ebp
+        ret 0x18
+    }
+}
+
+extern "C" void __stdcall LandBlendFix(int terrain, int mask, int* tile, int* rotation, int x, int y)
+{
+    if (!g_landTableBuilt)
+        BuildLandTable();
+    if (terrain < 0 || terrain >= static_cast<int>(g_landBlendFor.size()) || !g_dll.ok)
+        return;
+    // The square's corner plots as the heightmap and the layers find them (TL, TR, BR, BL); one off the map counts as
+    // water, as the heightmap counts it.
+    void* map = g_dll.Map();
+    const int top = g_dll.height(map, nullptr) - y;
+    const int at[4][2] = {{x - 1, top}, {x, top}, {x, top - 1}, {x - 1, top - 1}};
+    TileSets::BlendCorners corners;
+    for (int k = 0; k < 4; ++k)
+    {
+        void* plot = g_dll.plot(map, nullptr, at[k][0], at[k][1]);
+        corners.water[k] = !plot || g_dll.isWater(plot, nullptr);
+        corners.terrain[k] = plot ? g_dll.terrainType(plot, nullptr) : -1;
+    }
+    const int own = g_landBlendFor[terrain];
+    int fullMask = 0;
+    switch (g_blendSquare.Next(x, y, corners, terrain, mask, own >= 0, fullMask))
+    {
+    case TileSets::BlendAction::Engine:
+        return;
+    case TileSets::BlendAction::FullMask:
+        CallBlendPick(terrain, fullMask, tile, rotation, x, y);
+        ++(corners.terrain[0] == terrain || corners.terrain[1] == terrain || corners.terrain[2] == terrain ||
+                   corners.terrain[3] == terrain
+               ? g_mixedSquares
+               : g_overlaySquares);
+        return;
+    case TileSets::BlendAction::Land:
+        break;
+    }
+    const auto& choices = g_landBlends[own].masks[mask];
+    int wx = x, wy = y;
+    Wrap(wx, wy);
+    const auto& pick = choices[RandAfter(TileSets::Seed(wx, wy) ^ 0x1A4Du) % choices.size()];
+    *tile = pick.first;
+    *rotation = pick.second;
+    ++g_landPicks[own];
+}
+
+extern "C" __declspec(naked) void LandBlendThunk()
+{
+    __asm {
+        push eax                     // the terrain
+        push dword ptr [esp + 0x18]  // y
+        push dword ptr [esp + 0x18]  // x
+        push dword ptr [esp + 0x18]  // &rotation
+        push dword ptr [esp + 0x18]  // &tile
+        push dword ptr [esp + 0x18]  // mask
+        mov eax, [esp + 0x14]        // the terrain again, for the engine's pick
+        call dword ptr [g_blendPickFn]  // pops its five
+        pop eax
+        push dword ptr [esp + 0x14]  // y
+        push dword ptr [esp + 0x14]  // x
+        push dword ptr [esp + 0x14]  // &rotation
+        push dword ptr [esp + 0x14]  // &tile
+        push dword ptr [esp + 0x14]  // mask
+        push eax                     // terrain
+        call LandBlendFix
+        ret 0x14
+    }
+}
+
+void ApplyLandBlends()
+{
+    // LandBlend1..8 (the full form) first: they win over the short form's standard layout for the same terrain.
+    for (const std::wstring& w : g_config.landBlends)
+    {
+        if (w.empty())
+            continue;
+        TileSets::LandBlend blend;
+        std::string why;
+        if (TileSets::ParseLandBlend(std::string(w.begin(), w.end()), blend, why))
+            g_landBlends.push_back(blend);
+        else
+            Log::Write("terrain land blends: \"%ls\" ignored: %s", w.c_str(), why.c_str());
+    }
+    const std::wstring& shortForm = g_config.landBlendTerrains;
+    for (const std::string& name : TileSets::LandBlendNames(std::string(shortForm.begin(), shortForm.end())))
+    {
+        bool listed = false;
+        for (const auto& b : g_landBlends)
+            listed = listed || b.terrain == name;
+        if (!listed)
+            g_landBlends.push_back(TileSets::StandardLandBlend(name));
+    }
+    if (g_landBlends.empty())
+        return;
+    g_landPicks.assign(g_landBlends.size(), 0);
+    wchar_t exe[MAX_PATH] = {};
+    GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    std::wstring name = exe;
+    name = name.substr(name.find_last_of(L"\\/") + 1);
+    for (auto& c : name)
+        c = static_cast<wchar_t>(towlower(c));
+    if (name != L"civ4beyondsword.exe")
+    {
+        Log::Write("terrain land blends: not applied: %ls isn't Civ4BeyondSword.exe", name.c_str());
+        return;
+    }
+    const uint8_t* base = reinterpret_cast<const uint8_t*>(GetModuleHandleW(nullptr));
+    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS32*>(base + reinterpret_cast<const IMAGE_DOS_HEADER*>(base)->e_lfanew);
+    if (reinterpret_cast<uint32_t>(base) != 0x400000)
+    {
+        Log::Write("terrain land blends: not applied: the exe is loaded at %p, not 0x400000", base);
+        return;
+    }
+    g_base = reinterpret_cast<uint32_t>(base);
+    g_blendPickFn = g_base + TileSets::kBlendPick;
+    const auto sites = TileSets::LandBlendSites(g_base, reinterpret_cast<uint32_t>(&LandBlendThunk));
+    int written = 0;
+    const std::string why = TerrainPatch::ApplySites(base, nt->OptionalHeader.SizeOfImage, sites,
+                                                     [&](uint32_t rva, const uint8_t* bytes, size_t count) {
+        void* at = const_cast<uint8_t*>(base) + rva;
+        DWORD old = 0;
+        if (VirtualProtect(at, count, PAGE_EXECUTE_READWRITE, &old))
+        {
+            memcpy(at, bytes, count);
+            VirtualProtect(at, count, old, &old);
+            FlushInstructionCache(GetCurrentProcess(), at, count);
+            ++written;
+        }
+    });
+    if (!why.empty())
+        Log::Write("terrain land blends: not applied: %s (exe timestamp 0x%08lx)", why.c_str(),
+                   static_cast<unsigned long>(nt->FileHeader.TimeDateStamp));
+    else
+        Log::Write("terrain land blends: %d of %u code sites written; %u terrain%s with land entries", written,
+                   static_cast<unsigned>(sites.size()), static_cast<unsigned>(g_landBlends.size()),
+                   g_landBlends.size() == 1 ? "" : "s");
+}
+
+std::string LandBlendsSummary()
+{
+    static unsigned logged = 0;
+    unsigned total = 0;
+    for (unsigned n : g_landPicks)
+        total += n;
+    total += g_mixedSquares + g_overlaySquares;
+    if (total == logged)
+        return "";
+    logged = total;
+    std::string s = "terrain land blends: land entries given:";
+    for (size_t k = 0; k < g_landBlends.size(); ++k)
+        s += " " + g_landBlends[k].terrain + "=" + std::to_string(g_landPicks[k]);
+    s += "; coast squares of two or more land terrains painted by their lowest land layer for the whole land: " +
+         std::to_string(g_mixedSquares) + "; coast squares where a hill or peak layer covering part of the land "
+         "painted the whole: " + std::to_string(g_overlaySquares);
+    return s;
+}
+
 std::string TileSetsSummary()
 {
     unsigned total = 0;
@@ -395,6 +715,7 @@ std::string TileSetsSummary()
     for (int v = 0; v < 16; ++v)
         total += g_hillVariants[v] + g_peakVariants[v];
     total += g_folded[0] + g_folded[1];
+    total += g_hillCut + g_hillStock + g_hillRefits + g_hillUpdates;
     if (total == g_logged)
         return "";
     g_logged = total;
@@ -431,6 +752,9 @@ std::string TileSetsSummary()
     if (g_folded[0] || g_folded[1])
         s += "; coast variants folded into the art: atlas " + std::to_string(g_folded[0]) + ", wave models " +
              std::to_string(g_folded[1]);
+    if (g_hillCut || g_hillStock)
+        s += "; hill field: " + std::to_string(g_hillCut) + " tiles cut, " + std::to_string(g_hillStock) +
+             " stock, " + std::to_string(g_hillRefits) + " fits, " + std::to_string(g_hillUpdates) + " local updates";
     if (!g_setFlats.empty() && !g_setFlatsLogged)
     {
         g_setFlatsLogged = g_setFlats.size() >= 12;

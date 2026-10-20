@@ -41,10 +41,17 @@ struct Config
     // lists the terrains of set N, here tileSetTerrains[N - 1]; land listed nowhere is in Set1, water listed nowhere
     // doesn't vote.
     bool tileSetsPatch = false;
+    // HillField=1 (experimental, hill_field.h): hill tiles cut from one map-wide field of multi-plot hill stamps
+    // instead of hill1_<mask>; hooks the hill lookup even without Patch=1.
+    bool hillField = false;
     int tileSets = 1;
     std::wstring tileSetTerrains[8];
     // Coast art per class (one land corner, two side by side, two diagonal, three): cells of the water's transition
     // atlas and CoastWave<class>_<NN>.nif models; more coast tiles than this reuse them in turn. Stock: 8, 8, 6, 7.
+    // LandBlend1..8 (terrain_sets.h): "TERRAIN_X: <mask 1>; ...; <mask 14>" ("tile,rotation" entries, as TextureBlend):
+    // that terrain's blend on squares with no water corner, so its TextureBlend lists can be paired with the coast tiles.
+    std::wstring landBlends[8];
+    std::wstring landBlendTerrains;  // LandBlend (no number): terrains taking BtS's standard layout on land squares
     int coastAtlasCells[4] = {8, 8, 6, 7};
     int coastWaveModels[4] = {8, 8, 6, 7};
     float waterTime = -1;       // debug: the water's clock stopped at this many seconds (< 0: running)
@@ -136,6 +143,7 @@ struct Config
     UINT detailNormalsKey = '6';  // modifiers + key switches them on and off in game
     float detailNormalStrength = 1.0f;
     float detailBumpiness = 1.5f;
+    float blendNormalStrength = 1.0f;  // terrain blend sheets' own normal maps (DetailNormals::ForBlend); 0 = off
     UINT lightCycleKey = '4';  // modifiers + key pauses and resumes the light cycle
     float lightSun[kLightGroups][3] = {};
     float lightAmbient[kLightGroups][3] = {};
@@ -195,6 +203,9 @@ void LoadConfig();
 void ApplyTerrainPatch();
 // [terrain tiles] Patch: hook the heightmap tile picks (terrain_sets.cpp); logs what it did. Once.
 void ApplyTileSets();
+// [terrain tiles] LandBlend1..8: hooks the terrain layers' blend pick if any is set (terrain_sets.cpp). Once.
+void ApplyLandBlends();
+std::string LandBlendsSummary();  // "" if nothing new since the last call
 // "terrain tile sets: ..." (picks by set, hill/peak variants used) when they changed since the last call, else "".
 std::string TileSetsSummary();
 // The Baked* light the INI leaves out, from the SunLight.nif the game uses (the running mod's first); logs it. Once.

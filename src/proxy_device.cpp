@@ -244,6 +244,9 @@ HRESULT ProxyDevice::Present(CONST RECT* pSourceRect, CONST RECT* pDestRect, HWN
         const std::string sets = TileSetsSummary();
         if (!sets.empty())
             Log::Write("%s", sets.c_str());
+        const std::string land = LandBlendsSummary();
+        if (!land.empty())
+            Log::Write("%s", land.c_str());
     }
     m_frameDraws = m_frameRtSwitches = m_framePrims = m_frameGhosts = m_frameWaterDraws = m_frameBlobsSkipped = m_framePaintedSkipped = m_frameDeferred = 0;
     bool* effects[5] = {&m_refl.enabled, &m_water.enabled, &m_shadows.enabled, &m_light.enabled, &m_aniso};

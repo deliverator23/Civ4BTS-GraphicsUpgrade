@@ -7,6 +7,11 @@
 // The detail texture bound for a terrain draw is recognised by its content (TextureList), so the right map is found
 // however the game loaded it. A detail texture without one gets normals made from its own brightness, read as height,
 // in the shader ([textures] DetailBumpiness).
+//
+// Blend sheets too: a terrain's <Path> (its blend sheet) can have a normal map beside it the same way (e.g.
+// Art/Terrain/Textures/blend/rockblend_coast_normal.dds), the same layout as the sheet, used for the sheet and its
+// <Grid> (recognised by content), read at the sheet's own texture coordinates ([textures] BlendNormalStrength). It
+// may be an ordinary normal map or DXT5nm (x in alpha, y in green; DXT5 with the DDS's DDPF_NORMAL flag).
 #pragma once
 #include "assets.h"
 #include "common.h"
@@ -32,7 +37,19 @@ public:
         float texel[2] = {};
     };
     Use For(IDirect3DBaseTexture9* detail);
-    void ForgetTexture(const void* texture) { m_cache.erase(texture); }
+    // The normal map for this blend sheet (BtS's s0 for a terrain draw; null if none was shipped), and whether it's
+    // DXT5nm.
+    struct SheetUse
+    {
+        IDirect3DTexture9* map = nullptr;
+        bool dxt5nm = false;
+    };
+    SheetUse ForBlend(IDirect3DBaseTexture9* sheet);
+    void ForgetTexture(const void* texture)
+    {
+        m_cache.erase(texture);
+        m_blendCache.erase(texture);
+    }
     void ReleaseAll();
     ULONG InternalRefs() const { return m_internalRefs; }
 
@@ -46,10 +63,15 @@ private:
         std::vector<uint8_t> dds;     // the normal map, until its texture is made
         IDirect3DTexture9* texture = nullptr;
         bool failed = false;
+        bool dxt5nm = false;
     };
     IDirect3DDevice9* m_dev;
     bool m_loaded = false;
     std::vector<std::unique_ptr<Shipped>> m_shipped;
     std::unordered_map<const void*, Use> m_cache;
+    std::vector<std::unique_ptr<Shipped>> m_blendShipped;  // detail = the sheet's <Path> (and its <Grid>)
+    std::unordered_map<const void*, SheetUse> m_blendCache;
+    // The normal map's texture, made on first use (d3dx9_33); null if it can't be (logged).
+    IDirect3DTexture9* Texture(Shipped& s, const char* what);
     ULONG m_internalRefs = 0;
 };

@@ -264,6 +264,7 @@ def main():
     with TestIni(os.path.join(TEST, 'GraphicsUpgrade.ini')) as f:
         f.write(f'[general]\nOutputDir={OUT}\nGames=*\n[debug]\nTraces=1\nDumpShaders=1\nTerrainVertsPerPlot=33\n'
                 f'[terrain tiles]\nPatch=1\nSets=2\nSet2=TERRAIN_DESERT\n'
+                f'LandBlend1=TERRAIN_GRASS: 8,0; 1,0; 2,0; 6,0; 13,0; 10,0; 3,0; 5,0; 9,0; 7,0; 4,0; 12,0; 11,0; 14,0\n'
                 f'[trace]\nAutoFrame=2\nFrames=1\nHashTextures=1\n')
     request = os.path.join(OUT, 'test_proxy', 'trace.request')
     out = run([os.path.join(TEST, 'test_proxy.exe'), os.path.join(TEST, 'd3d9.dll'), '25', request])
@@ -302,6 +303,13 @@ def main():
           'image too small, 20 (not 2^n+1) refused; 17 does nothing')
     check(tp.get('cells') == 1, 'the landscape cell values given instead of the XML: samples = TerrainVertsPerPlot, plots '
           'per cell at most so many that a cell is 129 across (65: 2), samples a cell from those')
+    check(tp.get('masksites') == 1, "hills' and peaks' coast scale masks: the two calls to the mask picker sent to the "
+          'thunk (only if both still call it)')
+    check(tp.get('hmfolder') == 1,
+          "heightmap tiles from heightmap64 at 65 (heightmap32 at 33): the tile loader's nine path PUSHes pointed at the "
+          "patch's strings; the scale masks' format prints the new prefix and skips the old one's argument")
+    check(tp.get('maskflat') == 1 and tp.get('maskramp') == 1,
+          'a 16x16 mask resampled to 64x64: flat stays flat; a ramp stays an evenly spaced ramp, the same either way round')
 
     print('terrain tile sets ([terrain tiles], experimental):')
     check("terrain tile sets: not applied: test_proxy.exe isn't Civ4BeyondSword.exe" in log,
@@ -318,6 +326,52 @@ def main():
     check(ts.get('cycle') == 1, 'coast variants folded into the art (stock 8, 8, 6, 7; never past the atlas 8, 8, 8, 7)')
     check(ts.get('refused') == 1 and 'unexpected bytes at +0x78e20' in sout,
           'one site with other bytes (another build): nothing written')
+    check(ts.get('landparse') == 1 and ts.get('landbad') == 1,
+          'LandBlend: "TERRAIN_X: 14 masks of tile,rotation entries" read (several entries a mask allowed); too few or '
+          'too many masks, a bad rotation or no terrain refused')
+    check(ts.get('landsites') == 1, "LandBlend: the terrain layers' three calls to the blend pick sent to the thunk")
+    check(ts.get('landshort') == 1,
+          'LandBlend=TERRAIN_A, TERRAIN_B (the short form): names in any case and separators, each given BtS\'s standard '
+          'layout, the same entries as the full form spelled out')
+    check(ts.get('mixed') == 1,
+          'LandBlend, layer by layer: all-land squares take land entries; a coast with one land terrain keeps its paired '
+          'pick; a coast of two land terrains has its lowest land layer re-picked for the whole land mask and the '
+          'higher ones take land entries; untouched when the lowest land terrain has no list or is drawn whole')
+    check(ts.get('overlays') == 1,
+          'LandBlend, hill and peak layers (at no corner): land entries on all land; on a coast, covering part of the '
+          "land, re-picked for the whole land mask (Mesa paints the cliff); covering all of it, or without a list, the "
+          "engine's pick")
+    check("terrain land blends: not applied: test_proxy.exe isn't Civ4BeyondSword.exe" in log,
+          'LandBlend: not applied outside BtS (the harness ran with LandBlend1 set)')
+
+    print('hill field ([terrain tiles] HillField, experimental, off by default):')
+    shipped = open(os.path.join(ROOT, 'GraphicsUpgrade.ini'), encoding='utf-8', errors='replace').read()
+    check(not re.search(r'^\s*HillField\s*=\s*[1-9]', shipped, re.M), 'the shipped INI leaves HillField off')
+    hout = run([os.path.join(TEST, 'test_proxy.exe'), 'hillfield'])
+    for line in hout.splitlines():
+        if line.startswith('HILLFIELD placements'):
+            print('  ' + line)
+    m = re.search(r'^HILLFIELD (exact16.*)$', hout, re.M)
+    hf = {k: int(v) for k, v in (kv.split('=') for kv in m.group(1).split())} if m else {}
+    check(hf.get('exact16') == 1 and hf.get('exact64') == 1,
+          "adjacent tiles continue each other: every square's tile, laid N apart as the engine lays them, is the one "
+          'field sampled there (16 and 64 per plot)')
+    check(0 < hf.get('seam16', 0) <= 130 and 0 < hf.get('seam64', 0) <= 130,
+          'no creases at tile seams: curvature across seams / beside them %.2f (16), %.2f (64)'
+          % (hf.get('seam16', 0) / 100, hf.get('seam64', 0) / 100))
+    check(hf.get('stock') == 1 and hf.get('mask') == 1,
+          "tiles only for squares with a hill corner (the engine asks only for those), the hill mask as the engine's; "
+          'no stamps: every hill square keeps its stock tile')
+    check(hf.get('multi') == 1 and hf.get('orient') == 1,
+          'runs of hills get two- and three-plot stamps, every hill plot in one; a lone TL hill is high at pixel (0, 0)')
+    check(hf.get('deterministic') == 1, 'the same map gives the same tiles (hills listed in any order); another map, others')
+    check(hf.get('local') == 1, 'a plot that becomes or stops being a hill changes only the four squares round it (all '
+          'the engine re-stamps); a new map is fitted again')
+    check(hf.get('wrap') == 1, 'a map that wraps: a stamp across the seam, and squares 0 and W the same')
+    check(hf.get('engine') == 1, 'the tile laid out as the hill stamp reads the art (texture +0x38, pixel data +0x50..+0x64)')
+    check(hf.get('hugecut', 0) > 0 and hf.get('fitms', 9999) + hf.get('cutms', 9999) < 4000,
+          f"a Huge map ({hf.get('hugehills')} hills): fitted in {hf.get('fitms')} ms, {hf.get('hugecut')} squares cut at "
+          f"64x64 in {hf.get('cutms')} ms")
 
     print('terrain grid, partial updates:')
     cout = run([os.path.join(TEST, 'test_proxy.exe'), 'terraincells'])
@@ -821,6 +875,23 @@ def main():
           f"-> {rgb_mod} (expected (120, 140, 160)); a mod with only a GraphicsUpgrade folder keeps the game folder's "
           f"-> {rgb_nomod}")
 
+    # 1.0's INIs had the group colours in [lighting]: read there when [lighting groups] leaves them empty, with a
+    # warning; a mod's old key still overrides the game folder's new one.
+    old_lit = '[lighting]\nEnabled=1\nMatchShadowDirection=0\nUnitSun=200,100,50\nUnitAmbient=20,40,60\n'
+    rgb_old, ok_old = light_run('old_groups', '[lighting groups]\nUnitSun=\n' + old_lit)
+    olog = open(os.path.join(TEST, 'light_old_groups', 'out', 'test_proxy', 'session.log'), encoding='latin-1').read()
+    rgb_new, _ = light_run('old_groups_new', '[lighting groups]\nUnitSun=100,100,100\n' + old_lit)
+    onlog = open(os.path.join(TEST, 'light_old_groups_new', 'out', 'test_proxy', 'session.log'), encoding='latin-1').read()
+    rgb_oldmod, _ = light_run('old_groups_mod', base, mod_ini='[lighting]\nUnitSun=100,100,100\n')
+    omlog = open(os.path.join(TEST, 'light_old_groups_mod', 'out', 'test_proxy', 'session.log'), encoding='latin-1').read()
+    moved = 'settings: [lighting] %s has moved; set it in [lighting groups]'
+    check(near(rgb_old, (220, 140, 110)) and ok_old and moved % 'UnitSun' in olog and moved % 'UnitAmbient' in olog and
+          near(rgb_new, (120, 140, 160)) and moved % 'UnitSun' not in onlog and moved % 'UnitAmbient' in onlog and
+          near(rgb_oldmod, (120, 140, 160)) and moved % 'UnitSun' in omlog,
+          f"group colours in [lighting] (1.0's place) still read, with a warning: {rgb_old}, expected (220, 140, 110); "
+          f"[lighting groups] wins when set: {rgb_new}; a mod's old key overrides the game folder's new one: "
+          f"{rgb_oldmod}, expected (120, 140, 160)")
+
     # Hotkeys written as keys: letters (any case), F-keys, numpad, names, hex codes, empty = none, junk = none + warning.
     keys_ini = ('[water]\nToggleKey=Numpad5\nNormalMapToggleKey=F9\n[shadows]\nToggleKey=F11\n[lighting]\nToggleKey=\nLightCycleToggleKey=f12\n'
                 '[reflection]\nToggleKey=0x4C\nOverlayToggleKey=PrintScreen\n[ghost]\nToggleKey=bogus\n'
@@ -1067,6 +1138,41 @@ def main():
           abs(got - want) <= 2 and abs(want) > 10 and s_on.get('restored') == 1 and s_on['released'],
           f"a mod's own normal map for a detail texture found and used (blue {s_on.get('lit')} vs {s_off.get('lit')} "
           f"without: change {got}, expected {want:.1f})")
+
+    # A terrain blend sheet's own normal map (<Path> with _normal before .dds; Shader Model 3): the harness's base
+    # texture (1x1 grey 0x66) is recognised as the mod's blend sheet; the map's texel (64,128,255) tilts the normal 0.5
+    # against the sheet's u. The slope's texture coordinates run with the world (u along +x, v along -y), so the
+    # change is the same as the detail map's above; BlendNormalStrength=0 is without.
+    sheet_art = (b'<?xml version="1.0"?>\n<Civ4ArtDefines><TerrainArtInfos><TerrainArtInfo><Type>ART_DEF_TERRAIN_TEST</Type>'
+                 b'<Path>Art/Terrain/Textures/Blend/TestBlend.dds</Path><Grid>Art/Terrain/Textures/Blend/TestGrids.dds</Grid>'
+                 b'</TerrainArtInfo></TerrainArtInfos></Civ4ArtDefines>\n')
+    sheet_files = {'Assets/XML/Art/CIV4ArtDefines_Terrain.xml': sheet_art,
+                   'Assets/Art/Terrain/Textures/Blend/TestBlend.dds': dds_1x1(0xFF666666),
+                   'Assets/Art/Terrain/Textures/Blend/TestGrids.dds': dds_1x1(0xFF606060),
+                   'Assets/Art/Terrain/Textures/Blend/TestBlend_normal.dds': dds_1x1(0xFF4080FF)}
+    b_on, blog2 = shadow_run('sheet_normals', 0, 'slope', turned, mod_files=sheet_files)
+    b_off, _ = shadow_run('sheet_normals_off', 0, 'slope', turned + '[textures]\nBlendNormalStrength=0\n',
+                          mod_files=sheet_files)
+    # The same map as DXT5nm (one 4x4 DXT5 block: x 0x40 in alpha, y in green, the DDS's DDPF_NORMAL flag).
+    def dxt5nm_4x4(x, g6):
+        head = struct.pack('<4sIIIIIII44x', b'DDS ', 124, 0x81007, 4, 4, 16, 0, 1)
+        head += struct.pack('<II4sIIIII', 32, 0x80000004, b'DXT5', 0, 0, 0, 0, 0)
+        head += struct.pack('<IIIII', 0x1000, 0, 0, 0, 0)
+        colour = (g6 << 5) | (16 << 11) | 16
+        return head + bytes([x, x]) + bytes(6) + struct.pack('<HHI', colour, colour, 0)
+    nm_files = dict(sheet_files)
+    nm_files['Assets/Art/Terrain/Textures/Blend/TestBlend_normal.dds'] = dxt5nm_4x4(0x40, 32)
+    n_on, nlog2 = shadow_run('sheet_normals_nm', 0, 'slope', turned, mod_files=nm_files)
+    nm_got = n_on.get('lit', 0) - b_off.get('lit', 0)
+    check('DXT5nm' in nlog2 and abs(nm_got - want) <= 2 and n_on['released'],
+          f"the same map in DXT5nm (x in alpha, y in green): blue {n_on.get('lit')} (change {nm_got}, expected "
+          f"{want:.1f})")
+    got = b_on.get('lit', 0) - b_off.get('lit', 0)
+    check('blend normals: 1 terrain blend sheets, 1 with their own normal map' in blog2 and
+          'testblend_normal.dds in use for' in blog2.lower() and abs(got - want) <= 2 and abs(want) > 10 and
+          b_on.get('restored') == 1 and b_on['released'],
+          f"a terrain blend sheet's own normal map, read at the sheet's coordinates and turned with them (blue "
+          f"{b_on.get('lit')} vs {b_off.get('lit')} without: change {got}, expected {want:.1f})")
 
     # Hill shadows: a 300-high ridge along x = 0, sun going towards -x at 45 degrees: the ground behind it (-250,0) is
     # shaded (Darkness 0.5), the sunny side (200,0) isn't; HillShadows=0 turns it off.
@@ -1355,10 +1461,10 @@ def main():
 
         # The water's sun colour comes from the lighting (WaterSun, else SunColour, else the cycle); without the
         # lighting, Colonization's own.
-        def water_sun(label, light, water='', numbered=0, nm=()):
+        def water_sun(label, light, water='', numbered=0, nm=(), mod_ini=None):
             """water: more [water] keys (a second [water] section would be ignored); numbered: that many
             water_normal_1.dds, _2... (copies of water_normal.dds) in the GraphicsUpgrade folder too, those numbered
-            in nm marked DXT5nm (DDPF_NORMAL)."""
+            in nm marked DXT5nm (DDPF_NORMAL); mod_ini: a mod's GraphicsUpgrade.ini (run with mod=...)."""
             sdir = os.path.join(TEST, 'water_sun_' + label)
             if os.path.isdir(sdir):
                 shutil.rmtree(sdir)
@@ -1374,7 +1480,14 @@ def main():
             with TestIni(os.path.join(sdir, 'GraphicsUpgrade.ini')) as f:
                 f.write(f'[general]\nOutputDir={os.path.join(sdir, "out")}\nGames=*\n[water]\nEnabled=1\n'
                         f'ColonizationDir={col_dir}\n{water}[lighting]\nEnabled=1\n{light}')
-            run([os.path.join(TEST, 'test_proxy.exe'), os.path.join(sdir, 'd3d9.dll'), 'water'])
+            extra = []
+            if mod_ini is not None:
+                mod_gu = os.path.join(sdir, 'Mods', 'TestMod', 'GraphicsUpgrade')
+                os.makedirs(mod_gu)
+                with open(os.path.join(mod_gu, 'GraphicsUpgrade.ini'), 'w') as f:
+                    f.write(mod_ini)
+                extra = ['mod=' + os.path.join(sdir, 'Mods', 'TestMod')]
+            run([os.path.join(TEST, 'test_proxy.exe'), os.path.join(sdir, 'd3d9.dll'), 'water'] + extra)
             return open(os.path.join(sdir, 'out', 'test_proxy', 'session.log'), encoding='latin-1').read()
         sky_col = water_sun('sky_col', 'AmbientColour=89,103,133\n')
         sky_green = water_sun('sky_green', 'AmbientColour=20,90,25\n')
@@ -1407,6 +1520,20 @@ def main():
               'reflection evenness 1, reflection ripple 0.5, refraction ripple 0' in
               water_sun('constants', '', water='ReflectionEvenness=1\nReflectionRipple=0.5\nRefractionRipple=0\n'),
               "water: ReflectionEvenness, ReflectionRipple and RefractionRipple read (Colonization's by default)")
+        # 1.0's INIs: WaterConstants=x,y,z,w, read only when none of the three new keys is set (in that file: a mod's old
+        # line still overrides the game folder's new keys).
+        old_warning = ('settings: [water] WaterConstants is the old name; use ReflectionEvenness, ReflectionRipple and '
+                       'RefractionRipple')
+        wc_old = water_sun('constants_old', '', water='WaterConstants=1,0.5,0,0.7\n')
+        wc_both = water_sun('constants_both', '', water='WaterConstants=1,0.5,0,0.7\nReflectionRipple=0.3\n')
+        wc_mod = water_sun('constants_mod', '', water='ReflectionEvenness=0.1\nReflectionRipple=0.2\nRefractionRipple=0.3\n',
+                           mod_ini='[water]\nWaterConstants=1,0.5,0,0.7\n')
+        check('reflection evenness 1, reflection ripple 0.5, refraction ripple 0' in wc_old and old_warning in wc_old and
+              'reflection evenness 0.22995, reflection ripple 0.3, refraction ripple 0.0954951' in wc_both and
+              old_warning not in wc_both and
+              'reflection evenness 1, reflection ripple 0.5, refraction ripple 0' in wc_mod and old_warning in wc_mod,
+              "water: the old WaterConstants still read, with a warning, unless a new key is set; a mod's old line "
+              "overrides the game folder's new keys")
         # GlintFollowsSun=1 with the light cycle: the glint crosses the view right to left by day (sunrise 6 h to sunset
         # 18 h) and again by night (the moon's, 18 h to 6 h), so it goes off the left edge and comes back on the right.
         arc = ('LightCycleOn=1\nLightChangeCycleTime=100000\nLightChangeStepCount=24\n'

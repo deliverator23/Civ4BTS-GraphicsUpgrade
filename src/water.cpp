@@ -69,14 +69,6 @@ const float kNumberedRepeat = 1440.0f;
 
 // A normal map stored as DXT5nm: x in alpha, y in green (z rebuilt in the shader), which DXT5 keeps far better than
 // three colour channels. Marked as NVIDIA's tools mark it: DDPF_NORMAL in the DDS pixel format's flags.
-bool IsDxt5nm(const std::vector<uint8_t>& dds)
-{
-    if (dds.size() < 128 || memcmp(dds.data(), "DDS ", 4) != 0)
-        return false;
-    uint32_t flags;
-    memcpy(&flags, dds.data() + 80, 4);
-    return (flags & 0x80000000u) && memcmp(dds.data() + 84, "DXT5", 4) == 0;
-}
 }
 
 bool Water::Ready()

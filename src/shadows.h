@@ -148,6 +148,12 @@ private:
     IDirect3DStateBlock9* m_overlayState = nullptr;
     IDirect3DVertexShader9* m_terrainVs = nullptr;
     IDirect3DPixelShader9* m_terrainPs = nullptr;
+    // The terrain with its blend sheet's normal map (Shader Model 3), made on first use, and the map for this draw.
+    IDirect3DVertexShader9* m_terrainSheetVs = nullptr;
+    IDirect3DPixelShader9* m_terrainSheetPs = nullptr;
+    bool m_terrainSheetTried = false;
+    IDirect3DTexture9* m_sheetNormals = nullptr;
+    bool m_sheetNm = false;  // ...in DXT5nm
     IDirect3DPixelShader9* m_blurPs = nullptr;
     IDirect3DVertexShader9* m_riverFloodVs = nullptr;  // River_Shader P0 (floodplain) with shadows
     IDirect3DPixelShader9* m_riverFloodPs = nullptr;

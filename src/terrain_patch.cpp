@@ -1,8 +1,11 @@
 // [debug] TerrainVertsPerPlot: patches the running Civ4BeyondSword.exe (see terrain_patch.h). Runs from Init, on the
 // game's first Direct3DCreate9: the game loads d3d9.dll itself, after SteamStub has decrypted its code, and before it
 // builds any terrain.
+#include "assets.h"
 #include "common.h"
 #include "terrain_patch.h"
+
+#include <memory>
 
 namespace
 {
@@ -75,6 +78,65 @@ std::string HookCellImports()
 }
 }  // namespace
 
+// Hills' and peaks' coast scale masks (see terrain_patch.h): the engine's pick, then, when it isn't the tiles' size, a
+// copy resampled to it (made once per mask and kept: there are 16).
+extern "C" uint32_t g_terrainMaskPicker = 0;  // FUN_00478f50, called by the thunk below
+namespace
+{
+struct ResampledMask
+{
+    const uint8_t* from;
+    int w, h;
+    std::vector<uint8_t> pixels;
+};
+std::vector<std::unique_ptr<ResampledMask>> g_masks;
+bool g_loggedMaskFormat = false;
+}  // namespace
+
+extern "C" void __stdcall TerrainMaskFix(int32_t* mask)
+{
+    const int n = g_config.terrainVertsPerPlot - 1;
+    const int w = mask[0], h = mask[1], stride = mask[2];
+    const uint8_t* from = reinterpret_cast<const uint8_t*>(mask[3]);
+    if (!from || w <= 0 || h <= 0 || (w == n && h == n))
+        return;
+    if (stride != w)
+    {
+        if (!g_loggedMaskFormat)
+            Log::Write("terrain patch: a coast scale mask is %dx%d with %d bytes a row, not 8-bit: hills and peaks read "
+                       "it as it is (it should be %dx%d)", w, h, stride, n, n);
+        g_loggedMaskFormat = true;
+        return;
+    }
+    ResampledMask* found = nullptr;
+    for (const auto& m : g_masks)
+        if (m->from == from && m->w == w && m->h == h)
+            found = m.get();
+    if (!found)
+    {
+        g_masks.push_back(std::make_unique<ResampledMask>(ResampledMask{from, w, h, std::vector<uint8_t>(n * n)}));
+        found = g_masks.back().get();
+        TerrainPatch::ResampleMask(from, w, h, stride, n, found->pixels.data());
+        Log::Write("terrain patch: coast scale mask %u is %dx%d, the hill and peak tiles %dx%d: resampled to match "
+                   "(Art/Terrain/heightmap/coastblendmasks/coastscalemask*.tga %dx%d would be used as they are)",
+                   static_cast<unsigned>(g_masks.size()), w, h, n, n, n, n);
+    }
+    mask[0] = mask[1] = mask[2] = n;
+    mask[3] = reinterpret_cast<int32_t>(found->pixels.data());
+}
+
+extern "C" __declspec(naked) void TerrainMaskThunk()
+{
+    __asm {
+        push dword ptr [esp + 8]  // y
+        push dword ptr [esp + 8]  // x
+        call dword ptr [g_terrainMaskPicker]  // EAX (water corners) and EDI (the mask) as the caller set them; pops x, y
+        push edi
+        call TerrainMaskFix
+        ret 8
+    }
+}
+
 void ApplyTerrainPatch()
 {
     const int verts = g_config.terrainVertsPerPlot;
@@ -114,6 +176,83 @@ void ApplyTerrainPatch()
         return;
     }
     const std::string imports = HookCellImports();
+    // Hills' and peaks' coast scale masks: resampled to the tile size when they aren't (the exe at its usual base).
+    std::string masks = "not at the usual base";
+    if (reinterpret_cast<uint32_t>(base) == 0x400000)
+    {
+        g_terrainMaskPicker = reinterpret_cast<uint32_t>(base) + TerrainPatch::kMaskPicker;
+        int maskWrites = 0;
+        masks = TerrainPatch::ApplySites(base, size, TerrainPatch::MaskSites(reinterpret_cast<uint32_t>(base),
+                                                                              reinterpret_cast<uint32_t>(&TerrainMaskThunk)),
+                                         [&](uint32_t rva, const uint8_t* bytes, size_t count) {
+            void* at = const_cast<uint8_t*>(base) + rva;
+            DWORD old = 0;
+            if (VirtualProtect(at, count, PAGE_EXECUTE_READWRITE, &old))
+            {
+                memcpy(at, bytes, count);
+                VirtualProtect(at, count, old, &old);
+                FlushInstructionCache(GetCurrentProcess(), at, count);
+                ++maskWrites;
+            }
+        });
+        if (masks.empty())
+            masks = std::to_string(maskWrites) + " of 2 written";
+    }
+    Log::Write("terrain patch: hills' and peaks' coast scale masks fitted to the tiles: %s", masks.c_str());
+
+    // The heightmap tiles from art/Terrain/heightmap<cells>/, for each list whose first file is there (loose or packed,
+    // the mod's first); the others where they always were. Counted for the log as the engine reads them (1, 2...).
+    if (reinterpret_cast<uint32_t>(base) == 0x400000)
+    {
+        static std::vector<std::string> strings;  // pushed by the patched code: kept for the game's lifetime
+        const auto prefixes = TerrainPatch::TilePrefixes();
+        std::vector<TerrainPatch::TilePrefix> moved;
+        std::vector<uint32_t> movedStrings;
+        std::string fromNew, fromOld;
+        std::vector<uint8_t> bytes;
+        std::wstring where;
+        strings.reserve(prefixes.size());
+        for (const auto& p : prefixes)
+        {
+            const std::string prefix = TerrainPatch::InTileFolder(p.prefix, verts);
+            const bool scale = p.stringVa == 0xc3c970;
+            auto name = [&](int n) {
+                char num[16];
+                snprintf(num, sizeof(num), scale ? "%02d.tga" : "%d.tga", n);
+                return prefix + num;
+            };
+            const bool there = ReadAsset(Widen(name(scale ? 0 : 1)), bytes, where);
+            if (!there)
+            {
+                fromOld += (fromOld.empty() ? "" : ", ") + std::string(p.what);
+                continue;
+            }
+            int count = 1;  // the first is there
+            while (count < 256 && ReadAsset(Widen(name(scale ? count : count + 1)), bytes, where))
+                ++count;
+            strings.push_back(TerrainPatch::TileString(p, verts));
+            moved.push_back(p);
+            movedStrings.push_back(reinterpret_cast<uint32_t>(strings.back().c_str()));
+            fromNew += (fromNew.empty() ? "" : ", ") + std::string(p.what) + " " + std::to_string(count);
+        }
+        std::string why = moved.empty() ? "" : TerrainPatch::ApplySites(base, size, TerrainPatch::TileFolderSites(
+            reinterpret_cast<uint32_t>(base), moved, movedStrings), [&](uint32_t rva, const uint8_t* b, size_t count) {
+            void* at = const_cast<uint8_t*>(base) + rva;
+            DWORD old = 0;
+            if (VirtualProtect(at, count, PAGE_EXECUTE_READWRITE, &old))
+            {
+                memcpy(at, b, count);
+                VirtualProtect(at, count, old, &old);
+                FlushInstructionCache(GetCurrentProcess(), at, count);
+            }
+        });
+        const std::string folder = "art/Terrain/heightmap" + std::to_string(verts - 1) + "/";
+        if (!why.empty())
+            Log::Write("terrain patch: heightmap tiles from %s not used: %s", folder.c_str(), why.c_str());
+        else
+            Log::Write("terrain patch: heightmap tiles from %s: %s; from art/Terrain/heightmap/: %s", folder.c_str(),
+                       fromNew.empty() ? "none" : fromNew.c_str(), fromOld.empty() ? "none" : fromOld.c_str());
+    }
     Log::Write("terrain patch: %d samples per plot; %d of %u code sites written (exe timestamp 0x%08lx); %s. "
                "Needs %dx%d heightmap tiles",
                verts, written, static_cast<unsigned>(TerrainPatch::Sites(verts).size()),

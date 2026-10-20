@@ -9,6 +9,13 @@
 //     canyon mask atlas scaled to match (Art/Terrain/Routes/Rivers/Canyons.tga).
 // The patch rewrites those immediates, and only if every site still holds BtS's own bytes. Pure logic here (no
 // Windows calls), so the test harness can run it on a buffer; terrain_patch.cpp applies it to the running exe.
+//
+// Hills and peaks are also stamped through a coast scale mask (coastblendmasks/coastscalemask00..15.tga, picked by the
+// square's water corners: FUN_00478f50, called only from the hill and peak stamps), which fades them towards the sea.
+// The engine reads it at the tile's own pixel coordinates with the mask's own row length, so a mask smaller than the
+// tiles (a mod with bigger tiles but BtS's 16x16 masks) is read past its end: only the first rows of each hill or peak
+// are scaled by the mask, the rest by whatever memory follows it. So the patch also calls the picker through a thunk
+// that hands back a copy of the mask resampled to the tile size (MaskSites, ResampleMask).
 #pragma once
 
 #include <algorithm>
@@ -78,6 +85,118 @@ std::string ApplySites(const uint8_t* image, size_t size, const std::vector<Site
         if (todo && memcmp(image + site.rva, site.patched.data(), site.patched.size()) != 0)
             write(site.rva, site.patched.data(), site.patched.size());
     return "";
+}
+
+// The coast scale mask picker (FUN_00478f50: EAX = the square's water corners, EDI = where it writes the mask: width,
+// height, row bytes, pixels; x and y on the stack, popped by RET 8) and its two calls, from the hill and peak stamps.
+constexpr uint32_t kMaskPicker = 0x78f50;
+constexpr uint32_t kMaskCalls[2] = {0x78d24, 0x78e39};
+
+inline std::vector<uint8_t> CallTo(uint32_t from, uint32_t to)
+{
+    const uint32_t rel = to - (from + 5);
+    return {0xe8, static_cast<uint8_t>(rel), static_cast<uint8_t>(rel >> 8), static_cast<uint8_t>(rel >> 16),
+            static_cast<uint8_t>(rel >> 24)};
+}
+
+// The two calls to the picker, sent to thunk instead (base: where the exe is loaded).
+inline std::vector<Site> MaskSites(uint32_t base, uint32_t thunk)
+{
+    std::vector<Site> sites;
+    for (uint32_t rva : kMaskCalls)
+        sites.push_back({rva, CallTo(base + rva, base + kMaskPicker), CallTo(base + rva, thunk),
+                         rva == kMaskCalls[0] ? "hill stamp: coast scale mask (CALL FUN_00478f50)"
+                                              : "peak stamp: coast scale mask (CALL FUN_00478f50)"});
+    return sites;
+}
+
+// An 8-bit mask (w x h, stride bytes a row) resampled to n x n, as the tiles were upscaled: output pixel i reads the
+// input at (i + 1/2) (w - 1) / n, linear between the two pixels either side, the end slopes carried on past the ends,
+// clamped to 0..255. So the samples are evenly spaced, the same either way round (rotated or mirrored masks line up).
+inline void ResampleMask(const uint8_t* src, int w, int h, int stride, int n, uint8_t* out)
+{
+    auto axis = [n](int i, int len, int& i0, float& t) {
+        const float s = len > 1 ? (i + 0.5f) * (len - 1) / n : 0.0f;
+        i0 = (std::min)((std::max)(static_cast<int>(s), 0), (std::max)(len - 2, 0));
+        t = len > 1 ? s - i0 : 0.0f;
+    };
+    for (int y = 0; y < n; ++y)
+    {
+        int y0;
+        float ty;
+        axis(y, h, y0, ty);
+        const int y1 = (std::min)(y0 + 1, h - 1);
+        for (int x = 0; x < n; ++x)
+        {
+            int x0;
+            float tx;
+            axis(x, w, x0, tx);
+            const int x1 = (std::min)(x0 + 1, w - 1);
+            const float top = src[y0 * stride + x0] + (src[y0 * stride + x1] - src[y0 * stride + x0]) * tx;
+            const float bottom = src[y1 * stride + x0] + (src[y1 * stride + x1] - src[y1 * stride + x0]) * tx;
+            const float v = top + (bottom - top) * ty;
+            out[y * n + x] = static_cast<uint8_t>((std::min)(255.0f, (std::max)(0.0f, v + 0.5f)));
+        }
+    }
+}
+
+// The heightmap tiles' folder. The tile loader (FUN_00477fa0) hands each list's path prefix to the list reader
+// (FUN_00477dc0: "<prefix><n>.tga" for n = 1, 2... until one is missing) with PUSH <string>, and builds the coast scale
+// masks' names with sprintf("%s%02d.tga", "...CoastScaleMask", n). With more samples per plot the patch points those
+// PUSHes at its own strings in art/Terrain/heightmap<cells>/ (heightmap64 at 65, heightmap32 at 33), for each list
+// whose first file is there; the others keep art/Terrain/heightmap/. So a mod can ship its 16-px tiles where they've
+// always been, for players without the patch, and its bigger ones beside them.
+struct TilePrefix
+{
+    uint32_t pushRva;     // PUSH imm32 (68 xx xx xx xx)
+    uint32_t stringVa;    // the string it pushes
+    const char* prefix;   // that string (the scale masks: the prefix their format is given)
+    const char* first;    // the list's first file after the prefix
+    const char* what;
+};
+inline std::vector<TilePrefix> TilePrefixes()
+{
+    return {
+        {0x77faa, 0xc3cad0, "art/Terrain/heightmap/Ocean1_", "1.tga", "ocean"},
+        {0x77fb9, 0xc3caac, "art/Terrain/heightmap/flats/flat1_", "1.tga", "flats"},
+        {0x77fc8, 0xc3ca88, "art/Terrain/heightmap/hills/hill1_", "1.tga", "hills"},
+        {0x77fd7, 0xc3ca64, "art/Terrain/heightmap/peaks/Peak_", "1.tga", "peaks"},
+        {0x77fe6, 0xc3ca38, "art/Terrain/heightmap/Coasts/CoastTile1_0", "1.tga", "coasts 1"},
+        {0x77ff5, 0xc3ca0c, "art/Terrain/heightmap/Coasts/CoastTile3_0", "1.tga", "coasts 3"},
+        {0x78004, 0xc3c9e0, "art/Terrain/heightmap/Coasts/CoastTile7_0", "1.tga", "coasts 7"},
+        {0x78013, 0xc3c9b4, "art/Terrain/heightmap/Coasts/CoastTile5_0", "1.tga", "coasts 5"},
+        // the scale masks' sprintf format ("%s%02d.tga"): ours prints the new prefix and skips the old one's argument
+        {0x7804a, 0xc3c970, "art/Terrain/heightmap/CoastBlendMasks/CoastScaleMask", "00.tga", "coast scale masks"},
+    };
+}
+// A path in the folder for this many samples per plot: "heightmap/" -> "heightmap<verts - 1>/".
+inline std::string InTileFolder(const std::string& path, int verts)
+{
+    const std::string from = "heightmap/";
+    const size_t at = path.find(from);
+    if (at == std::string::npos)
+        return path;
+    return path.substr(0, at) + "heightmap" + std::to_string(verts - 1) + "/" + path.substr(at + from.size());
+}
+// What the patched PUSH points at: the list's prefix in the new folder, or for the scale masks a format with it.
+inline std::string TileString(const TilePrefix& p, int verts)
+{
+    const std::string moved = InTileFolder(p.prefix, verts);
+    return p.stringVa == 0xc3c970 ? "%.0s" + moved + "%02d.tga" : moved;
+}
+inline std::vector<Site> TileFolderSites(uint32_t base, const std::vector<TilePrefix>& prefixes,
+                                         const std::vector<uint32_t>& strings)
+{
+    std::vector<Site> sites;
+    for (size_t k = 0; k < prefixes.size(); ++k)
+    {
+        const uint32_t from = prefixes[k].stringVa - 0x400000 + base, to = strings[k];
+        sites.push_back({prefixes[k].pushRva,
+                         {0x68, uint8_t(from), uint8_t(from >> 8), uint8_t(from >> 16), uint8_t(from >> 24)},
+                         {0x68, uint8_t(to), uint8_t(to >> 8), uint8_t(to >> 16), uint8_t(to >> 24)},
+                         prefixes[k].what});
+    }
+    return sites;
 }
 
 // The landscape's cell values the exe gets from the DLL (CvLandscapeInfo, from CIV4TerrainSettings.xml), as the patch

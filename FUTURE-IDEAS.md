@@ -108,3 +108,7 @@ Builds on the before/after screenshots.
 - **Ship sails staying white at night:** some ships, not the galleon. Needs a trace with an affected ship in view at night.
 - **Civilopedia previews keep BtS's water:** a known limitation.
 - **The game hung on exit once,** stuck while shutting down, which locked the DLL. Watch for it happening again.
+- **Culture borders sink into the terrain with 65 samples per plot** (Iain, DuneWars Messiah, 2026-10-20):
+  the border fill and outline pass under the ground in places instead of lying on it. Likely cause: the border is its
+  own mesh, draped over the terrain at the engine's usual height resolution, so the finer terrain rises through it.
+  Not investigated yet. Details in the research repo's FINDINGS (terrain patch).

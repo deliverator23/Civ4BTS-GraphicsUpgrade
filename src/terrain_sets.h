@@ -104,11 +104,208 @@ const uint32_t kCoastClassFn = 0x788e0;  // FUN_004788e0: a coast square's varia
 const uint32_t kAtlasCall = 0xcdec2;     // its call for the transition atlas's cell (FUN_004cde80)
 const uint32_t kWaveCall = 0x211a18;     // its call for the wave model's number (FUN_006119c0)
 
+// [terrain tiles] LandBlend1..8: a terrain's blend entries on squares with no water corner. The engine picks each
+// terrain layer's blend entry for a square from its art define's TextureBlend<mask> list (FUN_00479920: mask and
+// &tile, &rotation, x, y on the stack, popped by RET 0x14; EAX = the terrain; called from the layer records'
+// builder, FUN_004795b0, at the three sites below). A list paired with the coast heightmap tiles (painted coasts)
+// would put a coast's cliff on land-to-land borders too; with a land list, those squares take an entry from it
+// instead (a square with a water corner, or a corner off the map, keeps the engine's pick, so it stays paired).
+const uint32_t kBlendPick = 0x79920;
+const uint32_t kBlendPickCalls[3] = {0x796b8, 0x79787, 0x79845};
+
+// The settings. LandBlend=TERRAIN_A, TERRAIN_B...: those terrains take BtS's standard blend layout on all-land squares
+// (the atlas tile painted for each corner arrangement, unturned: the layout of BtS's own Grass and most terrains, so
+// what their TextureBlend lists held before they were paired with the coast tiles). LandBlend1..8 for an atlas laid
+// out otherwise: "TERRAIN_X: <mask 1>; <mask 2>; ... <mask 14>", each mask one or more "tile,rotation" entries
+// separated by spaces (as the XML's TextureBlend lists; rotation 0, 90, 180 or 270); these win over the short form.
+struct LandBlend
+{
+    std::string terrain;                         // upper case
+    std::vector<std::pair<int, int>> masks[15];  // [1..14]
+};
+// BtS's standard layout: the tile for corner masks 1..14 (TL 1, TR 2, BR 4, BL 8), unturned.
+const int kStandardLandTiles[15] = {0, 8, 1, 2, 6, 13, 10, 3, 5, 9, 7, 4, 12, 11, 14};
+inline LandBlend StandardLandBlend(const std::string& terrain)
+{
+    LandBlend b;
+    for (char c : terrain)
+        b.terrain += static_cast<char>(toupper(static_cast<unsigned char>(c)));
+    for (int mask = 1; mask <= 14; ++mask)
+        b.masks[mask].push_back({kStandardLandTiles[mask], 0});
+    return b;
+}
+// The short form's terrain names (separated by commas, semicolons or spaces).
+inline std::vector<std::string> LandBlendNames(const std::string& text)
+{
+    std::vector<std::string> names;
+    std::string name;
+    for (size_t i = 0; i <= text.size(); ++i)
+    {
+        const char c = i < text.size() ? text[i] : ' ';
+        if (c == ',' || c == ';' || isspace(static_cast<unsigned char>(c)))
+        {
+            if (!name.empty())
+                names.push_back(name);
+            name.clear();
+        }
+        else
+            name += static_cast<char>(toupper(static_cast<unsigned char>(c)));
+    }
+    return names;
+}
+inline bool ParseLandBlend(const std::string& text, LandBlend& out, std::string& why)
+{
+    const size_t colon = text.find(':');
+    if (colon == std::string::npos)
+    {
+        why = "no ':' after the terrain";
+        return false;
+    }
+    out = LandBlend();
+    for (char c : text.substr(0, colon))
+        if (!isspace(static_cast<unsigned char>(c)))
+            out.terrain += static_cast<char>(toupper(static_cast<unsigned char>(c)));
+    std::string rest = text.substr(colon + 1) + ";";
+    int mask = 0;
+    size_t start = 0;
+    for (size_t semi = rest.find(';'); semi != std::string::npos; start = semi + 1, semi = rest.find(';', start))
+    {
+        const std::string group = rest.substr(start, semi - start);
+        if (group.find_first_not_of(" \t") == std::string::npos && semi + 1 == rest.size())
+            break;  // a trailing ';'
+        if (++mask > 14)
+        {
+            why = "more than 14 masks";
+            return false;
+        }
+        size_t at = 0;
+        while (true)
+        {
+            at = group.find_first_not_of(" \t", at);
+            if (at == std::string::npos)
+                break;
+            const size_t end = group.find_first_of(" \t", at);
+            const std::string entry = group.substr(at, end == std::string::npos ? std::string::npos : end - at);
+            int tile = 0, rotation = -1;
+            char tail = 0;
+            if (sscanf(entry.c_str(), "%d,%d%c", &tile, &rotation, &tail) != 2 || tile < 1 || tile > 255 ||
+                (rotation != 0 && rotation != 90 && rotation != 180 && rotation != 270))
+            {
+                why = "mask " + std::to_string(mask) + ": \"" + entry + "\" isn't tile,rotation";
+                return false;
+            }
+            out.masks[mask].push_back({tile, rotation});
+            if (end == std::string::npos)
+                break;
+            at = end;
+        }
+        if (out.masks[mask].empty())
+        {
+            why = "mask " + std::to_string(mask) + " has no entry";
+            return false;
+        }
+    }
+    if (mask != 14)
+    {
+        why = std::to_string(mask) + " masks, not 14";
+        return false;
+    }
+    return !out.terrain.empty() || (why = "no terrain", false);
+}
+
+// What the land-blend hook does with each layer's blend pick on a square. The engine builds a square's layers one
+// after another in rising LayerOrder (the first, its lowest terrain, drawn whole: mask 15), each picking its blend for
+// the mask of its own corners. On a coast square with two or more land terrains, each land layer's mask is only part
+// of the land, so their paired coast shapes would be for smaller masks than the coast heightmap tile's. There the
+// lowest land layer instead takes its own paired pick for the full land mask (the coast tile's: the same pick the
+// engine makes for that list on this square, so it pairs with the tile), and the higher land layers their land
+// entries, drawn over it. The hill and peak layers (overlays: their terrain is at none of the corners; their mask is
+// the corners that are hill or peak plots) work the same on all-land squares; on a coast square an overlay with a
+// paired list that covers only part of the land re-picks for the whole land mask too, painting the whole cliff (Dune
+// Wars' Mesa, the peak layer: Iain's choice). Corners: TL, TR, BR, BL; water = water or off the map (as the heightmap
+// counts them).
+struct BlendCorners
+{
+    int terrain[4];
+    bool water[4];
+};
+enum class BlendAction
+{
+    Engine,    // the engine's pick stands
+    Land,      // the terrain's LandBlend entry for its mask
+    FullMask,  // the engine's pick again, for fullMask (the land corners)
+};
+struct BlendSquare
+{
+    int x = -0x7fffffff, y = -0x7fffffff;
+    bool landSeen = false, untouched = false;
+    BlendAction Next(int sx, int sy, const BlendCorners& c, int terrain, int mask, bool hasLand, int& fullMask)
+    {
+        if (sx != x || sy != y)
+        {
+            x = sx, y = sy;
+            landSeen = untouched = false;
+        }
+        bool anyWater = false, atLandCorner = false, atAnyCorner = false;
+        int full = 0, distinct[4], n = 0;
+        for (int k = 0; k < 4; ++k)
+        {
+            atAnyCorner = atAnyCorner || c.terrain[k] == terrain;
+            if (c.water[k])
+            {
+                anyWater = true;
+                continue;
+            }
+            full |= 1 << k;
+            atLandCorner = atLandCorner || c.terrain[k] == terrain;
+            bool seen = false;
+            for (int i = 0; i < n; ++i)
+                seen = seen || distinct[i] == c.terrain[k];
+            if (!seen)
+                distinct[n++] = c.terrain[k];
+        }
+        const BlendAction land = hasLand && mask >= 1 && mask <= 14 ? BlendAction::Land : BlendAction::Engine;
+        if (!anyWater)
+            return land;  // all land: the land entry
+        if (!atAnyCorner)  // an overlay (hills, peaks) on a coast: paired, it paints the whole land's cliff
+        {
+            if (!hasLand || mask < 1 || mask > 14 || mask == full)
+                return BlendAction::Engine;  // no paired list, or it covers all the land already: paired as it is
+            fullMask = full;
+            return BlendAction::FullMask;
+        }
+        if (n < 2 || !atLandCorner)
+            return BlendAction::Engine;  // one land terrain (paired as it is), or a water layer or hill/peak overlay
+        if (!landSeen)
+        {
+            landSeen = true;
+            if (mask == 15 || !hasLand)  // a land terrain drawn whole underneath, or one without a paired list
+            {
+                untouched = true;
+                return BlendAction::Engine;
+            }
+            fullMask = full;
+            return BlendAction::FullMask;
+        }
+        return untouched ? BlendAction::Engine : land;
+    }
+};
+
 inline std::vector<uint8_t> Rel32(uint8_t opcode, uint32_t from, uint32_t to)
 {
     const uint32_t rel = to - (from + 5);
     return {opcode, static_cast<uint8_t>(rel), static_cast<uint8_t>(rel >> 8), static_cast<uint8_t>(rel >> 16),
             static_cast<uint8_t>(rel >> 24)};
+}
+
+// The three calls to the blend pick, sent to thunk instead.
+inline std::vector<TerrainPatch::Site> LandBlendSites(uint32_t base, uint32_t thunk)
+{
+    std::vector<TerrainPatch::Site> sites;
+    for (uint32_t rva : kBlendPickCalls)
+        sites.push_back({rva, Rel32(0xE8, base + rva, base + kBlendPick), Rel32(0xE8, base + rva, thunk),
+                         "terrain layer blend pick (CALL FUN_00479920)"});
+    return sites;
 }
 
 // The five sites, given where the module is loaded and the thunks' addresses.

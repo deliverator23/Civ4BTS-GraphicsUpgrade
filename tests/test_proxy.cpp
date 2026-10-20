@@ -11,11 +11,13 @@
 #include <d3d9.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <limits>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include "test_btswater_ps.h"
@@ -38,6 +40,7 @@
 #include "water_shore_vs.h"
 #include "water_vs.h"
 
+#include "../src/hill_field.h"
 #include "../src/terrain_cells.h"
 #include "../src/terrain_patch.h"
 #include "../src/terrain_sets.h"
@@ -2303,8 +2306,87 @@ static int TerrainPatchTest()
     const bool cells = cellsAre(33, 4, 33, 4, 129) && cellsAre(65, 4, 65, 2, 129) && cellsAre(65, 2, 65, 2, 129) &&
                        cellsAre(17, 4, 17, 4, 65) && cellsAre(65, 1, 65, 1, 65) && cellsAre(33, 8, 33, 4, 129) &&
                        TerrainPatch::CellImports().size() == 6;
-    printf("TERRAINPATCH bytes33=%d changed=%zu idempotent=%d v65=%d refused=%d toosmall=%d bad=%d stock17=%d cells=%d\n",
-           bytes33, changed, idempotent, v65, refused, tooSmall, bad, stock17, cells);
+    // The heightmap folder: the nine PUSHes of the tile loader's path strings pointed at ours (heightmap64 at 65); the
+    // scale masks' format prints the new prefix and skips the old one's argument.
+    std::vector<uint8_t> hmImg = stock;
+    const auto prefixes = TerrainPatch::TilePrefixes();
+    for (const auto& p : prefixes)
+    {
+        const uint8_t push[5] = {0x68, uint8_t(p.stringVa), uint8_t(p.stringVa >> 8), uint8_t(p.stringVa >> 16),
+                                 uint8_t(p.stringVa >> 24)};
+        memcpy(hmImg.data() + p.pushRva, push, 5);
+    }
+    std::vector<std::string> hmStrings;
+    std::vector<uint32_t> hmAddrs;
+    for (const auto& p : prefixes)
+        hmStrings.push_back(TerrainPatch::TileString(p, 65));
+    for (size_t k = 0; k < prefixes.size(); ++k)
+        hmAddrs.push_back(0x1000000 + static_cast<uint32_t>(k) * 0x100);
+    int hmWrites = 0;
+    const std::string hmWhy = TerrainPatch::ApplySites(hmImg.data(), hmImg.size(),
+                                                       TerrainPatch::TileFolderSites(0x400000, prefixes, hmAddrs),
+                                                       [&](uint32_t rva, const uint8_t* b, size_t n) {
+        memcpy(hmImg.data() + rva, b, n);
+        ++hmWrites;
+    });
+    bool heightmapFolder = hmWhy.empty() && hmWrites == 9 &&
+                           hmStrings[1] == "art/Terrain/heightmap64/flats/flat1_" &&
+                           hmStrings[4] == "art/Terrain/heightmap64/Coasts/CoastTile1_0" &&
+                           hmStrings[8] == "%.0sart/Terrain/heightmap64/CoastBlendMasks/CoastScaleMask%02d.tga" &&
+                           TerrainPatch::InTileFolder("art/Terrain/heightmap/peaks/Peak_", 33) ==
+                               "art/Terrain/heightmap32/peaks/Peak_";
+    char formatted[128];
+    snprintf(formatted, sizeof(formatted), hmStrings[8].c_str(), "art/Terrain/heightmap/CoastBlendMasks/CoastScaleMask", 7);
+    heightmapFolder = heightmapFolder &&
+                      std::string(formatted) == "art/Terrain/heightmap64/CoastBlendMasks/CoastScaleMask07.tga";
+    for (size_t k = 0; k < prefixes.size(); ++k)
+    {
+        uint32_t imm;
+        memcpy(&imm, hmImg.data() + prefixes[k].pushRva + 1, 4);
+        heightmapFolder = heightmapFolder && hmImg[prefixes[k].pushRva] == 0x68 && imm == hmAddrs[k];
+    }
+    // Hills' and peaks' coast scale masks: the two calls to the picker sent to a thunk; a mask resampled to the tiles.
+    const uint32_t base = 0x400000, thunk = 0x12345678;
+    std::vector<uint8_t> maskImg = stock;
+    for (uint32_t rva : TerrainPatch::kMaskCalls)
+    {
+        const auto call = TerrainPatch::CallTo(base + rva, base + TerrainPatch::kMaskPicker);
+        memcpy(maskImg.data() + rva, call.data(), call.size());
+    }
+    const bool maskCalls = maskImg[0x78d24] == 0xe8 && maskImg[0x78d24 + 1] == 0x27 && maskImg[0x78e39 + 1] == 0x12;
+    int maskWrites = 0;
+    const std::string maskWhy = TerrainPatch::ApplySites(maskImg.data(), maskImg.size(),
+                                                         TerrainPatch::MaskSites(base, thunk),
+                                                         [&](uint32_t rva, const uint8_t* b, size_t n) {
+        memcpy(maskImg.data() + rva, b, n);
+        ++maskWrites;
+    });
+    bool maskSites = maskCalls && maskWhy.empty() && maskWrites == 2;
+    for (uint32_t rva : TerrainPatch::kMaskCalls)
+    {
+        int32_t rel;
+        memcpy(&rel, maskImg.data() + rva + 1, 4);
+        maskSites = maskSites && maskImg[rva] == 0xe8 && base + rva + 5 + rel == thunk;
+    }
+    // A flat mask stays flat; a ramp 0, 17 ... 255 (as the stock masks' 16 steps) stays a ramp, evenly spaced and the
+    // same either way round (out[i] + out[63 - i] = 255), within the ends.
+    uint8_t flat[16 * 16], ramp[16 * 16], out[64 * 64];
+    for (int i = 0; i < 256; ++i)
+        flat[i] = 200, ramp[i] = static_cast<uint8_t>(17 * (i % 16));
+    TerrainPatch::ResampleMask(flat, 16, 16, 16, 64, out);
+    bool maskFlat = true;
+    for (uint8_t v : out)
+        maskFlat = maskFlat && v == 200;
+    TerrainPatch::ResampleMask(ramp, 16, 16, 16, 64, out);
+    bool maskRamp = out[0] > 0 && out[0] < 17 && out[63] > 238 && out[63] < 255;
+    for (int y = 0; y < 64; ++y)
+        for (int x = 0; x < 64; ++x)
+            maskRamp = maskRamp && out[y * 64 + x] == out[x] && (x == 0 || out[x] > out[x - 1]) &&
+                       std::abs(out[x] + out[63 - x] - 255) <= 1;
+    printf("TERRAINPATCH bytes33=%d changed=%zu idempotent=%d v65=%d refused=%d toosmall=%d bad=%d stock17=%d cells=%d "
+           "masksites=%d maskflat=%d maskramp=%d hmfolder=%d\n",
+           bytes33, changed, idempotent, v65, refused, tooSmall, bad, stock17, cells, maskSites, maskFlat, maskRamp,
+           heightmapFolder);
     printf("TERRAINPATCH refusal: %s\n", refusedWhy.c_str());
     return 0;
 }
@@ -2462,9 +2544,355 @@ static int TileSetsTest()
                        CycleIndex(7, 7, stockArt) == 0 && CycleIndex(13, 14, stockArt) == 6 && // three: % 7
                        CycleIndex(9, 9, stockArt) == 1 && CycleIndex(3, 15, stockArt) == 3 &&  // 15: not a coast
                        CycleIndex(10, 5, bigArt) == 2 && CycleIndex(10, 11, bigArt) == 3;      // atlas caps 8 and 7
-    printf("TILESETS ranges=%d majority=%d corners=%d seed=%d patched=%d refused=%d cycle=%d\n", ranges, majority,
-           corners, seed, patched, refused, cycle);
+    // LandBlend: parsing (14 masks of tile,rotation entries), and the three calls to the blend pick sent to a thunk
+    LandBlend lb;
+    std::string lwhy;
+    const bool parsed = ParseLandBlend("terrain_grass: 8,0; 1,0; 2,0 17,90; 6,0; 13,0; 10,0; 3,0; 5,0; 9,0; 7,0; 4,0; 12,0; "
+                                       "11,0; 14,0", lb, lwhy) &&
+                        lb.terrain == "TERRAIN_GRASS" && lb.masks[1].size() == 1 && lb.masks[1][0] == std::make_pair(8, 0) &&
+                        lb.masks[3].size() == 2 && lb.masks[3][1] == std::make_pair(17, 90) && lb.masks[14][0].first == 14;
+    // the short form: names, any separators, any case; each gets the standard layout, the same as the old full lines
+    const auto names = LandBlendNames(" terrain_grass, TERRAIN_SNOW;TERRAIN_PEAK  ");
+    LandBlend full;
+    std::string fwhy;
+    ParseLandBlend("TERRAIN_GRASS: 8,0; 1,0; 2,0; 6,0; 13,0; 10,0; 3,0; 5,0; 9,0; 7,0; 4,0; 12,0; 11,0; 14,0", full, fwhy);
+    const LandBlend standard = StandardLandBlend("terrain_grass");
+    bool shortForm = names.size() == 3 && names[0] == "TERRAIN_GRASS" && names[2] == "TERRAIN_PEAK" &&
+                     standard.terrain == "TERRAIN_GRASS" && LandBlendNames("").empty();
+    for (int m = 1; m <= 14; ++m)
+        shortForm = shortForm && standard.masks[m] == full.masks[m];
+    std::string w1, w2, w3, w4;
+    const bool badOnes = !ParseLandBlend("TERRAIN_GRASS: 8,0; 1,0", lb, w1) &&
+                         !ParseLandBlend("TERRAIN_GRASS: 8,45; 1,0; 2,0; 6,0; 13,0; 10,0; 3,0; 5,0; 9,0; 7,0; 4,0; 12,0; "
+                                         "11,0; 14,0", lb, w2) &&
+                         !ParseLandBlend("8,0; 1,0", lb, w3) &&
+                         !ParseLandBlend("TERRAIN_GRASS: 8,0;; 2,0; 6,0; 13,0; 10,0; 3,0; 5,0; 9,0; 7,0; 4,0; 12,0; 11,0; "
+                                         "14,0; 15,0", lb, w4);
+    std::vector<uint8_t> limg(0x7a000, 0xcc);
+    const uint32_t lbase = 0x400000, lthunk = 0x12345678;
+    for (uint32_t rva : kBlendPickCalls)
+    {
+        const auto call = Rel32(0xE8, lbase + rva, lbase + kBlendPick);
+        memcpy(limg.data() + rva, call.data(), call.size());
+    }
+    int lwrites = 0;
+    const std::string lres = TerrainPatch::ApplySites(limg.data(), limg.size(), LandBlendSites(lbase, lthunk),
+                                                      [&](uint32_t rva, const uint8_t* b, size_t n) {
+        memcpy(limg.data() + rva, b, n);
+        ++lwrites;
+    });
+    bool landSites = lres.empty() && lwrites == 3;
+    for (uint32_t rva : kBlendPickCalls)
+    {
+        int32_t rel;
+        memcpy(&rel, limg.data() + rva + 1, 4);
+        landSites = landSites && limg[rva] == 0xE8 && lbase + rva + 5 + rel == lthunk;
+    }
+    // A square's layers, as the engine builds them (lowest LayerOrder first). Terrains: 0 sand (water), 13 Rugged,
+    // 14 Rock, 9 another land terrain without a land list.
+    using A = BlendAction;
+    auto run = [](const BlendCorners& c, std::vector<std::tuple<int, int, bool>> layers, std::vector<A> want,
+                  int wantFull = -1) {
+        BlendSquare sq;
+        int full = -1;
+        for (size_t i = 0; i < layers.size(); ++i)
+        {
+            int f = -1;
+            if (sq.Next(5, 7, c, std::get<0>(layers[i]), std::get<1>(layers[i]), std::get<2>(layers[i]), f) != want[i])
+                return false;
+            if (f >= 0)
+                full = f;
+        }
+        return wantFull < 0 || full == wantFull;
+    };
+    const BlendCorners allLand = {{14, 14, 13, 13}, {false, false, false, false}};
+    const BlendCorners oneLand = {{14, 14, 0, 0}, {false, false, true, true}};
+    const BlendCorners mixed = {{14, 13, 0, 0}, {false, false, true, true}};       // TL Rock, TR Rugged: land mask 3
+    const BlendCorners mixedNo = {{9, 14, 0, 0}, {false, false, true, true}};      // the lowest land has no list
+    const BlendCorners landBase = {{14, 13, 0, -1}, {false, false, true, true}};   // BL off the map
+    const bool squares =
+        run(allLand, {{13, 15, true}, {14, 3, true}}, {A::Engine, A::Land}) &&           // all land: land entries
+        run(allLand, {{13, 15, true}, {14, 3, false}}, {A::Engine, A::Engine}) &&        // no list: the engine's
+        run(oneLand, {{0, 15, false}, {14, 3, true}}, {A::Engine, A::Engine}) &&         // one land terrain: paired
+        run(mixed, {{0, 15, false}, {13, 2, true}, {14, 1, true}},
+            {A::Engine, A::FullMask, A::Land}, 3) &&                                     // mixed: full mask 3, then land
+        run(mixedNo, {{0, 15, false}, {9, 1, false}, {14, 2, true}},
+            {A::Engine, A::Engine, A::Engine}) &&                                        // lowest has no list: untouched
+        run(landBase, {{13, 15, true}, {0, 12, false}, {14, 1, true}},
+            {A::Engine, A::Engine, A::Engine});                                          // a land terrain drawn whole
+    // overlays (40 = peaks: at no corner): on all land the land entry; on a coast, covering part of the land, the
+    // full land mask (here 3); covering all of it, the engine's (paired) pick; without a list, the engine's
+    const BlendCorners rockCoast = {{14, 14, 0, 0}, {false, false, true, true}};
+    const bool overlays =
+        run(allLand, {{13, 15, true}, {14, 3, true}, {40, 1, true}}, {A::Engine, A::Land, A::Land}) &&
+        run(rockCoast, {{0, 15, false}, {14, 3, true}, {40, 1, true}}, {A::Engine, A::Engine, A::FullMask}, 3) &&
+        run(rockCoast, {{0, 15, false}, {14, 3, true}, {40, 3, true}}, {A::Engine, A::Engine, A::Engine}) &&
+        run(rockCoast, {{0, 15, false}, {14, 3, true}, {40, 1, false}}, {A::Engine, A::Engine, A::Engine}) &&
+        run(mixed, {{0, 15, false}, {13, 2, true}, {14, 1, true}, {40, 2, true}},
+            {A::Engine, A::FullMask, A::Land, A::FullMask}, 3);
+    // a new square starts afresh: the same sequence twice at different squares
+    BlendSquare sq2;
+    int f = -1;
+    bool fresh = sq2.Next(1, 1, mixed, 13, 2, true, f) == A::FullMask && sq2.Next(1, 1, mixed, 14, 1, true, f) == A::Land &&
+                 sq2.Next(2, 1, mixed, 13, 2, true, f) == A::FullMask;
+    printf("TILESETS ranges=%d majority=%d corners=%d seed=%d patched=%d refused=%d cycle=%d landparse=%d landbad=%d "
+           "landsites=%d mixed=%d overlays=%d landshort=%d\n", ranges, majority, corners, seed, patched, refused, cycle,
+           parsed, badOnes, landSites, squares && fresh, overlays, shortForm);
+    printf("TILESETS land refusals: %s | %s | %s | %s\n", w1.c_str(), w2.c_str(), w3.c_str(), w4.c_str());
     printf("TILESETS refusal: %s\n", refusal.c_str());
+    return 0;
+}
+
+// test_proxy hillfield: the hill field (hill_field.h) with its made-up stamps on made-up maps. Prints
+// "HILLFIELD name=value ..." for run_tests.py.
+static int HillFieldTest()
+{
+    using namespace HillField;
+    auto makeMap = [](int w, int h, bool wrapX, const std::vector<std::array<int, 2>>& hills) {
+        Map m;
+        m.width = w;
+        m.height = h;
+        m.wrapX = wrapX;
+        m.hills.assign(static_cast<size_t>(w) * h, 0);
+        for (const auto& p : hills)
+            m.hills[p[1] * w + p[0]] = 1;
+        return m;
+    };
+    // 24 x 18 plots: a straight three-plot run, a diagonal run, an L, a blob, pairs and lone hills
+    const std::vector<std::array<int, 2>> hills = {
+        {3, 3},   {4, 3},   {5, 3},   {9, 2},   {10, 3},  {11, 4},  {15, 3},  {15, 4},  {15, 5},  {16, 5},
+        {4, 9},   {5, 9},   {4, 10},  {5, 10},  {6, 10},  {5, 11},  {12, 9},  {13, 9},  {18, 10}, {19, 11},
+        {8, 14},  {20, 15}, {2, 15},  {21, 2},  {12, 13}, {13, 14}, {14, 14}, {10, 7},  {11, 7},  {11, 8}};
+    const Map map = makeMap(24, 18, false, hills);
+    Field field;
+    field.SetStamps(SyntheticStamps());
+    field.Build(map);
+    const int W = map.width, H = map.height;
+    // every square's tile, laid out as the engine lays them (N apart), against the field sampled there directly
+    auto layout = [&](const Field& f, int n, std::vector<uint8_t>& grid, int& cut, int& mismatched) {
+        const int gw = n * (W + 1), gh = n * (H + 1);
+        grid.assign(static_cast<size_t>(gw) * gh, 0);
+        std::vector<uint8_t> t(static_cast<size_t>(n) * n);
+        cut = mismatched = 0;
+        for (int sy = 0; sy <= H; ++sy)
+            for (int sx = 0; sx <= W; ++sx)
+                if (f.Tile(sx, sy, n, t.data()))
+                {
+                    ++cut;
+                    for (int j = 0; j < n; ++j)
+                        for (int i = 0; i < n; ++i)
+                        {
+                            const int gx = n * sx + i, gy = n * sy + j;
+                            grid[static_cast<size_t>(gy) * gw + gx] = t[j * n + i];
+                            const float X = static_cast<float>(gx) / n - 1, Y = H - static_cast<float>(gy) / n;
+                            mismatched += t[j * n + i] != f.At(X, Y, n) ? 1 : 0;
+                        }
+                }
+    };
+    // curvature across tile seams over curvature across the lines either side of them (1 or 2 samples in), on hill
+    // ground: 1 = no crease. (Against the whole inside it reads higher: seams run through the plot centres, where the
+    // summits are.)
+    auto seamRatio = [&](const std::vector<uint8_t>& g, int n) {
+        const int gw = n * (W + 1), gh = n * (H + 1);
+        std::vector<float> seam, inner;
+        auto at = [&](int x, int y) { return static_cast<float>(g[static_cast<size_t>(y) * gw + x]); };
+        auto beside = [n](int k) { return k % n == 1 || k % n == 2 || k % n == n - 1 || k % n == n - 2; };
+        for (int y = 2; y + 2 < gh; ++y)
+            for (int x = 2; x + 2 < gw; ++x)
+            {
+                const float c = at(x, y);
+                if (c < 40)
+                    continue;
+                const float dx = std::fabs(at(x + 1, y) - 2 * c + at(x - 1, y)),
+                            dy = std::fabs(at(x, y + 1) - 2 * c + at(x, y - 1));
+                if (x % n == 0)
+                    seam.push_back(dx);
+                else if (beside(x))
+                    inner.push_back(dx);
+                if (y % n == 0)
+                    seam.push_back(dy);
+                else if (beside(y))
+                    inner.push_back(dy);
+            }
+        auto mean = [](const std::vector<float>& v) {
+            double s = 0;
+            for (float x : v)
+                s += x;
+            return v.empty() ? 0.0f : static_cast<float>(s / v.size());
+        };
+        const float i = mean(inner);
+        return i > 0 ? mean(seam) / i : 99.0f;
+    };
+    std::vector<uint8_t> grid16, grid64;
+    int cut16 = 0, bad16 = 0, cut64 = 0, bad64 = 0;
+    layout(field, 16, grid16, cut16, bad16);
+    layout(field, 64, grid64, cut64, bad64);
+    const float ratio16 = seamRatio(grid16, 16), ratio64 = seamRatio(grid64, 64);
+    // the squares cut are exactly those with a hill corner (the engine asks only for those; the rest stay stock)
+    int masked = 0, maskOk = 1, cutWithout = 0;
+    std::vector<uint8_t> tile(64 * 64);
+    for (int sy = 0; sy <= H; ++sy)
+        for (int sx = 0; sx <= W; ++sx)
+        {
+            int c[4][2], mask = 0;
+            TileSets::Corners(sx, sy, H, c);
+            for (int k = 0; k < 4; ++k)
+            {
+                const int i = PlotIndex(map, c[k][0], c[k][1]);
+                mask |= (i >= 0 && map.hills[i]) ? 1 << k : 0;
+            }
+            masked += mask ? 1 : 0;
+            maskOk &= field.Mask(sx, sy) == mask ? 1 : 0;
+            cutWithout += (!mask && field.Tile(sx, sy, 16, tile.data())) ? 1 : 0;
+        }
+    Field none;  // no stamps: nothing cut, every hill square keeps its stock tile
+    none.Build(map);
+    int noneCut = 0;
+    for (int sy = 0; sy <= H; ++sy)
+        for (int sx = 0; sx <= W; ++sx)
+            noneCut += none.Tile(sx, sy, 16, tile.data()) ? 1 : 0;
+    const bool stock = cutWithout == 0 && cut16 == masked && cut64 == masked && noneCut == 0 && !none.Usable();
+    // multi-plot stamps; every hill plot in exactly one placement
+    int sizes[4] = {}, owned = 0;
+    for (const auto& p : field.Placements())
+        ++sizes[(std::min)(3, static_cast<int>(p.frame.size()))], owned += static_cast<int>(p.plots.size());
+    const bool multi = sizes[3] >= 3 && sizes[2] >= 1 && owned == static_cast<int>(hills.size());
+    // a lone hill at a square's TL corner (mask 1): high at pixel (0, 0), nothing at the other three corners
+    int c[4][2];
+    TileSets::Corners(9, 4, H, c);  // square (9, 4): TL = plot (8, 14), a lone hill
+    field.Tile(9, 4, 16, tile.data());
+    const bool orient = c[0][0] == 8 && c[0][1] == 14 && field.Mask(9, 4) == 1 && tile[0] > 120 && tile[255] == 0 &&
+                        tile[15] == 0 && tile[240] == 0;
+    // deterministic: another field on the same map (hills listed in another order), and after another map, the same
+    auto hashOf = [&](const Field& f) {
+        uint32_t h = 2166136261u;
+        for (int sy = 0; sy <= H; ++sy)
+            for (int sx = 0; sx <= W; ++sx)
+                if (f.Tile(sx, sy, 16, tile.data()))
+                    for (int k = 0; k < 256; ++k)
+                        h = (h ^ tile[k]) * 16777619u;
+        return h;
+    };
+    std::vector<std::array<int, 2>> reversed(hills.rbegin(), hills.rend());
+    std::vector<std::array<int, 2>> moved = hills;
+    moved[0] = {1, 1};
+    Field again;
+    again.SetStamps(SyntheticStamps());
+    again.Build(makeMap(24, 18, false, moved));
+    const uint32_t other = hashOf(again);
+    again.Build(makeMap(24, 18, false, reversed));
+    const uint32_t h1 = hashOf(field), h2 = hashOf(again);
+    const bool deterministic = h1 == h2 && h1 != other;
+    // a plot changed: only the four squares round it change their tiles
+    auto tilesOf = [&](const Field& f) {
+        std::vector<std::vector<uint8_t>> all;
+        for (int sy = 0; sy <= H; ++sy)
+            for (int sx = 0; sx <= W; ++sx)
+            {
+                std::vector<uint8_t> t(256, 0);
+                if (!f.Tile(sx, sy, 16, t.data()))
+                    t.clear();
+                all.push_back(t);
+            }
+        return all;
+    };
+    auto onlyRound = [&](const std::vector<std::vector<uint8_t>>& a, const std::vector<std::vector<uint8_t>>& b, int px,
+                         int py, int& changed) {
+        changed = 0;
+        bool ok = true;
+        for (int sy = 0; sy <= H; ++sy)
+            for (int sx = 0; sx <= W; ++sx)
+                if (a[sy * (W + 1) + sx] != b[sy * (W + 1) + sx])
+                {
+                    ++changed;
+                    int cc[4][2];
+                    TileSets::Corners(sx, sy, H, cc);
+                    bool round = false;
+                    for (int k = 0; k < 4; ++k)
+                        round = round || (cc[k][0] == px && cc[k][1] == py);
+                    ok = ok && round;
+                }
+        return ok;
+    };
+    const auto before = tilesOf(field);
+    Field local = field;
+    Map added = map;
+    added.hills[6 * W + 7] = 1;  // a new hill at (7, 6), beside nothing
+    const int how1 = local.Update(added);
+    int changed1 = 0, changed2 = 0;
+    const bool add = how1 == 1 && onlyRound(before, tilesOf(local), 7, 6, changed1) && changed1 == 4;
+    Field local2 = field;
+    Map removed = map;
+    removed.hills[3 * W + 4] = 0;  // the middle of the three-plot run
+    const int how2 = local2.Update(removed);
+    const bool remove = how2 == 1 && onlyRound(before, tilesOf(local2), 4, 3, changed2) && changed2 > 0;
+    Field big = field;
+    const int how3 = big.Update(makeMap(24, 18, false, {{1, 1}, {2, 1}, {3, 1}, {1, 5}, {2, 6}, {7, 7}, {7, 8}, {8, 8},
+                                                       {20, 3}, {20, 4}, {16, 16}, {17, 16}}));
+    const bool localOk = add && remove && how3 == 2 && field.Update(map) == 0;
+    // a map wrapping east-west, with a run of hills across the seam: one stamp across it, and squares 0 and W the same
+    const Map wrap = makeMap(12, 8, true, {{10, 4}, {11, 4}, {0, 4}, {5, 2}});
+    Field wf;
+    wf.SetStamps(SyntheticStamps());
+    wf.Build(wrap);
+    bool across = false;
+    for (const auto& p : wf.Placements())
+    {
+        int lo = 99, hi = -99;
+        for (const auto& f : p.frame)
+            lo = (std::min)(lo, f[0]), hi = (std::max)(hi, f[0]);
+        across = across || (p.frame.size() >= 2 && (lo < 0 || hi >= wrap.width));
+    }
+    bool same = true;
+    std::vector<uint8_t> t0(256), tw(256);
+    for (int sy = 0; sy <= wrap.height; ++sy)
+    {
+        const bool a = wf.Tile(0, sy, 16, t0.data()), b = wf.Tile(wrap.width, sy, 16, tw.data());
+        same = same && a == b && (!a || t0 == tw);
+    }
+    const bool wrapped = across && same;
+    // the tile as the engine reads it: texture +0x38 -> pixel data; pixels + offset, width, height, bytes a pixel
+    EngineTile et;
+    uint8_t* px = et.Pixels(32);
+    int ew = 0, eh = 0, ebpp = 0;
+    const auto* texture = static_cast<const uint8_t*>(et.Texture());
+    uint32_t data, base, offs;
+    memcpy(&data, texture + 0x38, 4);
+    memcpy(&base, reinterpret_cast<const uint8_t*>(static_cast<uintptr_t>(data)) + 0x50, 4);
+    memcpy(&offs, reinterpret_cast<const uint8_t*>(static_cast<uintptr_t>(data)) + 0x5c, 4);
+    const uint32_t first = base + *reinterpret_cast<const uint32_t*>(static_cast<uintptr_t>(offs));
+    const bool engine = TileFormat(et.Texture(), ew, eh, ebpp) && ew == 32 && eh == 32 && ebpp == 1 &&
+                        first == static_cast<uint32_t>(reinterpret_cast<uintptr_t>(px)) &&
+                        !TileFormat(nullptr, ew, eh, ebpp);
+    // a Huge map's worth (128 x 80, wrapping): fitted, and every hill square cut at 64 x 64
+    std::vector<std::array<int, 2>> many;
+    for (int y = 0; y < 80; ++y)
+        for (int x = 0; x < 128; ++x)
+            if (ValueNoise(x * 0.35f, y * 0.35f, 99) > 0.62f && Unit(Mix(7, static_cast<uint32_t>(y * 128 + x))) < 0.75f)
+                many.push_back({x, y});
+    const Map huge = makeMap(128, 80, true, many);
+    LARGE_INTEGER f0, q1, q2, q3;
+    QueryPerformanceFrequency(&f0);
+    QueryPerformanceCounter(&q1);
+    Field hf;
+    hf.SetStamps(SyntheticStamps());
+    hf.Build(huge);
+    QueryPerformanceCounter(&q2);
+    int hugeCut = 0;
+    for (int sy = 0; sy <= 80; ++sy)
+        for (int sx = 0; sx <= 128; ++sx)
+            hugeCut += hf.Tile(sx, sy, 64, tile.data()) ? 1 : 0;
+    QueryPerformanceCounter(&q3);
+    const int fitMs = static_cast<int>((q2.QuadPart - q1.QuadPart) * 1000 / f0.QuadPart);
+    const int cutMs = static_cast<int>((q3.QuadPart - q2.QuadPart) * 1000 / f0.QuadPart);
+    printf("HILLFIELD exact16=%d exact64=%d seam16=%d seam64=%d stock=%d mask=%d multi=%d orient=%d deterministic=%d "
+           "local=%d wrap=%d engine=%d hugehills=%d hugecut=%d fitms=%d cutms=%d\n",
+           bad16 == 0 && cut16 > 0, bad64 == 0 && cut64 > 0, static_cast<int>(ratio16 * 100 + 0.5f),
+           static_cast<int>(ratio64 * 100 + 0.5f), stock, maskOk, multi, orient, deterministic, localOk, wrapped,
+           engine, static_cast<int>(many.size()), hugeCut, fitMs, cutMs);
+    printf("HILLFIELD placements: %d three-plot, %d two-plot, %d one-plot; squares cut %d of %d with a hill corner; "
+           "changed squares %d (add), %d (remove); updates %d %d %d; gain %.2f\n",
+           sizes[3], sizes[2], sizes[1], cut16, masked, changed1, changed2, how1, how2, how3, field.Gain());
     return 0;
 }
 
@@ -2474,6 +2902,8 @@ int wmain(int argc, wchar_t** argv)
         return TerrainPatchTest();
     if (argc > 1 && wcscmp(argv[1], L"tilesets") == 0)
         return TileSetsTest();
+    if (argc > 1 && wcscmp(argv[1], L"hillfield") == 0)
+        return HillFieldTest();
     if (argc > 1 && wcscmp(argv[1], L"terraincells") == 0)
         return TerrainCellsTest();
     // A trailing mod=<folder> is for the proxy, which reads the command line itself (the way BtS is started with a mod)

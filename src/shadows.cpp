@@ -12,6 +12,8 @@
 #include "river_flood_ps.h"
 #include "river_flood_vs.h"
 #include "river_flow.h"
+#include "terrain_sheetnormals_ps.h"
+#include "terrain_sheetnormals_vs.h"
 #include "river_ps.h"
 #include "river_vs.h"
 #include "shadow_blur_ps.h"
@@ -164,11 +166,15 @@ void Shadows::ReleaseAll()
 {
     ReleaseDefault();
     IUnknown* objects[] = {m_terrainVs, m_terrainPs,   m_blurPs, m_riverFloodVs, m_riverFloodPs,
-                           m_riverVs,   m_riverPs,     m_waterVs, m_waterPs, m_riverFlow};
+                           m_riverVs,   m_riverPs,     m_waterVs, m_waterPs, m_riverFlow,
+                           m_terrainSheetVs, m_terrainSheetPs};
     for (IUnknown* o : objects)
         if (o)
             o->Release();
     m_riverFlow = nullptr;
+    m_terrainSheetVs = nullptr;
+    m_terrainSheetPs = nullptr;
+    m_terrainSheetTried = false;
     m_riverFlowTried = false;
     m_terrainVs = m_riverFloodVs = m_riverVs = m_waterVs = nullptr;
     m_terrainPs = m_blurPs = m_riverFloodPs = m_riverPs = m_waterPs = nullptr;
@@ -600,6 +606,35 @@ bool Shadows::DrawReceiver(const ShaderInfo& vs, const ShaderInfo* ps, const std
         if (fow)
             fow->Release();
     }
+    // The blend sheet's own normal map, if it has one (and the card has Shader Model 3): our shader that reads it.
+    m_sheetNormals = nullptr;
+    if (terrain && terrainLight && detailNormals && detailNormals->enabled && g_config.blendNormalStrength > 0)
+    {
+        IDirect3DBaseTexture9* sheet = nullptr;
+        m_dev->GetTexture(0, &sheet);
+        const DetailNormals::SheetUse use = sheet ? detailNormals->ForBlend(sheet) : DetailNormals::SheetUse();
+        IDirect3DTexture9* map = use.map;
+        m_sheetNm = use.dxt5nm;
+        if (sheet)
+            sheet->Release();
+        if (map && !m_terrainSheetTried)
+        {
+            m_terrainSheetTried = true;
+            const ULONG before = DeviceRefs(m_dev);
+            if (FAILED(m_dev->CreateVertexShader(Tokens(g_terrainSheetNormalsVS, sizeof(g_terrainSheetNormalsVS)).data(),
+                                                 &m_terrainSheetVs)) ||
+                FAILED(m_dev->CreatePixelShader(Tokens(g_terrainSheetNormalsPS, sizeof(g_terrainSheetNormalsPS)).data(),
+                                                &m_terrainSheetPs)))
+                Log::Write("blend normals: their shaders (Shader Model 3) can't be made on this card; none drawn");
+            m_internalRefs += DeviceRefs(m_dev) - before;
+        }
+        if (map && m_terrainSheetVs && m_terrainSheetPs)
+        {
+            m_sheetNormals = map;
+            ourVs = &m_terrainSheetVs;
+            ourPs = &m_terrainSheetPs;
+        }
+    }
     if (river)
     {
         // River_Shader P1: what our copy adds (SetRiverConstants), BtS's values back after.
@@ -847,7 +882,9 @@ HRESULT Shadows::DrawShadowed(IDirect3DVertexShader9* vs, IDirect3DPixelShader9*
     IDirect3DVertexShader9* oldVs = nullptr;
     IDirect3DPixelShader9* oldPs = nullptr;
     IDirect3DBaseTexture9* oldTex = nullptr;
-    float oldVsc[16], oldPsc[4], oldLight[32], oldHillGrid[4], oldDetail[8];
+    float oldVsc[16], oldPsc[4], oldLight[32], oldHillGrid[4], oldDetail[8], oldSheet[4];
+    IDirect3DBaseTexture9* oldSheetMap = nullptr;
+    DWORD oldSamp8[9];
     IDirect3DBaseTexture9 *oldNormals = nullptr, *oldHills = nullptr, *oldDetailMap = nullptr;
     DWORD oldSamp5[8], oldSamp6[8], oldSamp7[9];
     DWORD oldSamp[8];
@@ -902,6 +939,23 @@ HRESULT Shadows::DrawShadowed(IDirect3DVertexShader9* vs, IDirect3DPixelShader9*
         for (int k = 0; k < 8; ++k)
             m_dev->SetSamplerState(5, kShadowSamplerStates[k], values[k]);
         SetDetailNormals(terrainLight != nullptr);
+        if (m_sheetNormals)
+        {
+            // The blend sheet's normal map (s8), filtered and addressed like the sheet (s0); its strength (c22).
+            m_dev->GetTexture(8, &oldSheetMap);
+            m_dev->GetPixelShaderConstantF(22, oldSheet, 1);
+            for (int k = 0; k < 9; ++k)
+            {
+                DWORD v = 0;
+                m_dev->GetSamplerState(8, kDetailSamplerStates[k], &oldSamp8[k]);
+                m_dev->GetSamplerState(0, kDetailSamplerStates[k], &v);
+                m_dev->SetSamplerState(8, kDetailSamplerStates[k], v);
+            }
+            m_dev->SetSamplerState(8, D3DSAMP_SRGBTEXTURE, FALSE);
+            m_dev->SetTexture(8, m_sheetNormals);
+            const float strength[4] = {g_config.blendNormalStrength, m_sheetNm ? 1.0f : 0.0f, 0, 0};
+            m_dev->SetPixelShaderConstantF(22, strength, 1);
+        }
     }
     else
     {
@@ -939,6 +993,15 @@ HRESULT Shadows::DrawShadowed(IDirect3DVertexShader9* vs, IDirect3DPixelShader9*
             m_dev->SetSamplerState(7, kDetailSamplerStates[k], oldSamp7[k]);
         if (oldDetailMap)
             oldDetailMap->Release();
+        if (m_sheetNormals)
+        {
+            m_dev->SetTexture(8, oldSheetMap);
+            m_dev->SetPixelShaderConstantF(22, oldSheet, 1);
+            for (int k = 0; k < 9; ++k)
+                m_dev->SetSamplerState(8, kDetailSamplerStates[k], oldSamp8[k]);
+            if (oldSheetMap)
+                oldSheetMap->Release();
+        }
     }
     else
         m_dev->SetPixelShaderConstantF(11, oldHillGrid, 1);
