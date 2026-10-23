@@ -111,6 +111,7 @@ The ones you're most likely to want:
 | `[textures] Anisotropy` | How sharp distant ground, roads and water stay: 2 to 16, or 1 for BtS's own filtering |
 | `[textures] DetailNormals` | Bumps on the ground that catch the sun (1) or not (0); needs the lighting on |
 | `[textures] DetailBumpiness` | How bumpy the ground looks (0 = only where a mod gives a normal map) |
+| `[textures] BlendTileClamp` | No thin lines along square edges where terrains blend (1), or blends read as BtS reads them (0) |
 
 **Settings files from 1.0.** Two things have moved, and a `GraphicsUpgrade.ini` (yours or a mod's) that still has them
 the old way keeps working, with a line in the log saying what to change: the group colours (`UnitSun`, `TerrainAmbient`
