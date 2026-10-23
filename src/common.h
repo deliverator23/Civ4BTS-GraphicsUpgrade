@@ -44,6 +44,19 @@ struct Config
     // HillStamps=1 (experimental, hill_field.h): hill tiles cut from one map-wide field of multi-plot hill stamps
     // instead of hill1_<mask>; hooks the hill lookup even without TilePicker=1.
     bool hillField = false;
+    // JigsawPiecesNTerrains=<terrain types>, N 1..8 (experimental, jigsaw.h; empty = off): the flat land and water
+    // plots of those terrains are covered with the jigsaw pieces in JigsawPiecesNFolder (a folder under Assets with
+    // pieces.xml and its heightmaps, or a full path), added onto the base tile of every square touching one.
+    // JigsawPiecesNFloor: what those plots count as for that base tile (keep, water or land); JigsawPiecesNHeight: grid
+    // units a height level (not set: pieces.xml's fHeightScale, else 1). A plot is in the first N listing its terrain.
+    struct JigsawSet
+    {
+        std::wstring terrains, pieces;
+        int base = 0;  // Jigsaw::Base: 0 keep, 1 water, 2 land
+        bool hasHeight = false;
+        float height = 1.0f;
+    };
+    JigsawSet jigsaw[8];
     int tileSets = 1;
     std::wstring tileSetTerrains[8];
     // Coast art per class (one land corner, two side by side, two diagonal, three): cells of the water's transition

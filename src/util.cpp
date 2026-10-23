@@ -499,6 +499,28 @@ void LoadConfig()
     g_config.terrainVertsPerPlot = IniInt(ini, L"debug", L"TerrainVertsPerPlot", 17);
     g_config.tileSetsPatch = IniInt(ini, L"terrain tiles", L"TilePicker", 0) != 0;
     g_config.hillField = IniInt(ini, L"terrain tiles", L"HillStamps", 0) != 0;
+    for (int s = 0; s < 8; ++s)  // JigsawPieces1..8
+    {
+        const std::wstring n = L"JigsawPieces" + std::to_wstring(s + 1);
+        Config::JigsawSet& j = g_config.jigsaw[s];
+        j = Config::JigsawSet();
+        j.terrains = IniString(ini, L"terrain tiles", (n + L"Terrains").c_str(), L"");
+        j.pieces = IniString(ini, L"terrain tiles", (n + L"Folder").c_str(), L"");
+        std::wstring base = IniString(ini, L"terrain tiles", (n + L"Floor").c_str(), L"keep");
+        for (auto& c : base)
+            c = static_cast<wchar_t>(towlower(c));
+        j.base = base == L"water" ? 1 : base == L"land" ? 2 : 0;
+        if (!j.terrains.empty() && base != L"keep" && base != L"water" && base != L"land")
+        {
+            char msg[160];
+            snprintf(msg, sizeof(msg), "settings: [terrain tiles] %lsFloor=%ls should be keep, water or land; keep used",
+                     n.c_str(), base.c_str());
+            g_settingsWarnings.push_back(msg);
+        }
+        const std::wstring height = IniString(ini, L"terrain tiles", (n + L"Height").c_str(), L"");
+        j.hasHeight = !height.empty();
+        j.height = j.hasHeight ? static_cast<float>(_wtof(height.c_str())) : 1.0f;
+    }
     g_config.tileSets = (std::max)(1, (std::min)(8, IniInt(ini, L"terrain tiles", L"TileGroups", 1)));
     for (int s = 0; s < 8; ++s)  // the INI numbers tile groups from 1: TileGroup1 is set 0
         g_config.tileSetTerrains[s] =

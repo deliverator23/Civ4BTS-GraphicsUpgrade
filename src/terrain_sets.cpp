@@ -10,7 +10,13 @@
 //
 // [terrain tiles] HillStamps (experimental, hill_field.h): the hill lookup hands back a tile cut from one map-wide
 // field of hill stamps instead of hill1_<mask>.
+//
+// [terrain tiles] JigsawPieces1..8 (experimental, jigsaw.h): the base tile stamp (FUN_00478a90) is entered through
+// JigsawBaseThunk, which stamps a square touching a set's plots with those corners as the set says (water, land or as
+// they are), then adds the sets' fields.
 #include "common.h"
+#include "assets.h"
+#include "jigsaw.h"
 #include "hill_field.h"
 #include "terrain_sets.h"
 
@@ -33,7 +39,7 @@ struct GameDll
     GetInstance getInstance = nullptr;
     Member getMap = nullptr;
     MemberInt width = nullptr, height = nullptr, numTerrains = nullptr, terrainType = nullptr;
-    MemberBool wrapX = nullptr, wrapY = nullptr, isWater = nullptr, isHills = nullptr;
+    MemberBool wrapX = nullptr, wrapY = nullptr, isWater = nullptr, isHills = nullptr, isPeak = nullptr;
     MemberArgs plot = nullptr;
     MemberArg terrainInfo = nullptr;
     MemberStr type = nullptr;
@@ -58,6 +64,7 @@ struct GameDll
         terrainType = reinterpret_cast<MemberInt>(get("?getTerrainType@CvPlot@@QBE?AW4TerrainTypes@@XZ"));
         isWater = reinterpret_cast<MemberBool>(get("?isWater@CvPlot@@QBE_NXZ"));  // optional
         isHills = reinterpret_cast<MemberBool>(get("?isHills@CvPlot@@QBE_NXZ"));  // optional: the hill field
+        isPeak = reinterpret_cast<MemberBool>(get("?isPeak@CvPlot@@QBE_NXZ"));    // optional: jigsaw sets
         numTerrains = reinterpret_cast<MemberInt>(get("?getNumTerrainInfos@CvGlobals@@QAEHXZ"));
         terrainInfo = reinterpret_cast<MemberArg>(get("?getTerrainInfo@CvGlobals@@QAEAAVCvTerrainInfo@@W4TerrainTypes@@@Z"));
         type = reinterpret_cast<MemberStr>(get("?getType@CvInfoBase@@QBEPBDXZ"));
@@ -287,6 +294,322 @@ void* HillFieldTile(int mask, int x, int y, void* stock)
     return g_hillTile.Texture();
 }
 
+// [terrain tiles] JigsawPieces1..8: each set's plots (flat land and water of its terrains) as one field of its jigsaw
+// pieces (jigsaw.h). The base stamp runs for every square, row by row, so as with the hills a call before the last one
+// starts a new pass: the plots are read again and the placements brought up to date first.
+struct JigsawRun
+{
+    Jigsaw::Field field;
+    int base = Jigsaw::kKeep;
+    std::string name;  // "JigsawPieces1"...
+};
+std::vector<JigsawRun> g_jigsaws;  // the sets that run
+std::vector<int> g_jigsawOf;       // by TerrainTypes: the set (in g_jigsaws) its plots are in, or -1
+HillField::Map g_jigsawLand;       // the map's land plots as read (in .hills)
+bool g_jigsawsRead = false, g_jigsawPending = false;
+int g_jigsawLastX = -1, g_jigsawLastY = -1, g_jigsawX = 0, g_jigsawY = 0;
+unsigned g_jigsawSquares = 0, g_jigsawAdded = 0, g_jigsawMisfit = 0, g_jigsawDisagree = 0, g_jigsawFits = 0,
+         g_jigsawUpdates = 0;
+std::vector<float> g_jigsawTile;
+std::vector<Jigsaw::Combine> g_jigsawSum;
+
+bool AnyJigsaw()
+{
+    for (const auto& j : g_config.jigsaw)
+        if (!j.terrains.empty())
+            return true;
+    return false;
+}
+
+std::string Narrow(const std::wstring& w)
+{
+    std::string s;
+    for (wchar_t c : w)
+        s += static_cast<char>(c < 128 ? c : '?');
+    return s;
+}
+
+// A file of a set's pieces: in its folder, which is a full path or one under Assets (the mod's first, loose or packed).
+bool ReadPiecesFile(const std::wstring& folder, const std::string& file, std::vector<uint8_t>& out, std::wstring& from)
+{
+    std::wstring path = folder;
+    if (!path.empty() && path.back() != L'\\' && path.back() != L'/')
+        path += L'\\';
+    for (char c : file)
+        path += static_cast<wchar_t>(c == '/' ? '\\' : c);
+    const bool full = (path.size() > 1 && path[1] == L':') || path.rfind(L"\\\\", 0) == 0;
+    from = path;
+    return full ? ReadFileBytes(path, out) : ReadAsset(path, out, from);
+}
+
+// Every set's terrains and pieces, once; false if none can run (each one's trouble logged).
+bool JigsawsReady()
+{
+    if (g_jigsawsRead)
+        return !g_jigsaws.empty();
+    g_jigsawsRead = true;
+    if (!AnyJigsaw())
+        return false;
+    if (!g_dll.Resolve() || !g_dll.isWater || !g_dll.isHills || !g_dll.isPeak)
+    {
+        Log::Write("terrain tiles: jigsaw pieces off: the game DLL lacks CvPlot::isWater, isHills or isPeak");
+        return false;
+    }
+    void* gc = g_dll.getInstance();
+    const int count = g_dll.numTerrains(gc, nullptr);
+    std::vector<std::string> names(count > 0 ? count : 0);
+    for (int t = 0; t < count; ++t)
+    {
+        const char* name = g_dll.type(g_dll.terrainInfo(gc, nullptr, t), nullptr);
+        for (const char* c = name ? name : ""; *c; ++c)
+            names[t] += static_cast<char>(toupper(static_cast<unsigned char>(*c)));
+    }
+    g_jigsawOf.assign(names.size(), -1);
+    for (int s = 0; s < 8; ++s)
+    {
+        const Config::JigsawSet& cfg = g_config.jigsaw[s];
+        if (cfg.terrains.empty())
+            continue;
+        const std::string set = "JigsawPieces" + std::to_string(s + 1);
+        std::string list = " ";
+        for (wchar_t c : cfg.terrains)
+            list += (c == ',' || c == ';' || c == '\t') ? ' ' : static_cast<char>(towupper(c));
+        list += " ";
+        std::vector<int> terrains;
+        std::string listed;
+        for (int t = 0; t < static_cast<int>(names.size()); ++t)
+            if (!names[t].empty() && list.find(" " + names[t] + " ") != std::string::npos)
+            {
+                if (g_jigsawOf[t] >= 0)
+                {
+                    Log::Write("terrain tiles: %s: %s is already in an earlier JigsawPieces<n>Terrains", set.c_str(),
+                               names[t].c_str());
+                    continue;
+                }
+                terrains.push_back(t);
+                listed += (listed.empty() ? "" : ", ") + names[t];
+            }
+        if (terrains.empty())
+        {
+            Log::Write("terrain tiles: %s off: no terrain of %ls to cover", set.c_str(), cfg.terrains.c_str());
+            continue;
+        }
+        if (cfg.pieces.empty())
+        {
+            Log::Write("terrain tiles: %s off: no %sFolder set", set.c_str(), set.c_str());
+            continue;
+        }
+        std::vector<uint8_t> bytes;
+        std::wstring from;
+        Jigsaw::PiecesXml xml;
+        std::string why = "can't be read";
+        if (!ReadPiecesFile(cfg.pieces, "pieces.xml", bytes, from) ||
+            !Jigsaw::ParsePiecesXml(std::string(bytes.begin(), bytes.end()), xml, why))
+        {
+            Log::Write("terrain tiles: %s off: %ls: %s", set.c_str(), from.c_str(), why.c_str());
+            continue;
+        }
+        std::vector<Jigsaw::Piece> pieces;
+        int sizes[17] = {}, left = 0;
+        for (const Jigsaw::PieceFile& pf : xml.pieces)
+        {
+            std::vector<uint8_t> dds;
+            std::wstring at;
+            std::vector<uint16_t> pixels;
+            int w = 0, h = 0;
+            Jigsaw::Piece p;
+            std::string bad = "can't be read";
+            if (!ReadPiecesFile(cfg.pieces, pf.file, dds, at) || !Jigsaw::DecodeDds(dds.data(), dds.size(), w, h, pixels, bad) ||
+                !Jigsaw::MakePiece(pf.file, pf.plots, w, h, std::move(pixels), p, bad))
+            {
+                if (left++ < 5)
+                    Log::Write("terrain tiles: %s: piece %ls left out: %s", set.c_str(), at.c_str(), bad.c_str());
+                continue;
+            }
+            ++sizes[(std::min)(16, p.Size())];
+            pieces.push_back(std::move(p));
+        }
+        const float height = cfg.hasHeight ? cfg.height : xml.heightScale;
+        JigsawRun run;
+        run.base = cfg.base;
+        run.name = set;
+        const unsigned read = static_cast<unsigned>(pieces.size());
+        run.field.SetPieces(std::move(pieces), height / Jigsaw::kValuePerLevel);
+        if (!run.field.Usable())
+        {
+            Log::Write("terrain tiles: %s off: no one-plot piece read from %ls (each plot needs one when nothing bigger "
+                       "fits)",
+                       set.c_str(), from.c_str());
+            continue;
+        }
+        static const char* const kBases[3] = {"as they are", "as if its corners were water", "as if its corners were land"};
+        Log::Write("terrain tiles: %s: %s (flat land and water); %u pieces (%d one-plot, %d two, %d three, %d four, %d "
+                   "more) from %ls%s; height %.2f grid units a level (%s); base tiles %s",
+                   set.c_str(), listed.c_str(), read, sizes[1], sizes[2], sizes[3], sizes[4],
+                   static_cast<int>(read) - sizes[1] - sizes[2] - sizes[3] - sizes[4], from.c_str(),
+                   left ? (", " + std::to_string(left) + " left out").c_str() : "", height,
+                   cfg.hasHeight ? "the INI's" : xml.hasHeight ? "pieces.xml's" : "default",
+                   kBases[(std::min)(2, (std::max)(0, cfg.base))]);
+        for (int t : terrains)
+            g_jigsawOf[t] = static_cast<int>(g_jigsaws.size());
+        g_jigsaws.push_back(std::move(run));
+    }
+    return !g_jigsaws.empty();
+}
+
+void JigsawSync()
+{
+    void* map = g_dll.Map();
+    HillField::Map m;
+    m.width = g_dll.width(map, nullptr);
+    m.height = g_dll.height(map, nullptr);
+    m.wrapX = g_dll.wrapX(map, nullptr);
+    m.wrapY = g_dll.wrapY(map, nullptr);
+    if (m.width <= 0 || m.height <= 0 || m.width > 1024 || m.height > 1024)
+        return;
+    m.hills.assign(static_cast<size_t>(m.width) * m.height, 0);
+    std::vector<HillField::Map> sets(g_jigsaws.size(), m);
+    std::vector<int> plots(g_jigsaws.size(), 0);
+    g_jigsawLand = m;
+    for (int y = 0; y < m.height; ++y)
+        for (int x = 0; x < m.width; ++x)
+        {
+            void* plot = g_dll.plot(map, nullptr, x, y);
+            if (!plot)
+                continue;
+            const size_t i = static_cast<size_t>(y) * m.width + x;
+            g_jigsawLand.hills[i] = g_dll.isWater(plot, nullptr) ? 0 : 1;
+            if (g_dll.isHills(plot, nullptr) || g_dll.isPeak(plot, nullptr))
+                continue;
+            const int t = g_dll.terrainType(plot, nullptr);
+            const int s = t >= 0 && t < static_cast<int>(g_jigsawOf.size()) ? g_jigsawOf[t] : -1;
+            if (s >= 0)
+                sets[s].hills[i] = 1, ++plots[s];
+        }
+    for (size_t s = 0; s < g_jigsaws.size(); ++s)
+    {
+        const int how = g_jigsaws[s].field.Update(sets[s]);
+        if (how == 2)
+        {
+            ++g_jigsawFits;
+            int sizes[17] = {};
+            for (const auto& p : g_jigsaws[s].field.Placements())
+                ++sizes[(std::min)(16, static_cast<int>(p.frame.size()))];
+            Log::Write("terrain tiles: %s placed on a %dx%d map (%d plots): %d four-plot, %d three-plot, %d two-plot and "
+                       "%d one-plot pieces",
+                       g_jigsaws[s].name.c_str(), m.width, m.height, plots[s], sizes[4], sizes[3], sizes[2], sizes[1]);
+        }
+        else if (how == 1)
+            ++g_jigsawUpdates;
+    }
+}
+
+// Before the engine's base stamp (land corner mask in, the mask to stamp with out): a square touching a set's plots
+// is stamped with those corners as the set says, and its tile is added after (JigsawBaseAdd).
+extern "C" int __stdcall JigsawBaseMask(int x, int y, int landMask)
+{
+    g_jigsawPending = false;
+    if (!JigsawsReady())
+        return landMask;
+    if (!g_jigsaws[0].field.Built() || y < g_jigsawLastY || (y == g_jigsawLastY && x <= g_jigsawLastX))
+        JigsawSync();
+    g_jigsawLastX = x;
+    g_jigsawLastY = y;
+    int inSet = 0, toWater = 0, toLand = 0;
+    for (const JigsawRun& j : g_jigsaws)
+    {
+        const int m = j.field.Mask(x, y);
+        inSet |= m;
+        toWater |= j.base == Jigsaw::kWater ? m : 0;
+        toLand |= j.base == Jigsaw::kLand ? m : 0;
+    }
+    if (!inSet)
+        return landMask;
+    int corners[4][2], ownLand = 0;
+    g_jigsaws[0].field.Corners(x, y, corners);
+    for (int k = 0; k < 4; ++k)
+    {
+        const int i = HillField::PlotIndex(g_jigsawLand, corners[k][0], corners[k][1]);
+        ownLand |= (i >= 0 && g_jigsawLand.hills[i]) ? 1 << k : 0;
+    }
+    bool add = false;
+    const int mask = Jigsaw::BaseMask(landMask, inSet, ownLand, toWater, toLand, add);
+    if (!add)
+    {
+        ++g_jigsawDisagree;
+        return landMask;
+    }
+    ++g_jigsawSquares;
+    g_jigsawPending = true;
+    g_jigsawX = x;
+    g_jigsawY = y;
+    return mask;
+}
+
+// After it: the sets' tiles for the square, combined, added into the height grid.
+extern "C" void __stdcall JigsawBaseAdd(void* grid, int x, int y)
+{
+    if (!g_jigsawPending || x != g_jigsawX || y != g_jigsawY)
+        return;
+    g_jigsawPending = false;
+    Jigsaw::GridView g;
+    if (!Jigsaw::ReadGrid(grid, g) || g.cellX > 256)
+    {
+        ++g_jigsawMisfit;
+        return;
+    }
+    const int n = g.cellX;
+    g_jigsawTile.resize(static_cast<size_t>(n) * n);
+    g_jigsawSum.assign(static_cast<size_t>(n) * n, Jigsaw::Combine());
+    bool any = false;
+    for (const JigsawRun& j : g_jigsaws)
+        if (j.field.Tile(x, y, n, g_jigsawTile.data()))
+        {
+            any = true;
+            for (size_t i = 0; i < g_jigsawTile.size(); ++i)
+                g_jigsawSum[i].Add(g_jigsawTile[i]);
+        }
+    if (!any)
+        return;
+    for (size_t i = 0; i < g_jigsawTile.size(); ++i)
+        g_jigsawTile[i] = g_jigsawSum[i].Value();
+    if (Jigsaw::AddTile(g.cells, g.rowBytes, g.rows, x * n, y * n, n, g_jigsawTile.data()))
+        ++g_jigsawAdded;
+    else
+        ++g_jigsawMisfit;
+}
+
+extern "C" uint32_t g_jigsawBaseResume = 0;  // FUN_00478a90 + 6, after the two instructions the hook took
+extern "C" __declspec(naked) void JigsawBaseOriginal()
+{
+    __asm {
+        sub esp, 0x10
+        cmp edi, 1
+        jmp dword ptr [g_jigsawBaseResume]
+    }
+}
+
+extern "C" __declspec(naked) void JigsawBaseThunk()
+{
+    __asm {
+        push edi                   // the caller's land mask, given back after
+        push edi                   // land mask
+        push ebx                   // y
+        push dword ptr [esp + 20]  // x
+        call JigsawBaseMask
+        mov edi, eax
+        push dword ptr [esp + 12]  // x
+        push dword ptr [esp + 12]  // the height grid
+        call JigsawBaseOriginal    // the engine's stamp, with the mask (RET 8)
+        push ebx                   // y
+        push dword ptr [esp + 16]  // x
+        push dword ptr [esp + 16]  // the height grid
+        call JigsawBaseAdd
+        pop edi
+        ret 8
+    }
+}
+
 // The engine's picker, set-aware. Same seed and the exe's own srand/rand, so with one set it picks what BtS picks.
 extern "C" int __stdcall TileSetsPicker(int x, int y, int lo, int hi, uint32_t returnAddress, uint32_t esi)
 {
@@ -429,7 +752,7 @@ extern "C" __declspec(naked) void TileSetsPeakThunk()
 
 void ApplyTileSets()
 {
-    if (!g_config.tileSetsPatch && !g_config.hillField)
+    if (!g_config.tileSetsPatch && !g_config.hillField && !AnyJigsaw())
         return;
     g_sets = (std::max)(1, (std::min)(TileSets::kMaxSets, g_config.tileSets));
     wchar_t exe[MAX_PATH] = {};
@@ -480,6 +803,27 @@ void ApplyTileSets()
                    g_config.coastAtlasCells[0], g_config.coastAtlasCells[1], g_config.coastAtlasCells[2],
                    g_config.coastAtlasCells[3], g_config.coastWaveModels[0], g_config.coastWaveModels[1],
                    g_config.coastWaveModels[2], g_config.coastWaveModels[3]);
+    if (!why.empty() || !AnyJigsaw())
+        return;
+    g_jigsawBaseResume = g_base + Jigsaw::kBaseStamp + 6;
+    int jigsawWrites = 0;
+    const std::string jigsaw = TerrainPatch::ApplySites(base, nt->OptionalHeader.SizeOfImage,
+                                                        Jigsaw::Sites(g_base, reinterpret_cast<uint32_t>(&JigsawBaseThunk)),
+                                                        [&](uint32_t rva, const uint8_t* bytes, size_t count) {
+        void* at = const_cast<uint8_t*>(base) + rva;
+        DWORD old = 0;
+        if (VirtualProtect(at, count, PAGE_EXECUTE_READWRITE, &old))
+        {
+            memcpy(at, bytes, count);
+            VirtualProtect(at, count, old, &old);
+            FlushInstructionCache(GetCurrentProcess(), at, count);
+            ++jigsawWrites;
+        }
+    });
+    if (jigsaw.empty())
+        Log::Write("terrain tiles: jigsaw pieces: the base tile stamp hooked (%d site written)", jigsawWrites);
+    else
+        Log::Write("terrain tiles: jigsaw pieces not applied: %s", jigsaw.c_str());
 }
 
 // [terrain tiles] StandardBlendOnLand(1..8) (terrain_sets.h): the engine's blend pick, then on a square with no water
@@ -720,6 +1064,7 @@ std::string TileSetsSummary()
         total += g_hillVariants[v] + g_peakVariants[v];
     total += g_folded[0] + g_folded[1];
     total += g_hillCut + g_hillStock + g_hillRefits + g_hillUpdates;
+    total += g_jigsawSquares + g_jigsawAdded + g_jigsawMisfit + g_jigsawDisagree + g_jigsawFits + g_jigsawUpdates;
     if (total == g_logged)
         return "";
     g_logged = total;
@@ -760,6 +1105,11 @@ std::string TileSetsSummary()
     if (g_hillCut || g_hillStock)
         s += "; hill field: " + std::to_string(g_hillCut) + " tiles cut, " + std::to_string(g_hillStock) +
              " stock, " + std::to_string(g_hillRefits) + " fits, " + std::to_string(g_hillUpdates) + " local updates";
+    if (g_jigsawSquares || g_jigsawDisagree || g_jigsawMisfit)
+        s += "; jigsaw pieces: " + std::to_string(g_jigsawSquares) + " squares, " + std::to_string(g_jigsawAdded) +
+             " tiles added, " + std::to_string(g_jigsawDisagree) + " left to the engine (a set's corner not land or "
+             "water as read), " + std::to_string(g_jigsawMisfit) + " not fitting the grid, " +
+             std::to_string(g_jigsawFits) + " placings, " + std::to_string(g_jigsawUpdates) + " local updates";
     if (!g_setFlats.empty() && !g_setFlatsLogged)
     {
         g_setFlatsLogged = g_setFlats.size() >= 12;

@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstddef>
 #include <cstdio>
 #include <cstring>
 #include <limits>
@@ -40,6 +41,7 @@
 #include "water_shore_vs.h"
 #include "water_vs.h"
 
+#include "../src/jigsaw.h"
 #include "../src/hill_field.h"
 #include "../src/terrain_cells.h"
 #include "../src/terrain_patch.h"
@@ -2939,6 +2941,482 @@ static int HillFieldTest()
     return 0;
 }
 
+
+// test_proxy jigsaw [pieces folder]: jigsaw tile sets (jigsaw.h) with made-up pieces on made-up maps (or, given a
+// folder with pieces.xml, with those). Prints "JIGSAW name=value ..." for run_tests.py.
+static std::vector<uint8_t> JigsawDds(int w, int h, uint32_t flags, uint32_t four, uint32_t bits, uint32_t rmask,
+                                      const std::vector<uint8_t>& body, uint32_t dxgi = 0)
+{
+    std::vector<uint8_t> d(128 + (dxgi ? 20 : 0), 0);
+    auto put = [&](size_t at, uint32_t v) { memcpy(d.data() + at, &v, 4); };
+    memcpy(d.data(), "DDS ", 4);
+    put(4, 124);
+    put(8, 0x100F);
+    put(12, h);
+    put(16, w);
+    put(76, 32);
+    put(80, flags);
+    put(84, four);
+    put(88, bits);
+    put(92, rmask);
+    if (dxgi)
+        put(128, dxgi);
+    d.insert(d.end(), body.begin(), body.end());
+    return d;
+}
+
+// A made-up piece for a layout: a rounded heap over its plots, zero from a plot's distance (Chebyshev) of 1 out, as
+// a jigsaw piece must be; heights up to about 55 levels.
+static Jigsaw::Piece MadeUpPiece(const char* name, std::vector<std::array<int, 2>> plots, uint32_t seed)
+{
+    int lo[2] = {99, 99}, hi[2] = {-99, -99};
+    for (const auto& q : plots)
+        for (int a = 0; a < 2; ++a)
+            lo[a] = (std::min)(lo[a], q[a]), hi[a] = (std::max)(hi[a], q[a]);
+    const int w = 64 * (hi[0] - lo[0] + 2), h = 64 * (hi[1] - lo[1] + 2);
+    std::vector<uint16_t> px(static_cast<size_t>(w) * h, 0);
+    for (int r = 0; r < h; ++r)
+        for (int c = 0; c < w; ++c)
+        {
+            const float X = lo[0] - 1 + c / 64.0f, Y = hi[1] + 1 - (r + 1) / 64.0f;
+            float d = 2;
+            for (const auto& q : plots)
+                d = (std::min)(d, (std::max)(std::fabs(X - q[0]), std::fabs(Y - q[1])));
+            if (d >= 1)
+                continue;
+            float t = 1 - d;
+            t = t * t * (3 - 2 * t);
+            const float wobble = 1 + 0.15f * (HillField::ValueNoise(X * 2.5f, Y * 2.5f, seed) - 0.5f);
+            px[static_cast<size_t>(r) * w + c] = static_cast<uint16_t>(55 * 256 * t * wobble);
+        }
+    Jigsaw::Piece p;
+    std::string why;
+    Jigsaw::MakePiece(name, plots, w, h, std::move(px), p, why);
+    return p;
+}
+
+static bool JigsawReadFile(const std::wstring& path, std::vector<uint8_t>& out)
+{
+    out.clear();
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, path.c_str(), L"rb") != 0 || !f)
+        return false;
+    uint8_t buf[65536];
+    size_t n;
+    while ((n = fread(buf, 1, sizeof(buf), f)) > 0)
+        out.insert(out.end(), buf, buf + n);
+    fclose(f);
+    return true;
+}
+
+static int JigsawTest(const wchar_t* folder)
+{
+    using namespace Jigsaw;
+    // DDS heightmaps: L16 as it is, L8 / A8L8 / R8 / RGB red as levels (x 256), A16B16G16R16's red, DX10 R16; DXT refused
+    std::vector<uint8_t> l16(8 * 4 * 2), l8(8 * 4), a8l8(8 * 4 * 2), rgb(8 * 4 * 4), rgba16(8 * 4 * 8);
+    for (int i = 0; i < 32; ++i)
+    {
+        const uint16_t v = static_cast<uint16_t>(i * 1000);
+        memcpy(&l16[i * 2], &v, 2);
+        l8[i] = static_cast<uint8_t>(i * 3);
+        a8l8[i * 2] = static_cast<uint8_t>(i * 3), a8l8[i * 2 + 1] = 0xff;
+        rgb[i * 4 + 2] = static_cast<uint8_t>(i * 3), rgb[i * 4] = 77;  // BGRA in memory: red at +2
+        memcpy(&rgba16[i * 8], &v, 2);
+    }
+    int w = 0, h = 0;
+    std::vector<uint16_t> out;
+    std::string why;
+    auto same = [&](const std::vector<uint8_t>& dds, bool eight) {
+        if (!DecodeDds(dds.data(), dds.size(), w, h, out, why) || w != 8 || h != 4 || out.size() != 32)
+            return false;
+        for (int i = 0; i < 32; ++i)
+            if (out[i] != (eight ? i * 3 * 256 : i * 1000))
+                return false;
+        return true;
+    };
+    const bool dds = same(JigsawDds(8, 4, 0x20000, 0, 16, 0xffff, l16), false) && same(JigsawDds(8, 4, 0, 81, 0, 0, l16), false) &&
+                     same(JigsawDds(8, 4, 0x20000, 0, 8, 0xff, l8), true) &&
+                     same(JigsawDds(8, 4, 0x20001, 0, 16, 0xff, a8l8), true) &&
+                     same(JigsawDds(8, 4, 0x41, 0, 32, 0xff0000, rgb), true) && same(JigsawDds(8, 4, 0, 36, 0, 0, rgba16), false) &&
+                     same(JigsawDds(8, 4, 0x4, 0x30315844u, 0, 0, l16, 56), false) &&
+                     same(JigsawDds(8, 4, 0x4, 0x30315844u, 0, 0, l8, 61), true);
+    std::string why1, why2;
+    const std::vector<uint8_t> dxt = JigsawDds(8, 4, 0x4, 0x31545844u, 0, 0, std::vector<uint8_t>(64));
+    const std::vector<uint8_t> cut = JigsawDds(8, 4, 0x20000, 0, 16, 0xffff, std::vector<uint8_t>(30));
+    const bool ddsRefused = !DecodeDds(dxt.data(), dxt.size(), w, h, out, why1) && !why1.empty() &&
+                            !DecodeDds(cut.data(), cut.size(), w, h, out, why2) && !why2.empty();
+    // pieces.xml: the height scale, layouts and their files; comments skipped; mistakes refused
+    PiecesXml xml;
+    const bool xmlOk =
+        ParsePiecesXml("<?xml version=\"1.0\"?>\n<!-- <Layout><Plots>9,9</Plots><Piece>no.dds</Piece></Layout> -->\n"
+                       "<JigsawPieces>\n\t<fHeightScale> 1.5 </fHeightScale>\n\t<Layout>\n\t\t<Type>3 L</Type>\n"
+                       "\t\t<Plots>0,0 1,0\n 0,1</Plots>\n\t\t<Piece>3_L_01.dds</Piece>\n\t\t<Piece> 3_L_02.dds </Piece>\n"
+                       "\t</Layout>\n\t<Layout><Plots>0,0</Plots><Piece>one.dds</Piece></Layout>\n</JigsawPieces>\n",
+                       xml, why) &&
+        xml.hasHeight && xml.heightScale == 1.5f && xml.pieces.size() == 3 && xml.pieces[1].file == "3_L_02.dds" &&
+        xml.pieces[0].plots.size() == 3 && xml.pieces[0].plots[2][0] == 0 && xml.pieces[0].plots[2][1] == 1 &&
+        xml.pieces[2].file == "one.dds";
+    PiecesXml junkXml;
+    std::string w1, w2, w3, w4;
+    const bool xmlRefused =
+        !ParsePiecesXml("<Layout><Plots>0,0</Plots><Piece>a.dds</Piece></Layout>", junkXml, w1) &&
+        !ParsePiecesXml("<JigsawPieces><Layout><Plots>0;0</Plots><Piece>a.dds</Piece></Layout></JigsawPieces>", junkXml, w2) &&
+        !ParsePiecesXml("<JigsawPieces><Layout><Plots>0,0 0,0</Plots><Piece>a.dds</Piece></Layout></JigsawPieces>", junkXml, w3) &&
+        !ParsePiecesXml("<JigsawPieces><Layout><Plots>0,0</Plots></Layout></JigsawPieces>", junkXml, w4) &&
+        !w1.empty() && !w2.empty() && !w3.empty() && !w4.empty();
+    PiecesXml noHeight;
+    const bool xmlDefault = ParsePiecesXml("<JigsawPieces><Layout><Plots>0,0</Plots><Piece>a.dds</Piece></Layout>"
+                                           "</JigsawPieces>", noHeight, why) &&
+                            !noHeight.hasHeight && noHeight.heightScale == 1.0f;
+    // a piece's place from its plots, its pixels a plot from its size; a size that doesn't fit refused
+    Piece made;
+    std::string sizeWhy;
+    const bool geometry = MakePiece("3 bent", {{0, 0}, {1, 0}, {2, 1}}, 128, 96, std::vector<uint16_t>(128 * 96), made, why) &&
+                          made.west == -1 && made.north == 2 && made.ppp == 32 &&
+                          !MakePiece("3 bent", {{0, 0}, {1, 0}, {2, 1}}, 128, 128, std::vector<uint16_t>(128 * 128), made,
+                                     sizeWhy) &&
+                          !sizeWhy.empty();
+    // fields combined: the highest raised, the lowest lowered
+    Combine mix;
+    mix.Add(3);
+    mix.Add(7);
+    mix.Add(-2);
+    mix.Add(-5);
+    Combine none;
+    const bool combine = mix.Value() == 2.0f && none.Value() == 0.0f;
+
+    std::vector<Piece> pieces;
+    const std::vector<std::pair<const char*, std::vector<std::array<int, 2>>>> layouts = {
+        {"1", {{0, 0}}},
+        {"2 straight", {{0, 0}, {1, 0}}},
+        {"2 diagonal", {{0, 0}, {1, 1}}},
+        {"3 L", {{0, 0}, {1, 0}, {0, 1}}},
+        {"3 bent", {{0, 0}, {1, 0}, {2, 1}}},
+        {"3 straight", {{0, 0}, {1, 0}, {2, 0}}},
+        {"4 L", {{0, 0}, {1, 0}, {2, 0}, {0, 1}}},
+        {"4 S", {{0, 0}, {1, 0}, {1, 1}, {2, 1}}}};
+    uint32_t seed = 11;
+    for (const auto& l : layouts)
+        for (int v = 1; v <= 2; ++v)
+            pieces.push_back(MadeUpPiece((std::string(l.first) + "_0" + std::to_string(v)).c_str(), l.second, ++seed));
+    float heightScale = 1.2f;
+    bool real = false;
+    if (folder && *folder)
+    {
+        std::vector<uint8_t> bytes;
+        PiecesXml theirs;
+        real = JigsawReadFile(std::wstring(folder) + L"\\pieces.xml", bytes) &&
+               ParsePiecesXml(std::string(bytes.begin(), bytes.end()), theirs, why);
+        std::vector<Piece> read;
+        int left = 0;
+        for (const PieceFile& pf : theirs.pieces)
+        {
+            std::vector<uint8_t> file;
+            std::vector<uint16_t> px;
+            Piece p;
+            std::string bad;
+            if (JigsawReadFile(std::wstring(folder) + L"\\" + std::wstring(pf.file.begin(), pf.file.end()), file) &&
+                DecodeDds(file.data(), file.size(), w, h, px, bad) && MakePiece(pf.file, pf.plots, w, h, std::move(px), p, bad))
+                read.push_back(std::move(p));
+            else
+                ++left;
+        }
+        printf("JIGSAW pieces %ls: %s, %u pieces read, %d left out, height %.2f\n", folder, real ? "pieces.xml read" : why.c_str(),
+               static_cast<unsigned>(read.size()), left, theirs.heightScale);
+        real = real && !read.empty() && left == 0;
+        if (real)
+            pieces = std::move(read), heightScale = theirs.heightScale;
+    }
+    const float units = heightScale / kValuePerLevel;
+    auto makeMap = [](int mw, int mh, bool wrapX, const std::vector<std::array<int, 2>>& plots) {
+        Map m;
+        m.width = mw;
+        m.height = mh;
+        m.wrapX = wrapX;
+        m.hills.assign(static_cast<size_t>(mw) * mh, 0);
+        for (const auto& p : plots)
+            m.hills[p[1] * mw + p[0]] = 1;
+        return m;
+    };
+    // ridge bands 1 to 3 plots wide running NW-SE (as Arrakis' dunes), with some lone plots
+    std::vector<std::array<int, 2>> set;
+    const int W = 30, H = 22;
+    for (int y = 0; y < H; ++y)
+        for (int x = 0; x < W; ++x)
+        {
+            const float band = std::fmod(x + y * 1.88f, 9.0f);
+            const float width = 1.0f + 2.0f * HillField::ValueNoise(x * 0.2f, y * 0.2f, 5);
+            if (band < width * 1.6f || HillField::Unit(HillField::Mix(3, y * W + x)) < 0.03f)
+                set.push_back({x, y});
+        }
+    const Map map = makeMap(W, H, false, set);
+    Field field;
+    field.SetPieces(pieces, units);
+    field.Build(map);
+    // every square's tile laid out as the engine lays them, against the field sampled there
+    auto exact = [&](const Field& f, int n, int& cutCount) {
+        std::vector<float> t(static_cast<size_t>(n) * n);
+        int bad = 0;
+        cutCount = 0;
+        for (int sy = 0; sy <= H; ++sy)
+            for (int sx = 0; sx <= W; ++sx)
+                if (f.Tile(sx, sy, n, t.data()))
+                {
+                    ++cutCount;
+                    for (int j = 0; j < n; ++j)
+                        for (int i = 0; i < n; ++i)
+                        {
+                            const float X = static_cast<float>(n * sx + i) / n - 1, Y = H - static_cast<float>(n * sy + j) / n;
+                            bad += std::fabs(t[j * n + i] - f.At(X, Y)) > 1e-4f ? 1 : 0;
+                        }
+                }
+        return bad == 0 && cutCount > 0;
+    };
+    int cut64 = 0, cut16 = 0;
+    const bool exact64 = exact(field, 64, cut64), exact16 = exact(field, 16, cut16);
+    int touching = 0;
+    bool mask = true;
+    for (int sy = 0; sy <= H; ++sy)
+        for (int sx = 0; sx <= W; ++sx)
+        {
+            int c[4][2], m = 0;
+            TileSets::Corners(sx, sy, H, c);
+            for (int k = 0; k < 4; ++k)
+            {
+                const int i = PlotIndex(map, c[k][0], c[k][1]);
+                m |= (i >= 0 && map.hills[i]) ? 1 << k : 0;
+            }
+            touching += m ? 1 : 0;
+            mask = mask && field.Mask(sx, sy) == m;
+        }
+    // placements: exact lattice moves of a layout's plots; every plot of the set in one
+    int sizes[17] = {}, owned = 0;
+    bool lattice = true;
+    std::vector<int> covered(map.hills.size(), 0);
+    for (const auto& p : field.Placements())
+    {
+        ++sizes[(std::min)(16, static_cast<int>(p.frame.size()))];
+        const int* s = kSym[p.sym];
+        const auto& plots = field.Pieces()[p.piece].plots;
+        lattice = lattice && p.sym >= 0 && p.sym < 8 && plots.size() == p.frame.size();
+        for (size_t k = 0; lattice && k < plots.size(); ++k)
+            lattice = p.frame[k][0] == s[0] * plots[k][0] + s[1] * plots[k][1] + p.tx &&
+                      p.frame[k][1] == s[2] * plots[k][0] + s[3] * plots[k][1] + p.ty;
+        for (int i : p.plots)
+            ++covered[i], ++owned;
+    }
+    bool once = owned == static_cast<int>(set.size());
+    for (size_t i = 0; i < covered.size(); ++i)
+        once = once && covered[i] == (map.hills[i] ? 1 : 0);
+    const int multiPlots = sizes[2] * 2 + sizes[3] * 3 + sizes[4] * 4;
+    // one massif: the field between any two neighbouring plots of the set never drops to the base
+    float lowest = 1e9f;
+    for (const auto& a : set)
+        for (const auto& b : set)
+            if ((a[0] != b[0] || a[1] != b[1]) && std::abs(a[0] - b[0]) <= 1 && std::abs(a[1] - b[1]) <= 1)
+                for (int k = 1; k < 8; ++k)
+                {
+                    const float t = k / 8.0f;
+                    lowest = (std::min)(lowest, field.At(a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t));
+                }
+    float peak = 0;
+    for (const auto& a : set)
+        peak = (std::max)(peak, field.At(static_cast<float>(a[0]), static_cast<float>(a[1])));
+    // the base stamp's mask: a set's corners as water, as land, or kept; the tile added after; a set's corner the
+    // engine has otherwise than the map as read leaves the square to the engine
+    bool a1 = false, a2 = false, a3 = false, a4 = true, a5 = true;
+    const bool base = BaseMask(15, 5, 5 | 2, 5, 0, a1) == 10 && a1 &&  // two land corners of a water set: out
+                      BaseMask(0, 3, 0, 0, 3, a2) == 3 && a2 &&         // two water corners of a land set: in
+                      BaseMask(7, 1, 1, 0, 0, a3) == 7 && a3 &&         // kept as they are
+                      BaseMask(7, 0, 0, 0, 0, a4) == 7 && !a4 &&        // no set's corners: the engine's alone
+                      BaseMask(3, 4, 4, 4, 0, a5) == 3 && !a5;          // a land corner the engine counts as water
+    // the tile added into the engine's byte grid at the square's place, clamped 0..255; refused if it doesn't fit
+    std::vector<uint8_t> cells(200 * 100, 40);
+    cells[(1 * 16 + 2) * 200 + 2 * 16 + 3] = 250;
+    std::vector<float> units16(256, 0.0f);
+    units16[2 * 16 + 3] = 20.0f;
+    units16[0] = 7.4f;
+    units16[5] = -50.0f;
+    const bool fits = AddTile(cells.data(), 200, 100, 2 * 16, 1 * 16, 16, units16.data());
+    const bool grid = fits && cells[(1 * 16) * 200 + 2 * 16] == 47 && cells[(1 * 16 + 2) * 200 + 2 * 16 + 3] == 255 &&
+                      cells[(1 * 16) * 200 + 2 * 16 + 5] == 0 && cells[(1 * 16) * 200 + 2 * 16 + 1] == 40 &&
+                      cells[0] == 40 && !AddTile(cells.data(), 200, 100, 190, 0, 16, units16.data()) &&
+                      !AddTile(cells.data(), 200, 100, 0, 90, 16, units16.data());
+    // the grid object as the engine's stamps read it
+    struct FakeInner
+    {
+        uint8_t pad[0x50];
+        int32_t rowBytes, rows;
+        uint32_t cells;
+    } inner = {};
+    struct FakeGrid
+    {
+        uint8_t pad0[4];
+        uint32_t inner;
+        uint8_t pad1[0x28];
+        int32_t cellX, cellY;
+    } fake = {};
+    static_assert(offsetof(FakeInner, rowBytes) == 0x50 && offsetof(FakeInner, cells) == 0x58, "");
+    static_assert(offsetof(FakeGrid, cellX) == 0x30 && offsetof(FakeGrid, cellY) == 0x34, "");
+    inner.rowBytes = 200;
+    inner.rows = 100;
+    inner.cells = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(cells.data()));
+    fake.inner = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&inner));
+    fake.cellX = fake.cellY = 17;
+    GridView view;
+    const bool gridView = ReadGrid(&fake, view) && view.cells == cells.data() && view.rowBytes == 200 &&
+                          view.rows == 100 && view.cellX == 16 && !ReadGrid(nullptr, view);
+    // a plot changed: only the four squares round it change
+    auto tiles = [&](const Field& f) {
+        std::vector<std::vector<float>> all;
+        for (int sy = 0; sy <= H; ++sy)
+            for (int sx = 0; sx <= W; ++sx)
+            {
+                std::vector<float> t(256, 0.0f);
+                if (!f.Tile(sx, sy, 16, t.data()))
+                    t.clear();
+                all.push_back(t);
+            }
+        return all;
+    };
+    auto onlyRound = [&](const std::vector<std::vector<float>>& a, const std::vector<std::vector<float>>& b, int px,
+                         int py, int& changed) {
+        changed = 0;
+        bool ok = true;
+        for (int sy = 0; sy <= H; ++sy)
+            for (int sx = 0; sx <= W; ++sx)
+                if (a[sy * (W + 1) + sx] != b[sy * (W + 1) + sx])
+                {
+                    ++changed;
+                    int cc[4][2];
+                    TileSets::Corners(sx, sy, H, cc);
+                    bool round = false;
+                    for (int k = 0; k < 4; ++k)
+                        round = round || (cc[k][0] == px && cc[k][1] == py);
+                    ok = ok && round;
+                }
+        return ok;
+    };
+    const auto before = tiles(field);
+    int gone = -1;
+    for (const auto& p : field.Placements())
+        if (gone < 0 && p.frame.size() >= 3)
+            gone = p.plots[1];
+    int free = -1;
+    for (int y = 2; y < H - 2 && free < 0; ++y)
+        for (int x = 2; x < W - 2 && free < 0; ++x)
+        {
+            bool alone = true;
+            for (int dy = -1; dy <= 1; ++dy)
+                for (int dx = -1; dx <= 1; ++dx)
+                    alone = alone && !map.hills[(y + dy) * W + x + dx];
+            if (alone)
+                free = y * W + x;
+        }
+    Field f1 = field, f2 = field;
+    Map m1 = map, m2 = map;
+    if (gone >= 0)
+        m1.hills[gone] = 0;
+    if (free >= 0)
+        m2.hills[free] = 1;
+    int changed1 = 0, changed2 = 0;
+    const int how1 = f1.Update(m1), how2 = f2.Update(m2);
+    const bool local = gone >= 0 && free >= 0 && how1 == 1 && how2 == 1 &&
+                       onlyRound(before, tiles(f1), gone % W, gone / W, changed1) && changed1 > 0 &&
+                       onlyRound(before, tiles(f2), free % W, free / W, changed2) && changed2 == 4 &&
+                       f1.Mask(gone % W + 1, H - gone / W) != field.Mask(gone % W + 1, H - gone / W) &&
+                       field.Update(map) == 0;
+    Field f3 = field;
+    const bool refit = f3.Update(makeMap(W, H, false, {{1, 1}, {2, 1}, {5, 5}})) == 2 && f3.Placements().size() == 2;
+    // deterministic: the same plots listed backwards give the same tiles; other plots, others
+    auto hashOf = [&](const Field& f) {
+        uint32_t hv = 2166136261u;
+        for (const auto& t : tiles(f))
+            for (float v : t)
+                hv = (hv ^ static_cast<uint32_t>(std::lround(v * 16))) * 16777619u;
+        return hv;
+    };
+    std::vector<std::array<int, 2>> reversed(set.rbegin(), set.rend()), moved = set;
+    moved[3] = {0, 0};
+    Field again;
+    again.SetPieces(pieces, units);
+    again.Build(makeMap(W, H, false, moved));
+    const uint32_t other = hashOf(again);
+    again.Build(makeMap(W, H, false, reversed));
+    const bool deterministic = hashOf(again) == hashOf(field) && other != hashOf(field);
+    // a map wrapping east-west with a pair either side of the seam: one piece across it, squares 0 and W the same
+    const Map wrap = makeMap(12, 8, true, {{11, 4}, {0, 4}, {5, 2}});
+    Field wf;
+    wf.SetPieces(pieces, units);
+    wf.Build(wrap);
+    bool across = false;
+    for (const auto& p : wf.Placements())
+    {
+        int lo = 99, hi = -99;
+        for (const auto& f : p.frame)
+            lo = (std::min)(lo, f[0]), hi = (std::max)(hi, f[0]);
+        across = across || (p.frame.size() >= 2 && (lo < 0 || hi >= wrap.width));
+    }
+    bool sameEdge = true;
+    std::vector<float> t0(256), tw(256);
+    for (int sy = 0; sy <= wrap.height; ++sy)
+    {
+        const bool a = wf.Tile(0, sy, 16, t0.data()), b = wf.Tile(wrap.width, sy, 16, tw.data());
+        sameEdge = sameEdge && a == b && (!a || t0 == tw);
+    }
+    // the hook site: a JMP to the thunk and a NOP over SUB ESP,0x10; CMP EDI,1, only over those bytes
+    const uint32_t imgBase = 0x400000, thunk = 0x10006000;
+    std::vector<uint8_t> img(0x80000, 0xcc);
+    const auto sites = Sites(imgBase, thunk);
+    memcpy(img.data() + kBaseStamp, sites[0].original.data(), sites[0].original.size());
+    std::vector<uint8_t> otherImg = img;
+    otherImg[kBaseStamp + 5] = 0x02;
+    int writes = 0;
+    auto write = [&](std::vector<uint8_t>& im) {
+        return [&](uint32_t rva, const uint8_t* b, size_t n) { memcpy(im.data() + rva, b, n), ++writes; };
+    };
+    const std::string siteWhy = TerrainPatch::ApplySites(img.data(), img.size(), sites, write(img));
+    int32_t rel;
+    memcpy(&rel, img.data() + kBaseStamp + 1, 4);
+    const bool hooked = siteWhy.empty() && writes == 1 && img[kBaseStamp] == 0xE9 &&
+                        rel == static_cast<int32_t>(thunk - (imgBase + kBaseStamp + 5)) && img[kBaseStamp + 5] == 0x90;
+    writes = 0;
+    const std::string otherWhy = TerrainPatch::ApplySites(otherImg.data(), otherImg.size(), sites, write(otherImg));
+    const bool siteRefused = !otherWhy.empty() && writes == 0;
+    // a Huge map's worth of bands (128 x 80, wrapping): placed, and every square touching the set cut at 64 x 64
+    std::vector<std::array<int, 2>> many;
+    for (int y = 0; y < 80; ++y)
+        for (int x = 0; x < 128; ++x)
+            if (std::fmod(x + y * 1.88f, 9.0f) < 1.6f + 3.2f * HillField::ValueNoise(x * 0.2f, y * 0.2f, 8))
+                many.push_back({x, y});
+    LARGE_INTEGER f0, q1, q2, q3;
+    QueryPerformanceFrequency(&f0);
+    QueryPerformanceCounter(&q1);
+    Field hf;
+    hf.SetPieces(pieces, units);
+    hf.Build(makeMap(128, 80, true, many));
+    QueryPerformanceCounter(&q2);
+    int hugeCut = 0;
+    std::vector<float> big(64 * 64);
+    for (int sy = 0; sy <= 80; ++sy)
+        for (int sx = 0; sx <= 128; ++sx)
+            hugeCut += hf.Tile(sx, sy, 64, big.data()) ? 1 : 0;
+    QueryPerformanceCounter(&q3);
+    printf("JIGSAW dds=%d ddsrefused=%d xml=%d xmlrefused=%d xmldefault=%d geometry=%d combine=%d exact64=%d exact16=%d "
+           "cut=%d mask=%d lattice=%d once=%d massif=%d base=%d grid=%d gridview=%d local=%d refit=%d deterministic=%d "
+           "wrap=%d hooked=%d siterefused=%d hugeplots=%d hugecut=%d fitms=%d cutms=%d real=%d\n",
+           dds, ddsRefused, xmlOk, xmlRefused, xmlDefault, geometry, combine, exact64, exact16,
+           cut64 == touching && cut16 == touching, mask, lattice, once, lowest > 0.5f, base, grid, gridView, local, refit,
+           deterministic, across && sameEdge, hooked, siteRefused, static_cast<int>(many.size()), hugeCut,
+           static_cast<int>((q2.QuadPart - q1.QuadPart) * 1000 / f0.QuadPart),
+           static_cast<int>((q3.QuadPart - q2.QuadPart) * 1000 / f0.QuadPart), real);
+    printf("JIGSAW placements on %d plots: %d four-plot, %d three-plot, %d two-plot, %d one-plot (%d%% of plots in "
+           "multi-plot pieces); lowest between neighbours %.1f units, highest %.1f; squares %d; changed %d / %d\n",
+           static_cast<int>(set.size()), sizes[4], sizes[3], sizes[2], sizes[1],
+           set.empty() ? 0 : 100 * multiPlots / static_cast<int>(set.size()), lowest, peak, touching, changed1, changed2);
+    return 0;
+}
+
 int wmain(int argc, wchar_t** argv)
 {
     if (argc > 1 && wcscmp(argv[1], L"terrainpatch") == 0)
@@ -2947,6 +3425,8 @@ int wmain(int argc, wchar_t** argv)
         return TileSetsTest();
     if (argc > 1 && wcscmp(argv[1], L"hillfield") == 0)
         return HillFieldTest();
+    if (argc > 1 && wcscmp(argv[1], L"jigsaw") == 0)
+        return JigsawTest(argc > 2 ? argv[2] : nullptr);
     if (argc > 1 && wcscmp(argv[1], L"terraincells") == 0)
         return TerrainCellsTest();
     // A trailing mod=<folder> is for the proxy, which reads the command line itself (the way BtS is started with a mod)

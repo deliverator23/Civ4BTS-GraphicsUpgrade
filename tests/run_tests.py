@@ -374,6 +374,45 @@ def main():
           f"a Huge map ({hf.get('hugehills')} hills): fitted in {hf.get('fitms')} ms, {hf.get('hugecut')} squares cut at "
           f"64x64 in {hf.get('cutms')} ms")
 
+    print('jigsaw pieces ([terrain tiles] JigsawPieces1..8, experimental, off by default):')
+    check(not re.search(r'^\s*JigsawPieces[1-8]Terrains\s*=\s*\S', shipped, re.M), 'the shipped INI sets no jigsaw pieces')
+    jout = run([os.path.join(TEST, 'test_proxy.exe'), 'jigsaw'])
+    for line in jout.splitlines():
+        if line.startswith('JIGSAW placements'):
+            print('  ' + line)
+    m = re.search(r'^JIGSAW (dds=.*)$', jout, re.M)
+    js = {k: int(v) for k, v in (kv.split('=') for kv in m.group(1).split())} if m else {}
+    check(js.get('dds') == 1 and js.get('ddsrefused') == 1,
+          'DDS heightmaps: L16 / R16 / A16B16G16R16 as height x 256, L8 / A8L8 / R8 / RGB red as the height; '
+          'compressed or cut-off files refused')
+    check(js.get('xml') == 1 and js.get('xmlrefused') == 1 and js.get('xmldefault') == 1,
+          "pieces.xml: fHeightScale, each Layout's Plots and Pieces, comments skipped; mistakes refused with why; no "
+          "fHeightScale, 1")
+    check(js.get('geometry') == 1, "a piece's place from its plots and its pixels a plot from its size; a size that "
+          "doesn't fit its layout refused")
+    check(js.get('combine') == 1, 'sets combined: the highest raised and the lowest lowered')
+    check(js.get('exact64') == 1 and js.get('exact16') == 1 and js.get('cut') == 1 and js.get('mask') == 1,
+          "every square touching a set's plot gets a tile, and adjacent tiles continue each other (each is the one "
+          "field sampled there, 64 and 16 per plot)")
+    check(js.get('lattice') == 1 and js.get('once') == 1,
+          'pieces go down by exact lattice moves (the 8 turns and mirrors, whole-plot shifts), every plot in one')
+    check(js.get('massif') == 1, 'a band of plots is one massif: between neighbouring plots the field never drops to '
+          'the base')
+    check(js.get('base') == 1, "the base stamp is given a set's corners as water, as land, or as they are; a corner the "
+          "engine has otherwise than the map as read leaves the square to the engine")
+    check(js.get('grid') == 1 and js.get('gridview') == 1,
+          "the tile added into the engine's height bytes at the square's place, clamped 0..255, never past the grid; "
+          "the grid object read as the stamps read it")
+    check(js.get('local') == 1 and js.get('refit') == 1,
+          'a plot that joins or leaves a set changes only the four squares round it; a new map is placed again')
+    check(js.get('deterministic') == 1, 'the same plots give the same tiles (in any order); other plots, others')
+    check(js.get('wrap') == 1, 'a map that wraps: a piece across the seam, and squares 0 and W the same')
+    check(js.get('hooked') == 1 and js.get('siterefused') == 1,
+          'the base stamp hooked with a JMP over SUB ESP,0x10; CMP EDI,1 (only over those bytes)')
+    check(js.get('hugecut', 0) > 0 and js.get('fitms', 9999) + js.get('cutms', 9999) < 4000,
+          f"a Huge map ({js.get('hugeplots')} plots in a set): placed in {js.get('fitms')} ms, {js.get('hugecut')} "
+          f"squares cut at 64x64 in {js.get('cutms')} ms")
+
     print('terrain grid, partial updates:')
     cout = run([os.path.join(TEST, 'test_proxy.exe'), 'terraincells'])
     m = re.search(r'^TERRAINCELLS (.*)$', cout, re.M)
