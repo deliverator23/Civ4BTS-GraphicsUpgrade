@@ -672,6 +672,7 @@ void LoadConfig()
     g_config.detailNormalsKey = IniKey(ini, L"textures", L"DetailNormalsToggleKey", '6');
     g_config.detailNormalStrength = (std::max)(
         0.0f, static_cast<float>(_wtof(IniString(ini, L"textures", L"DetailNormalStrength", L"1").c_str())));
+    g_config.blendTileClamp = IniInt(ini, L"textures", L"BlendTileClamp", 1) != 0;
     g_config.blendNormalStrength = (std::max)(
         0.0f, static_cast<float>(_wtof(IniString(ini, L"textures", L"BlendNormalStrength", L"1").c_str())));
     g_config.detailBumpiness =

@@ -15,11 +15,21 @@ void TerrainNormals::Capture(const ShaderInfo& vs)
     UINT offset = 0, stride = 0;
     if (FAILED(m_dev->GetStreamSource(0, &vb, &offset, &stride)) || !vb)
         return;
-    if (!m_done.insert(vb).second || stride < 12)
+    // mtxWorld: three register rows (float4x3, translation in .w). A buffer is read once in each place it's drawn.
+    float w[12];
+    m_dev->GetVertexShaderConstantF(static_cast<UINT>(vs.world), w, 3);
+    const std::array<float, 3> place = {w[3], w[7], w[11]};
+    auto& places = m_done[vb];
+    bool seen = false;
+    for (const auto& at : places)
+        seen = seen || (std::fabs(at[0] - place[0]) < 0.5f && std::fabs(at[1] - place[1]) < 0.5f &&
+                        std::fabs(at[2] - place[2]) < 0.5f);
+    if (seen || stride < 12)
     {
         vb->Release();
         return;
     }
+    places.push_back(place);
     const double readStart = Perf::Now();
     D3DVERTEXBUFFER_DESC d = {};
     vb->GetDesc(&d);
@@ -36,9 +46,6 @@ void TerrainNormals::Capture(const ShaderInfo& vs)
         vb->Release();
         return;
     }
-    // mtxWorld: three register rows (float4x3, translation in .w).
-    float w[12];
-    m_dev->GetVertexShaderConstantF(static_cast<UINT>(vs.world), w, 3);
     const UINT count = (d.Size - offset) / stride;
     const BYTE* base = static_cast<const BYTE*>(data) + offset;
     std::vector<float> world(count * 3);

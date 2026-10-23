@@ -173,6 +173,7 @@ struct Config
     float detailNormalStrength = 1.0f;
     float detailBumpiness = 1.5f;
     float blendNormalStrength = 1.0f;  // terrain blend sheets' own normal maps (DetailNormals::ForBlend); 0 = off
+    bool blendTileClamp = true;  // read blend sheets inside each square's tile at every mip (Shader Model 3)
     UINT lightCycleKey = '4';  // modifiers + key pauses and resumes the light cycle
     float lightSun[kLightGroups][3] = {};
     float lightAmbient[kLightGroups][3] = {};

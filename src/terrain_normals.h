@@ -15,6 +15,8 @@
 #include "terrain_cells.h"
 #include "trace.h"
 
+#include <array>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -24,7 +26,8 @@ public:
     explicit TerrainNormals(IDirect3DDevice9* device) : m_dev(device) {}
     ~TerrainNormals() { ReleaseAll(); }
 
-    // A BtS terrain draw is about to happen: read its vertex buffer if it's new.
+    // A BtS terrain draw is about to happen: read its vertex buffer if it's new, or new in this place (BtS draws
+    // some buffers at more than one cell, moved by mtxWorld).
     void Capture(const ShaderInfo& vs);
     // A vertex buffer was just created at this address: forget an earlier one there.
     void ForgetBuffer(const void* vb) { m_done.erase(vb); }
@@ -109,7 +112,8 @@ private:
     bool EnsureHeightTexture();  // made and uploaded if the heights changed since
 
     IDirect3DDevice9* m_dev;
-    std::unordered_set<const void*> m_done;  // vertex buffers already read (or not readable)
+    // vertex buffers already read (or not readable), with the places (mtxWorld's translation) they were read at
+    std::unordered_map<const void*, std::vector<std::array<float, 3>>> m_done;
     std::vector<float> m_heights;            // world z per cell; NaN = unknown
     float m_spacing = 0;                     // world units between grid cells (GridSpacingFor, from the first buffer)
     float m_vertexSpacing = 0;               // ...and between the terrain's own vertices

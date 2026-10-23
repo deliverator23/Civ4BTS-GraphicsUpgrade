@@ -153,7 +153,10 @@ private:
     IDirect3DPixelShader9* m_terrainSheetPs = nullptr;
     bool m_terrainSheetTried = false;
     IDirect3DTexture9* m_sheetNormals = nullptr;
-    bool m_sheetNm = false;  // ...in DXT5nm
+    bool m_sheetNm = false;   // ...in DXT5nm
+    bool m_sheetPass = false;  // this terrain draw goes through that shader (the sheet read inside its tile, its normals)
+    float m_sheet[4] = {};     // its c23: the sheet's size in texels, w = 1: clamp to the tile
+    bool m_loggedClamp = false;
     IDirect3DPixelShader9* m_blurPs = nullptr;
     IDirect3DVertexShader9* m_riverFloodVs = nullptr;  // River_Shader P0 (floodplain) with shadows
     IDirect3DPixelShader9* m_riverFloodPs = nullptr;

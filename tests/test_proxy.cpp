@@ -664,6 +664,22 @@ static int ShadowScene(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS& pp, int fra
             static_cast<DWORD*>(lr.pBits)[x] = 0xFF000000 | x << 16 | x << 8 | x;
         tex[3]->UnlockRect(0);
     }
+    // GU_TEST_SHEET=1: the base texture is a 16x16 blend sheet (4x4 tiles of 4 texels), its top two rows of tiles grey
+    // 0x20 and the bottom two 0x60; the slope's texture coordinates cross the boundary between them at world y = 0.
+    // L or H: all of it 0x20 or 0x60.
+    wchar_t sheetEnv[8] = {};
+    if (GetEnvironmentVariableW(L"GU_TEST_SHEET", sheetEnv, 8) > 0 && sheetEnv[0] != L'0')
+    {
+        tex[0]->Release();
+        CHECK(dev->CreateTexture(16, 16, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &tex[0], nullptr));
+        D3DLOCKED_RECT lr;
+        CHECK(tex[0]->LockRect(0, &lr, nullptr, 0));
+        for (DWORD y = 0; y < 16; ++y)
+            for (DWORD x = 0; x < 16; ++x)
+                reinterpret_cast<DWORD*>(static_cast<uint8_t*>(lr.pBits) + y * lr.Pitch)[x] =
+                    sheetEnv[0] == L'L' || (sheetEnv[0] == L'1' && y < 8) ? 0xFF202020 : 0xFF606060;
+        tex[0]->UnlockRect(0);
+    }
     IDirect3DSurface9* sys = nullptr;
     CHECK(dev->CreateOffscreenPlainSurface(pp.BackBufferWidth, pp.BackBufferHeight, pp.BackBufferFormat,
                                           D3DPOOL_SYSTEMMEM, &sys, nullptr));
@@ -694,7 +710,8 @@ static int ShadowScene(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS& pp, int fra
                vanish = wcscmp(overlay, L"vanish") == 0, waterOverlay = wcscmp(overlay, L"water") == 0,
                slope = wcscmp(overlay, L"slope") == 0 || ridge,
                wideMap = wcscmp(overlay, L"widemap") == 0, ultraMap = wcscmp(overlay, L"ultramap") == 0,
-               fineMap = wcscmp(overlay, L"finemap") == 0 || wideMap || ultraMap,
+               sharedMap = wcscmp(overlay, L"sharedmap") == 0,
+               fineMap = wcscmp(overlay, L"finemap") == 0 || wideMap || ultraMap || sharedMap,
                effectLit = wcscmp(overlay, L"effectlit") == 0, effectMul = wcscmp(overlay, L"effectmul") == 0,
                effectUi = wcscmp(overlay, L"effectui") == 0,
                effect = wcscmp(overlay, L"effect") == 0 || effectLit || effectMul || effectUi;
@@ -737,6 +754,8 @@ static int ShadowScene(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS& pp, int fra
     // units) across. Either way the proxy's grid must keep the three apart (traces save terrain_heights.bin).
     // ultramap: 9x9 chunks of vertices 2.8125 apart (the 65-sample terrain patch with High Detail Terrain): the grid
     // keeps 1 vertex in 4 (11.25 apart) so a Huge map still fits, and the chunks are 1024 of those cells apart.
+    // sharedmap: finemap's, all three drawn from the first chunk's buffer (height 10), as BtS draws some buffers at
+    // more than one cell.
     const float fineSpacing = wideMap ? 22.5f : ultraMap ? 2.8125f : 11.25f, fineHeights[3] = {10, 20, 30};
     const float gridSpacing = ultraMap ? 11.25f : fineSpacing;
     const int fineN = ultraMap ? 9 : 5;
@@ -903,6 +922,13 @@ static int ShadowScene(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS& pp, int fra
         CHECK(dev->SetVertexShaderConstantF(20, marker, 4));
         for (DWORD i = 0; i < 4; ++i)
             CHECK(dev->SetTexture(i, tex[i]));
+        if (sheetEnv[0] != L'0' && sheetEnv[0] != 0)
+        {
+            // the blend sheet filtered as BtS filters it (bilinear, with mips' filter)
+            CHECK(dev->SetSamplerState(0, D3DSAMP_MAGFILTER, D3DTEXF_LINEAR));
+            CHECK(dev->SetSamplerState(0, D3DSAMP_MINFILTER, D3DTEXF_LINEAR));
+            CHECK(dev->SetSamplerState(0, D3DSAMP_MIPFILTER, D3DTEXF_LINEAR));
+        }
         if (slope)
         {
             CHECK(dev->SetStreamSource(0, slopeVb, 0, 28));
@@ -923,7 +949,7 @@ static int ShadowScene(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS& pp, int fra
             {
                 const float placed[12] = {1, 0, 0, fineAt[c][0], 0, 1, 0, fineAt[c][1], 0, 0, 1, 0};
                 CHECK(dev->SetVertexShaderConstantF(4, placed, 3));
-                CHECK(dev->SetStreamSource(0, fineVb[c], 0, 28));
+                CHECK(dev->SetStreamSource(0, fineVb[sharedMap ? 0 : c], 0, 28));
                 CHECK(dev->DrawPrimitive(D3DPT_TRIANGLELIST, 0, 8));  // (some of the grid: only its heights matter)
             }
             CHECK(dev->SetStreamSource(0, nullptr, 0, 0));
@@ -1505,19 +1531,6 @@ static int LightScene(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS& pp, bool ff,
             dev->GetRenderState(D3DRS_AMBIENT, &ambient);
             if (after.Diffuse.r != 0.5f || after.Direction.z != -1 || ambient != 0x00102030)
                 restored = 0;
-        }
-        else
-        {
-            CHECK(dev->SetVertexDeclaration(decl));
-            CHECK(dev->SetVertexShader(vs));
-            CHECK(dev->SetVertexShaderConstantF(0, bones, 3));
-            CHECK(dev->SetVertexShaderConstantF(60, identity, 4));
-            CHECK(dev->SetVertexShaderConstantF(64, light, 3));
-            CHECK(dev->DrawPrimitiveUP(D3DPT_TRIANGLELIST, 1, tri, 24));
-            float after[12];
-            dev->GetVertexShaderConstantF(64, after, 3);
-            if (memcmp(after, light, sizeof(after)) != 0)
-                restored = 0;
             if (tex)
             {
                 D3DMATERIAL9 m = {};
@@ -1531,6 +1544,19 @@ static int LightScene(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS& pp, bool ff,
                 CHECK(dev->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_SELECTARG1));
                 CHECK(dev->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_DIFFUSE));
             }
+        }
+        else
+        {
+            CHECK(dev->SetVertexDeclaration(decl));
+            CHECK(dev->SetVertexShader(vs));
+            CHECK(dev->SetVertexShaderConstantF(0, bones, 3));
+            CHECK(dev->SetVertexShaderConstantF(60, identity, 4));
+            CHECK(dev->SetVertexShaderConstantF(64, light, 3));
+            CHECK(dev->DrawPrimitiveUP(D3DPT_TRIANGLELIST, 1, tri, 24));
+            float after[12];
+            dev->GetVertexShaderConstantF(64, after, 3);
+            if (memcmp(after, light, sizeof(after)) != 0)
+                restored = 0;
         }
         if (rt)
             CHECK(dev->SetRenderTarget(0, bb));

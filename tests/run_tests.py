@@ -507,12 +507,15 @@ def main():
     shadow = {}
 
     def shadow_run(label, enabled, overlay='none', extra='', buildings=1, shadows_extra='', flagpole=False,
-                   old=False, game_dir=None, flag_stage=0, mod_files=None, flag_dds=None, ramp=False, sun='-1,0,-1'):
+                   old=False, game_dir=None, flag_stage=0, mod_files=None, flag_dds=None, ramp=False, sun='-1,0,-1',
+                   sheet='0'):
         """Harness 'shadow' scene with shadows on or off; returns its SHADOW values and session log. sun: [shadows]
         SunDirection. old: the
         terrain and unit shaders named as in older BtS builds; game_dir: BtS's tree and river shaders from there;
         flag_stage: the texture stage the flag texture is on (flag_dds: another texture there); mod_files: {path in a
-        mod folder: bytes}, run with mod= that folder; ramp: the detail texture brightens along u (256 texels)."""
+        mod folder: bytes}, run with mod= that folder; ramp: the detail texture brightens along u (256 texels); sheet '1':
+        the base texture is a 16x16 blend sheet, tile rows 0-1 grey 0x20, 2-3 grey 0x60 (the boundary at world y = 0);
+        'L', 'H': all 0x20, all 0x60."""
         sdir = os.path.join(TEST, f'shadow_{overlay}_{label}')
         # extra: more INI text (e.g. a [lighting] section)
         sout_dir = os.path.join(sdir, 'out')
@@ -533,7 +536,8 @@ def main():
                 with open(os.path.join(mod, rel), 'wb') as f:
                     f.write(content)
             mod_arg = ['mod=' + mod]
-        env = dict(os.environ, GU_TEST_OLD_SHADERS='1' if old else '0', GU_TEST_DETAIL_RAMP='1' if ramp else '0')
+        env = dict(os.environ, GU_TEST_OLD_SHADERS='1' if old else '0', GU_TEST_DETAIL_RAMP='1' if ramp else '0',
+                   GU_TEST_SHEET=sheet)
         sres = run([os.path.join(TEST, 'test_proxy.exe'), os.path.join(sdir, 'd3d9.dll'), 'shadow',
                     blob_dds if blob_dds and overlay == 'none' else '-', overlay, game_dir or river_dir] +
                    ([flag_dds or flagpole_dds, str(flag_stage)] if flagpole else []) + mod_arg, env=env)
@@ -1101,11 +1105,12 @@ def main():
     # 30) 1024 cells apart, which a 1024-cell grid would lay over each other. finemap: spacing 11.25 ("High Detail
     # Terrain"), so a Huge map needs 2048 cells; widemap: 22.5, but mtxLightmap says the map is 256 plots across;
     # ultramap: 9x9 chunks of vertices 2.8125 apart (the 65-sample terrain patch with High Detail Terrain), of which the
-    # grid keeps 1 in 4 (11.25 apart), so a Huge map still fits: 3x3 known cells a chunk.
+    # grid keeps 1 in 4 (11.25 apart), so a Huge map still fits: 3x3 known cells a chunk. sharedmap: finemap's three
+    # places drawn from one vertex buffer (height 10), as BtS draws some: read in each place.
     import array
     import math
     for fine_overlay, fine_spacing, fine_half, fine_log in (
-            ('finemap', '11.250', 2, ''), ('widemap', '22.500', 2, ''),
+            ('finemap', '11.250', 2, ''), ('widemap', '22.500', 2, ''), ('sharedmap', '11.250', 2, ''),
             ('ultramap', '11.250', 1, 'grid spacing 11.250 world units (1 in 4 of the vertices, 2.812 apart)')):
         fine_known = 3 * (2 * fine_half + 1) ** 2
         _, flog = shadow_run('heights', 0, fine_overlay, '[lighting]\nEnabled=1\n[debug]\nTraces=1\n[trace]\nAutoFrame=1\n')
@@ -1119,6 +1124,7 @@ def main():
             known = sum(1 for v in h if v == v)
             wrong = []
             for (cx, cy), z in (((0, 0), 10), ((1024, 0), 20), ((0, 1024), 30)):
+                z = 10 if fine_overlay == 'sharedmap' else z
                 for dy in range(-fine_half, fine_half + 1):
                     for dx in range(-fine_half, fine_half + 1):
                         x, y = (cx + dx) % cells, (cy + dy) % cells
@@ -1220,6 +1226,21 @@ def main():
           abs(got - want) <= 2 and abs(want) > 10 and s_on.get('restored') == 1 and s_on['released'],
           f"a mod's own normal map for a detail texture found and used (blue {s_on.get('lit')} vs {s_off.get('lit')} "
           f"without: change {got}, expected {want:.1f})")
+
+    # Blend sheets read inside each square's tile ([textures] BlendTileClamp, Shader Model 3): the lit point (200,0)
+    # reads the sheet at v = 0.5, the boundary between two rows of tiles (grey 0x20 above, 0x60 below). Read as BtS
+    # does, filtering mixes the two; clamped, it's one tile's grey, as lit as a sheet all of that grey.
+    clamp_off = turned + '[textures]\nBlendTileClamp=0\n'
+    c_on, clog = shadow_run('tile_clamp', 0, 'slope', turned, sheet='1')
+    c_off, _ = shadow_run('tile_clamp_off', 0, 'slope', clamp_off, sheet='1')
+    c_lo, _ = shadow_run('tile_clamp_lo', 0, 'slope', clamp_off, sheet='L')
+    c_hi, _ = shadow_run('tile_clamp_hi', 0, 'slope', clamp_off, sheet='H')
+    lo, hi, on, off = c_lo.get('lit', 0), c_hi.get('lit', 0), c_on.get('lit', 0), c_off.get('lit', 0)
+    check('terrain: blend sheets read inside each square\'s tile at every mip (first 16x16, tiles 4 texels)' in clog and
+          hi - lo > 40 and lo + 10 < off < hi - 10 and min(abs(on - lo), abs(on - hi)) <= 2 and
+          c_on.get('restored') == 1 and c_on['released'],
+          f"blend sheets read inside the square's tile: blue {on} at a boundary between tiles ({off} read as BtS does, "
+          f"mixing them; one tile alone {lo} or {hi})")
 
     # A terrain blend sheet's own normal map (<Path> with _normal before .dds; Shader Model 3): the harness's base
     # texture (1x1 grey 0x66) is recognised as the mod's blend sheet; the map's texel (64,128,255) tilts the normal 0.5

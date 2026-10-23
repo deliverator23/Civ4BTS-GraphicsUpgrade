@@ -606,18 +606,35 @@ bool Shadows::DrawReceiver(const ShaderInfo& vs, const ShaderInfo* ps, const std
         if (fow)
             fow->Release();
     }
-    // The blend sheet's own normal map, if it has one (and the card has Shader Model 3): our shader that reads it.
+    // The Shader Model 3 terrain shader: the blend sheet (s0) read inside its tile ([textures] BlendTileClamp), and the
+    // sheet's own normal map if it has one.
     m_sheetNormals = nullptr;
-    if (terrain && terrainLight && detailNormals && detailNormals->enabled && g_config.blendNormalStrength > 0)
+    m_sheetPass = false;
+    m_sheet[0] = m_sheet[1] = m_sheet[2] = m_sheet[3] = 0;
+    if (terrain)
     {
         IDirect3DBaseTexture9* sheet = nullptr;
         m_dev->GetTexture(0, &sheet);
-        const DetailNormals::SheetUse use = sheet ? detailNormals->ForBlend(sheet) : DetailNormals::SheetUse();
-        IDirect3DTexture9* map = use.map;
-        m_sheetNm = use.dxt5nm;
+        IDirect3DTexture9* map = nullptr;
+        if (sheet && terrainLight && detailNormals && detailNormals->enabled && g_config.blendNormalStrength > 0)
+        {
+            const DetailNormals::SheetUse use = detailNormals->ForBlend(sheet);
+            map = use.map;
+            m_sheetNm = use.dxt5nm;
+        }
+        // A blend sheet: 4 tiles across, whole tiles down, at least 4 texels a tile.
+        D3DSURFACE_DESC d = {};
+        if (g_config.blendTileClamp && sheet && sheet->GetType() == D3DRTYPE_TEXTURE &&
+            SUCCEEDED(static_cast<IDirect3DTexture9*>(sheet)->GetLevelDesc(0, &d)) && d.Width >= 16 &&
+            (d.Height * 4) % d.Width == 0)
+        {
+            m_sheet[0] = static_cast<float>(d.Width);
+            m_sheet[1] = static_cast<float>(d.Height);
+            m_sheet[3] = 1;
+        }
         if (sheet)
             sheet->Release();
-        if (map && !m_terrainSheetTried)
+        if ((map || m_sheet[3] > 0) && !m_terrainSheetTried)
         {
             m_terrainSheetTried = true;
             const ULONG before = DeviceRefs(m_dev);
@@ -625,14 +642,22 @@ bool Shadows::DrawReceiver(const ShaderInfo& vs, const ShaderInfo* ps, const std
                                                  &m_terrainSheetVs)) ||
                 FAILED(m_dev->CreatePixelShader(Tokens(g_terrainSheetNormalsPS, sizeof(g_terrainSheetNormalsPS)).data(),
                                                 &m_terrainSheetPs)))
-                Log::Write("blend normals: their shaders (Shader Model 3) can't be made on this card; none drawn");
+                Log::Write("terrain: the Shader Model 3 terrain shader can't be made on this card; blend sheets read as "
+                           "BtS reads them, without their normal maps");
             m_internalRefs += DeviceRefs(m_dev) - before;
         }
-        if (map && m_terrainSheetVs && m_terrainSheetPs)
+        if ((map || m_sheet[3] > 0) && m_terrainSheetVs && m_terrainSheetPs)
         {
             m_sheetNormals = map;
+            m_sheetPass = true;
             ourVs = &m_terrainSheetVs;
             ourPs = &m_terrainSheetPs;
+            if (m_sheet[3] > 0 && !m_loggedClamp)
+            {
+                m_loggedClamp = true;
+                Log::Write("terrain: blend sheets read inside each square's tile at every mip (first %.0fx%.0f, tiles "
+                           "%.0f texels)", m_sheet[0], m_sheet[1], m_sheet[0] / 4);
+            }
         }
     }
     if (river)
@@ -882,7 +907,7 @@ HRESULT Shadows::DrawShadowed(IDirect3DVertexShader9* vs, IDirect3DPixelShader9*
     IDirect3DVertexShader9* oldVs = nullptr;
     IDirect3DPixelShader9* oldPs = nullptr;
     IDirect3DBaseTexture9* oldTex = nullptr;
-    float oldVsc[16], oldPsc[4], oldLight[32], oldHillGrid[4], oldDetail[8], oldSheet[4];
+    float oldVsc[16], oldPsc[4], oldLight[32], oldHillGrid[4], oldDetail[8], oldSheet[8];
     IDirect3DBaseTexture9* oldSheetMap = nullptr;
     DWORD oldSamp8[9];
     IDirect3DBaseTexture9 *oldNormals = nullptr, *oldHills = nullptr, *oldDetailMap = nullptr;
@@ -939,11 +964,12 @@ HRESULT Shadows::DrawShadowed(IDirect3DVertexShader9* vs, IDirect3DPixelShader9*
         for (int k = 0; k < 8; ++k)
             m_dev->SetSamplerState(5, kShadowSamplerStates[k], values[k]);
         SetDetailNormals(terrainLight != nullptr);
-        if (m_sheetNormals)
+        if (m_sheetPass)
         {
-            // The blend sheet's normal map (s8), filtered and addressed like the sheet (s0); its strength (c22).
+            // The blend sheet's normal map (s8; none: strength 0), filtered and addressed like the sheet (s0); its
+            // strength (c22); the sheet's size and the clamp (c23).
             m_dev->GetTexture(8, &oldSheetMap);
-            m_dev->GetPixelShaderConstantF(22, oldSheet, 1);
+            m_dev->GetPixelShaderConstantF(22, oldSheet, 2);
             for (int k = 0; k < 9; ++k)
             {
                 DWORD v = 0;
@@ -953,8 +979,9 @@ HRESULT Shadows::DrawShadowed(IDirect3DVertexShader9* vs, IDirect3DPixelShader9*
             }
             m_dev->SetSamplerState(8, D3DSAMP_SRGBTEXTURE, FALSE);
             m_dev->SetTexture(8, m_sheetNormals);
-            const float strength[4] = {g_config.blendNormalStrength, m_sheetNm ? 1.0f : 0.0f, 0, 0};
-            m_dev->SetPixelShaderConstantF(22, strength, 1);
+            const float sheet[8] = {m_sheetNormals ? g_config.blendNormalStrength : 0.0f, m_sheetNm ? 1.0f : 0.0f, 0, 0,
+                                    m_sheet[0], m_sheet[1], m_sheet[2], m_sheet[3]};
+            m_dev->SetPixelShaderConstantF(22, sheet, 2);
         }
     }
     else
@@ -993,10 +1020,10 @@ HRESULT Shadows::DrawShadowed(IDirect3DVertexShader9* vs, IDirect3DPixelShader9*
             m_dev->SetSamplerState(7, kDetailSamplerStates[k], oldSamp7[k]);
         if (oldDetailMap)
             oldDetailMap->Release();
-        if (m_sheetNormals)
+        if (m_sheetPass)
         {
             m_dev->SetTexture(8, oldSheetMap);
-            m_dev->SetPixelShaderConstantF(22, oldSheet, 1);
+            m_dev->SetPixelShaderConstantF(22, oldSheet, 2);
             for (int k = 0; k < 9; ++k)
                 m_dev->SetSamplerState(8, kDetailSamplerStates[k], oldSamp8[k]);
             if (oldSheetMap)

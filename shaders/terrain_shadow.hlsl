@@ -16,7 +16,12 @@
 // normal, and amount += N_detail . L' - N . L': the bumps are lit by the sun as it is now. They come from a normal
 // map shipped with the detail texture (s7, tangent space: red along +u, green along -v), or else from the detail
 // texture's own brightness, read as height (two more samples, one texel along u and v).
-// Built a second time with BLENDNORMALS (Shader Model 3): the blend sheet's own normal map too (s8, a terrain's
+// Built a second time with BLENDNORMALS (Shader Model 3), for every terrain draw the card allows: the blend sheet
+// (BtS's base texture: 4 tiles across, the engine's texture coordinates running to half a texel inside the square's
+// tile) read inside its tile at every mip (c23): the coordinates clamped a texel of the next coarser mip in from the
+// tile's edges, read with the unclamped coordinates' derivatives, so filtering never takes colour or alpha from the
+// neighbouring tile in the sheet (thin lines along square edges otherwise, where neighbouring tiles differ). And the
+// blend sheet's own normal map too (s8, a terrain's
 // <Path> with _normal before .dds; DetailNormals::ForBlend), read at the sheet's texture coordinates, so with the tile
 // and the turn the engine gave this square. The turn is in the coordinates, so which way the sheet's u and v run on the
 // ground is read from how they and the position change across the pixel. Added to the ground's normal as the detail
@@ -54,6 +59,21 @@ sampler2D DetailNormals : register(s7);   // a normal map for the detail texture
 #ifdef BLENDNORMALS
 sampler2D BlendNormals : register(s8);    // the blend sheet's normal map (red along +u, green along -v)
 float4 f4BlendNormal : register(c22);     // x = strength, y = 1: the map is DXT5nm (x in alpha, y in green)
+float4 f4Sheet : register(c23);           // the blend sheet: xy = its size in texels; w = 1: read inside the tile
+
+// The sheet's texture coordinates kept inside this pixel's tile: one texel of the next coarser mip than the widest
+// footprint reads in from its edges (that covers bilinear, trilinear and anisotropic filtering's reach). The
+// derivatives are per triangle, so they don't jump where squares (tiles) meet.
+float2 SheetCoords(float2 uv)
+{
+    float tilePx = max(f4Sheet.x * 0.25, 1);
+    float2 tiles = float2(4, max(f4Sheet.y / tilePx, 1));
+    float2 t = floor(uv * tiles);
+    float2 px = uv * f4Sheet.xy;
+    float lod = max(0, log2(max(length(ddx(px)), length(ddy(px)))));
+    float inset = min(0.5, exp2(ceil(lod)) / tilePx);
+    return lerp(uv, (t + clamp(uv * tiles - t, inset, 1 - inset)) / tiles, f4Sheet.w);
+}
 #endif
 
 struct VSOut
@@ -85,7 +105,12 @@ VSOut VSMain(float3 pos : POSITION, float2 uv0 : TEXCOORD0, float2 uv1 : TEXCOOR
 float4 PSMain(float2 base : TEXCOORD0, float2 fow : TEXCOORD1, float2 lightmap : TEXCOORD2, float2 detail : TEXCOORD3,
               float4 shadow : TEXCOORD4, float2 worldXY : TEXCOORD5) : COLOR
 {
+#ifdef BLENDNORMALS
+    float2 sheetUV = SheetCoords(base);
+    float4 b = tex2Dgrad(TerrainBase, sheetUV, ddx(base), ddy(base));
+#else
     float4 b = tex2D(TerrainBase, base);
+#endif
     float3 lm = tex2D(TerrainLightmap, lightmap).rgb;
     float amount = dot((2 * lm - f4BakedAmbient.rgb) * f4BakedSunInv.rgb, 1.0 / 3);
     float2 grid = worldXY * f4NormalMap.x + f4NormalMap.y;
@@ -112,7 +137,7 @@ float4 PSMain(float2 base : TEXCOORD0, float2 fow : TEXCOORD1, float2 lightmap :
     float2 pu = (px * dv.y - py * du.y) / safe, pv = (py * du.x - px * dv.x) / safe;
     float lu = max(length(pu), 1e-6), lv = max(length(pv), 1e-6);
     float square = abs(det) > 1e-12 && abs(lu - lv) < 0.2 * max(lu, lv) && abs(dot(pu, pv)) < 0.2 * lu * lv ? 1 : 0;
-    float4 sheetTexel = tex2D(BlendNormals, base);
+    float4 sheetTexel = tex2Dgrad(BlendNormals, sheetUV, ddx(base), ddy(base));
     float2 sheet = (lerp(sheetTexel.rg, sheetTexel.ag, f4BlendNormal.y) * 2 - 1) * f4BlendNormal.x * square;
     worldSlope += sheet.x * pu / lu - sheet.y * pv / lv;
 #endif
