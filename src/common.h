@@ -36,22 +36,24 @@ struct Config
     bool dumpShaders = false;   // debug: save every shader the game creates
     bool tracesEnabled = false; // debug: frame traces (hotkey, trigger file, AutoFrame)
     int terrainVertsPerPlot = 17;  // debug, experimental: patch BtS's terrain code for this many samples (terrain_patch.h)
-    // [terrain tiles], experimental (terrain_sets.h): Patch=1 hooks the heightmap tile picks; Sets splits each tile
-    // list into that many groups, a square using its corner terrains' set. The INI numbers the sets from 1: SetN (1..8)
-    // lists the terrains of set N, here tileSetTerrains[N - 1]; land listed nowhere is in Set1, water listed nowhere
-    // doesn't vote.
+    // [terrain tiles], experimental (terrain_sets.h): TilePicker=1 hooks the heightmap tile picks; TileGroups splits
+    // each tile list into that many groups, a square using its corner terrains' group. TileGroupN (1..8) lists the
+    // terrains of group N, here tileSetTerrains[N - 1]. Tile group 1 means every terrain not listed in another group:
+    // land listed nowhere is in TileGroup1 (as well as what it lists), water listed nowhere doesn't vote.
     bool tileSetsPatch = false;
-    // HillField=1 (experimental, hill_field.h): hill tiles cut from one map-wide field of multi-plot hill stamps
-    // instead of hill1_<mask>; hooks the hill lookup even without Patch=1.
+    // HillStamps=1 (experimental, hill_field.h): hill tiles cut from one map-wide field of multi-plot hill stamps
+    // instead of hill1_<mask>; hooks the hill lookup even without TilePicker=1.
     bool hillField = false;
     int tileSets = 1;
     std::wstring tileSetTerrains[8];
     // Coast art per class (one land corner, two side by side, two diagonal, three): cells of the water's transition
     // atlas and CoastWave<class>_<NN>.nif models; more coast tiles than this reuse them in turn. Stock: 8, 8, 6, 7.
-    // LandBlend1..8 (terrain_sets.h): "TERRAIN_X: <mask 1>; ...; <mask 14>" ("tile,rotation" entries, as TextureBlend):
-    // that terrain's blend on squares with no water corner, so its TextureBlend lists can be paired with the coast tiles.
+    // StandardBlendOnLand1..8 (terrain_sets.h): "TERRAIN_X: <mask 1>; ...; <mask 14>" ("tile,rotation" entries, as
+    // TextureBlend): that terrain's blend on squares with no water corner, so its TextureBlend lists can be paired with
+    // the coast tiles.
     std::wstring landBlends[8];
-    std::wstring landBlendTerrains;  // LandBlend (no number): terrains taking BtS's standard layout on land squares
+    // StandardBlendOnLand (no number): terrains taking BtS's standard blend layout on land squares
+    std::wstring landBlendTerrains;
     int coastAtlasCells[4] = {8, 8, 6, 7};
     int coastWaveModels[4] = {8, 8, 6, 7};
     float waterTime = -1;       // debug: the water's clock stopped at this many seconds (< 0: running)
@@ -206,12 +208,14 @@ extern HMODULE g_self;
 void LoadConfig();
 // [debug] TerrainVertsPerPlot: patch the running exe's terrain code (terrain_patch.cpp); logs what it did. Once.
 void ApplyTerrainPatch();
-// [terrain tiles] Patch: hook the heightmap tile picks (terrain_sets.cpp); logs what it did. Once.
+// [terrain tiles] TilePicker: hook the heightmap tile picks (terrain_sets.cpp); logs what it did. Once.
 void ApplyTileSets();
-// [terrain tiles] LandBlend1..8: hooks the terrain layers' blend pick if any is set (terrain_sets.cpp). Once.
+// [terrain tiles] StandardBlendOnLand(1..8): hooks the terrain layers' blend pick if any is set (terrain_sets.cpp).
+// Once.
 void ApplyLandBlends();
 std::string LandBlendsSummary();  // "" if nothing new since the last call
-// "terrain tile sets: ..." (picks by set, hill/peak variants used) when they changed since the last call, else "".
+// "terrain tile groups: ..." (picks by tile group, hill/peak variants used) when they changed since the last call,
+// else "".
 std::string TileSetsSummary();
 // The Baked* light the INI leaves out, from the SunLight.nif the game uses (the running mod's first); logs it. Once.
 void LoadBakedTerrainLight();

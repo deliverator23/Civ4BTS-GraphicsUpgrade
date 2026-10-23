@@ -1,5 +1,6 @@
-// [terrain tiles] Patch, Sets, Set1..Set8: heightmap tile sets by terrain, and hill/peak variants (terrain_sets.h). The
-// INI and the log number sets from 1 (Set1 = set 0 here); everything inside is 0-based.
+// [terrain tiles] TilePicker, TileGroups, TileGroup1..8: heightmap tile groups by terrain, and hill/peak variants
+// (terrain_sets.h). A tile group is a "set" here: the INI and the log number them from 1 (TileGroup1 = set 0 here);
+// everything inside is 0-based.
 //
 // Three hooks in the running Civ4BeyondSword.exe, written only if every site holds BtS's own bytes:
 //   - the variant picker jumps to PickerThunk (ECX = x, EAX = y, [ESP+4] = lo, [ESP+8] = hi, caller cleans);
@@ -7,7 +8,7 @@
 //     tile in EDX / ESI.
 // Map, plot and terrain come from the game DLL's exports (thiscall, called as fastcall with an unused EDX).
 //
-// [terrain tiles] HillField (experimental, hill_field.h): the hill lookup hands back a tile cut from one map-wide
+// [terrain tiles] HillStamps (experimental, hill_field.h): the hill lookup hands back a tile cut from one map-wide
 // field of hill stamps instead of hill1_<mask>.
 #include "common.h"
 #include "hill_field.h"
@@ -63,7 +64,8 @@ struct GameDll
         ok = getInstance && getMap && width && height && wrapX && wrapY && plot && terrainType && numTerrains &&
              terrainInfo && type;
         if (!ok)
-            Log::Write("terrain tile sets: the game DLL lacks the map/plot/terrain exports; every square uses set 0");
+            Log::Write("terrain tile groups: the game DLL lacks the map/plot/terrain exports; every square uses "
+                       "TileGroup1");
         return ok;
     }
     void* Map() { return getMap(getInstance(), nullptr); }
@@ -73,7 +75,8 @@ GameDll g_dll;
 uint32_t g_base = 0;
 int g_sets = 1;
 const int kUnlisted = -2;
-std::vector<int> g_terrainSet;  // by TerrainTypes: the set (0-based; the INI's Set1 is 0) it's listed in, or kUnlisted
+// by TerrainTypes: the set (0-based; the INI's TileGroup1 is 0) it's listed in, or kUnlisted
+std::vector<int> g_terrainSet;
 bool g_tableBuilt = false;
 unsigned g_picks[TileSets::kMaxSets] = {}, g_hillVariants[16] = {}, g_peakVariants[16] = {};
 unsigned g_logged = 0;
@@ -131,7 +134,7 @@ void BuildTable()
         const char* name = g_dll.type(g_dll.terrainInfo(gc, nullptr, t), nullptr);
         for (int s = 0; s < g_sets && name; ++s)
         {
-            // Set<s + 1>: terrain types separated by commas, semicolons or spaces, any case
+            // TileGroup<s + 1>: terrain types separated by commas, semicolons or spaces, any case
             std::string list;
             for (wchar_t c : g_config.tileSetTerrains[s])
                 list += static_cast<char>(towupper(c));
@@ -144,11 +147,11 @@ void BuildTable()
             if (g_terrainSet[t] == kUnlisted && (" " + list + " ").find(" " + upper + " ") != std::string::npos)
             {
                 g_terrainSet[t] = s;
-                listed += (listed.empty() ? "" : ", ") + upper + " Set" + std::to_string(s + 1);
+                listed += (listed.empty() ? "" : ", ") + upper + " TileGroup" + std::to_string(s + 1);
             }
         }
     }
-    Log::Write("terrain tile sets: %d sets; %s; other land Set1, other water no vote", g_sets,
+    Log::Write("terrain tile groups: %d groups; %s; other land TileGroup1, other water no vote", g_sets,
                listed.empty() ? "no terrain listed" : listed.c_str());
 }
 
@@ -174,7 +177,7 @@ int SquareSet(int x, int y)
         if (t < 0 || t >= static_cast<int>(g_terrainSet.size()))
             continue;
         votes[k] = g_terrainSet[t];
-        if (votes[k] == kUnlisted)  // land listed nowhere: Set1; water listed nowhere doesn't vote
+        if (votes[k] == kUnlisted)  // land listed nowhere: TileGroup1; water listed nowhere doesn't vote
             votes[k] = g_dll.isWater && g_dll.isWater(plot, nullptr) ? -1 : 0;
     }
     return TileSets::Majority(votes, g_sets);
@@ -200,7 +203,7 @@ int RandAfter(unsigned seed)
 }
 }  // namespace
 
-// [terrain tiles] HillField: the map's hills as one field of stamps (hill_field.h). The engine stamps hills square by
+// [terrain tiles] HillStamps: the map's hills as one field of stamps (hill_field.h). The engine stamps hills square by
 // square, row by row (a whole map from GenerateTerrainHeights; the four squares round a changed plot after that), so
 // whenever a call comes before the last one, a new pass has begun: the map's hills are read again and the fit brought
 // up to date before any of its tiles is cut. The tile is the engine's to read at once, so one serves every call.
@@ -249,7 +252,7 @@ void* HillFieldTile(int mask, int x, int y, void* stock)
     if (!g_dll.Resolve() || !g_dll.isHills)
     {
         if (!g_hillLoggedOff)
-            Log::Write("terrain tiles: HillField off: the game DLL lacks CvPlot::isHills");
+            Log::Write("terrain tiles: HillStamps off: the game DLL lacks CvPlot::isHills");
         g_hillLoggedOff = true;
         return nullptr;
     }
@@ -257,7 +260,7 @@ void* HillFieldTile(int mask, int x, int y, void* stock)
     {
         g_hillStampsSet = true;
         g_hillField.SetStamps(HillField::SyntheticStamps());
-        Log::Write("terrain tiles: HillField on, with %u made-up stamps (synthetic_*; gain %.2f)",
+        Log::Write("terrain tiles: HillStamps on, with %u made-up stamps (synthetic_*; gain %.2f)",
                    static_cast<unsigned>(g_hillField.Stamps().size()), g_hillField.Gain());
     }
     int w = 0, h = 0, bpp = 0;
@@ -437,14 +440,14 @@ void ApplyTileSets()
         c = static_cast<wchar_t>(towlower(c));
     if (name != L"civ4beyondsword.exe")
     {
-        Log::Write("terrain tile sets: not applied: %ls isn't Civ4BeyondSword.exe", name.c_str());
+        Log::Write("terrain tile groups: not applied: %ls isn't Civ4BeyondSword.exe", name.c_str());
         return;
     }
     const uint8_t* base = reinterpret_cast<const uint8_t*>(GetModuleHandleW(nullptr));
     const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS32*>(base + reinterpret_cast<const IMAGE_DOS_HEADER*>(base)->e_lfanew);
     if (reinterpret_cast<uint32_t>(base) != 0x400000)
     {
-        Log::Write("terrain tile sets: not applied: the exe is loaded at %p, not 0x400000", base);
+        Log::Write("terrain tile groups: not applied: the exe is loaded at %p, not 0x400000", base);
         return;
     }
     g_base = reinterpret_cast<uint32_t>(base);
@@ -468,19 +471,19 @@ void ApplyTileSets()
         }
     });
     if (!why.empty())
-        Log::Write("terrain tile sets: not applied: %s (exe timestamp 0x%08lx)", why.c_str(),
+        Log::Write("terrain tile groups: not applied: %s (exe timestamp 0x%08lx)", why.c_str(),
                    static_cast<unsigned long>(nt->FileHeader.TimeDateStamp));
     else
-        Log::Write("terrain tile sets: %d of %u code sites written (picker, hill and peak lookups, coast atlas and wave "
-                   "models); %d set%s; coast art per class: atlas cells %d,%d,%d,%d, wave models %d,%d,%d,%d",
+        Log::Write("terrain tile groups: %d of %u code sites written (picker, hill and peak lookups, coast atlas and wave "
+                   "models); %d tile group%s; coast art per class: atlas cells %d,%d,%d,%d, wave models %d,%d,%d,%d",
                    written, static_cast<unsigned>(sites.size()), g_sets, g_sets == 1 ? "" : "s",
                    g_config.coastAtlasCells[0], g_config.coastAtlasCells[1], g_config.coastAtlasCells[2],
                    g_config.coastAtlasCells[3], g_config.coastWaveModels[0], g_config.coastWaveModels[1],
                    g_config.coastWaveModels[2], g_config.coastWaveModels[3]);
 }
 
-// [terrain tiles] LandBlend1..8 (terrain_sets.h): the engine's blend pick, then on a square with no water corner a land
-// entry for terrains that have them.
+// [terrain tiles] StandardBlendOnLand(1..8) (terrain_sets.h): the engine's blend pick, then on a square with no water
+// corner a land entry for terrains that have them.
 extern "C" uint32_t g_blendPickFn = 0;  // FUN_00479920, called by the thunk below
 namespace
 {
@@ -621,7 +624,8 @@ extern "C" __declspec(naked) void LandBlendThunk()
 
 void ApplyLandBlends()
 {
-    // LandBlend1..8 (the full form) first: they win over the short form's standard layout for the same terrain.
+    // StandardBlendOnLand1..8 (the full form) first: they win over the short form's standard layout for the same
+    // terrain.
     for (const std::wstring& w : g_config.landBlends)
     {
         if (w.empty())
@@ -719,10 +723,11 @@ std::string TileSetsSummary()
     if (total == g_logged)
         return "";
     g_logged = total;
-    // Numbered from 1, as the INI numbers the sets (Set1, Set2...) and the files (hill1_1-15 is variant 1).
-    std::string s = "terrain tile sets: tiles picked by set:";
+    // Numbered from 1, as the INI numbers the tile groups (TileGroup1, TileGroup2...) and the files (hill1_1-15 is
+    // variant 1).
+    std::string s = "terrain tile groups: tiles picked by tile group:";
     for (int k = 0; k < g_sets; ++k)
-        s += " Set" + std::to_string(k + 1) + "=" + std::to_string(g_picks[k]);
+        s += " TileGroup" + std::to_string(k + 1) + "=" + std::to_string(g_picks[k]);
     auto variants = [&](const char* what, const unsigned* counts) {
         s += std::string("; ") + what + " variants:";
         for (int v = 0; v < 16; ++v)
@@ -733,7 +738,7 @@ std::string TileSetsSummary()
     variants("peak", g_peakVariants);
     s += "; by list (";
     for (int k = 0; k < g_sets; ++k)
-        s += (k ? "/Set" : "Set") + std::to_string(k + 1);
+        s += (k ? "/TileGroup" : "TileGroup") + std::to_string(k + 1);
     s += "):";
     for (int l = 0; l < kLists; ++l)
     {
@@ -758,9 +763,10 @@ std::string TileSetsSummary()
     if (!g_setFlats.empty() && !g_setFlatsLogged)
     {
         g_setFlatsLogged = g_setFlats.size() >= 12;
-        s += "; flat squares not in Set1 (corner plots x,y to x+1,y+1):";
+        s += "; flat squares not in TileGroup1 (corner plots x,y to x+1,y+1):";
         for (const Square& q : g_setFlats)
-            s += " (" + std::to_string(q.x0) + "," + std::to_string(q.y0) + " Set" + std::to_string(q.set + 1) + ")";
+            s += " (" + std::to_string(q.x0) + "," + std::to_string(q.y0) + " TileGroup" + std::to_string(q.set + 1) +
+                 ")";
     }
     return s;
 }

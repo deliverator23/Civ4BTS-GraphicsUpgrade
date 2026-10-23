@@ -1,4 +1,4 @@
-// Experimental ([terrain tiles] HillField, off by default): hills with coherent multi-plot shapes.
+// Experimental ([terrain tiles] HillStamps, off by default): hills with coherent multi-plot shapes.
 //
 // BtS stamps one heightmap tile per map square (the square between four plot centres), chosen by which of its four
 // corner plots are hills: hill1_<mask>, the same tile wherever that mask occurs. So a run of hills is a row of the

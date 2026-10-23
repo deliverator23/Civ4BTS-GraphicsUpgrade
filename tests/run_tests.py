@@ -263,8 +263,8 @@ def main():
     shutil.copyfile(DLL, os.path.join(TEST, 'd3d9.dll'))
     with TestIni(os.path.join(TEST, 'GraphicsUpgrade.ini')) as f:
         f.write(f'[general]\nOutputDir={OUT}\nGames=*\n[debug]\nTraces=1\nDumpShaders=1\nTerrainVertsPerPlot=33\n'
-                f'[terrain tiles]\nPatch=1\nSets=2\nSet2=TERRAIN_DESERT\n'
-                f'LandBlend1=TERRAIN_GRASS: 8,0; 1,0; 2,0; 6,0; 13,0; 10,0; 3,0; 5,0; 9,0; 7,0; 4,0; 12,0; 11,0; 14,0\n'
+                f'[terrain tiles]\nTilePicker=1\nTileGroups=2\nTileGroup2=TERRAIN_DESERT\n'
+                f'StandardBlendOnLand1=TERRAIN_GRASS: 8,0; 1,0; 2,0; 6,0; 13,0; 10,0; 3,0; 5,0; 9,0; 7,0; 4,0; 12,0; 11,0; 14,0\n'
                 f'[trace]\nAutoFrame=2\nFrames=1\nHashTextures=1\n')
     request = os.path.join(OUT, 'test_proxy', 'trace.request')
     out = run([os.path.join(TEST, 'test_proxy.exe'), os.path.join(TEST, 'd3d9.dll'), '25', request])
@@ -311,9 +311,9 @@ def main():
     check(tp.get('maskflat') == 1 and tp.get('maskramp') == 1,
           'a 16x16 mask resampled to 64x64: flat stays flat; a ramp stays an evenly spaced ramp, the same either way round')
 
-    print('terrain tile sets ([terrain tiles], experimental):')
-    check("terrain tile sets: not applied: test_proxy.exe isn't Civ4BeyondSword.exe" in log,
-          'not applied outside BtS (the harness ran with Patch=1, Sets=2)')
+    print('terrain tile groups ([terrain tiles], experimental):')
+    check("terrain tile groups: not applied: test_proxy.exe isn't Civ4BeyondSword.exe" in log,
+          'not applied outside BtS (the harness ran with TilePicker=1, TileGroups=2)')
     sout = run([os.path.join(TEST, 'test_proxy.exe'), 'tilesets'])
     m = re.search(r'^TILESETS (ranges.*)$', sout, re.M)
     ts = {k: int(v) for k, v in (kv.split('=') for kv in m.group(1).split())} if m else {}
@@ -327,26 +327,27 @@ def main():
     check(ts.get('refused') == 1 and 'unexpected bytes at +0x78e20' in sout,
           'one site with other bytes (another build): nothing written')
     check(ts.get('landparse') == 1 and ts.get('landbad') == 1,
-          'LandBlend: "TERRAIN_X: 14 masks of tile,rotation entries" read (several entries a mask allowed); too few or '
-          'too many masks, a bad rotation or no terrain refused')
-    check(ts.get('landsites') == 1, "LandBlend: the terrain layers' three calls to the blend pick sent to the thunk")
+          'StandardBlendOnLand1..8: "TERRAIN_X: 14 masks of tile,rotation entries" read (several entries a mask '
+          'allowed); too few or too many masks, a bad rotation or no terrain refused')
+    check(ts.get('landsites') == 1, "StandardBlendOnLand: the terrain layers' three calls to the blend pick sent to the thunk")
     check(ts.get('landshort') == 1,
-          'LandBlend=TERRAIN_A, TERRAIN_B (the short form): names in any case and separators, each given BtS\'s standard '
-          'layout, the same entries as the full form spelled out')
+          'StandardBlendOnLand=TERRAIN_A, TERRAIN_B (the short form): names in any case and separators, each given '
+          'BtS\'s standard layout, the same entries as the full form spelled out')
     check(ts.get('mixed') == 1,
-          'LandBlend, layer by layer: all-land squares take land entries; a coast with one land terrain keeps its paired '
-          'pick; a coast of two land terrains has its lowest land layer re-picked for the whole land mask and the '
-          'higher ones take land entries; untouched when the lowest land terrain has no list or is drawn whole')
+          'StandardBlendOnLand, layer by layer: all-land squares take land entries; a coast with one land terrain '
+          'keeps its paired pick; a coast of two land terrains has its lowest land layer re-picked for the whole land '
+          'mask and the higher ones take land entries; untouched when the lowest land terrain has no list or is drawn '
+          'whole')
     check(ts.get('overlays') == 1,
-          'LandBlend, hill and peak layers (at no corner): land entries on all land; on a coast, covering part of the '
-          "land, re-picked for the whole land mask (Mesa paints the cliff); covering all of it, or without a list, the "
-          "engine's pick")
+          'StandardBlendOnLand, hill and peak layers (at no corner): land entries on all land; on a coast, covering '
+          "part of the land, re-picked for the whole land mask (Mesa paints the cliff); covering all of it, or without "
+          "a list, the engine's pick")
     check("terrain land blends: not applied: test_proxy.exe isn't Civ4BeyondSword.exe" in log,
-          'LandBlend: not applied outside BtS (the harness ran with LandBlend1 set)')
+          'StandardBlendOnLand: not applied outside BtS (the harness ran with StandardBlendOnLand1 set)')
 
-    print('hill field ([terrain tiles] HillField, experimental, off by default):')
+    print('hill field ([terrain tiles] HillStamps, experimental, off by default):')
     shipped = open(os.path.join(ROOT, 'GraphicsUpgrade.ini'), encoding='utf-8', errors='replace').read()
-    check(not re.search(r'^\s*HillField\s*=\s*[1-9]', shipped, re.M), 'the shipped INI leaves HillField off')
+    check(not re.search(r'^\s*HillStamps\s*=\s*[1-9]', shipped, re.M), 'the shipped INI leaves HillStamps off')
     hout = run([os.path.join(TEST, 'test_proxy.exe'), 'hillfield'])
     for line in hout.splitlines():
         if line.startswith('HILLFIELD placements'):

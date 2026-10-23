@@ -1,6 +1,6 @@
-// Terrain tile sets ([terrain tiles] Sets, Set1..Set8; the INI numbers them from 1, everything here is 0-based, so
-// the INI's Set1 is set 0): which heightmap tile variants a map square may use, by the terrain
-// of its four corner plots, and variants for hills and peaks.
+// Terrain tile groups ([terrain tiles] TileGroups, TileGroup1..8; a group is a "set" here: the INI numbers them from 1,
+// everything here is 0-based, so the INI's TileGroup1 is set 0): which heightmap tile variants a map square may use, by
+// the terrain of its four corner plots, and variants for hills and peaks.
 //
 // The engine (Civ4BeyondSword.exe, Steam 3.1.9.0) picks a flat, ocean or coast tile for each square at random from
 // its list, with a picker that is deterministic per square (FUN_00477ef0: srand(x * 0x1C81 + y * 0xB5D); rand() %
@@ -39,7 +39,7 @@ inline Range SetRange(int count, int sets, int set)
 }
 
 // The set most of a square's corner plots belong to (votes: a set, or -1 for a plot that doesn't vote); ties go to the
-// lower set; no votes, set 0 (the INI's Set1).
+// lower set; no votes, set 0 (the INI's TileGroup1).
 inline int Majority(const int votes[4], int sets)
 {
     int counts[kMaxSets] = {};
@@ -104,8 +104,8 @@ const uint32_t kCoastClassFn = 0x788e0;  // FUN_004788e0: a coast square's varia
 const uint32_t kAtlasCall = 0xcdec2;     // its call for the transition atlas's cell (FUN_004cde80)
 const uint32_t kWaveCall = 0x211a18;     // its call for the wave model's number (FUN_006119c0)
 
-// [terrain tiles] LandBlend1..8: a terrain's blend entries on squares with no water corner. The engine picks each
-// terrain layer's blend entry for a square from its art define's TextureBlend<mask> list (FUN_00479920: mask and
+// [terrain tiles] StandardBlendOnLand1..8: a terrain's blend entries on squares with no water corner. The engine picks
+// each terrain layer's blend entry for a square from its art define's TextureBlend<mask> list (FUN_00479920: mask and
 // &tile, &rotation, x, y on the stack, popped by RET 0x14; EAX = the terrain; called from the layer records'
 // builder, FUN_004795b0, at the three sites below). A list paired with the coast heightmap tiles (painted coasts)
 // would put a coast's cliff on land-to-land borders too; with a land list, those squares take an entry from it
@@ -113,11 +113,12 @@ const uint32_t kWaveCall = 0x211a18;     // its call for the wave model's number
 const uint32_t kBlendPick = 0x79920;
 const uint32_t kBlendPickCalls[3] = {0x796b8, 0x79787, 0x79845};
 
-// The settings. LandBlend=TERRAIN_A, TERRAIN_B...: those terrains take BtS's standard blend layout on all-land squares
-// (the atlas tile painted for each corner arrangement, unturned: the layout of BtS's own Grass and most terrains, so
-// what their TextureBlend lists held before they were paired with the coast tiles). LandBlend1..8 for an atlas laid
-// out otherwise: "TERRAIN_X: <mask 1>; <mask 2>; ... <mask 14>", each mask one or more "tile,rotation" entries
-// separated by spaces (as the XML's TextureBlend lists; rotation 0, 90, 180 or 270); these win over the short form.
+// The settings. StandardBlendOnLand=TERRAIN_A, TERRAIN_B...: those terrains take BtS's standard blend layout on all-land
+// squares (the atlas tile painted for each corner arrangement, unturned: the layout of BtS's own Grass and most
+// terrains, so what their TextureBlend lists held before they were paired with the coast tiles).
+// StandardBlendOnLand1..8 for an atlas laid out otherwise: "TERRAIN_X: <mask 1>; <mask 2>; ... <mask 14>", each mask
+// one or more "tile,rotation" entries separated by spaces (as the XML's TextureBlend lists; rotation 0, 90, 180 or 270);
+// these win over the short form.
 struct LandBlend
 {
     std::string terrain;                         // upper case

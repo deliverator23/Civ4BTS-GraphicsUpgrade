@@ -497,11 +497,12 @@ void LoadConfig()
     g_config.tracesEnabled = IniInt(ini, L"debug", L"Traces", 0) != 0;
     g_config.waterTime = static_cast<float>(_wtof(IniString(ini, L"debug", L"WaterTime", L"-1").c_str()));
     g_config.terrainVertsPerPlot = IniInt(ini, L"debug", L"TerrainVertsPerPlot", 17);
-    g_config.tileSetsPatch = IniInt(ini, L"terrain tiles", L"Patch", 0) != 0;
-    g_config.hillField = IniInt(ini, L"terrain tiles", L"HillField", 0) != 0;
-    g_config.tileSets = (std::max)(1, (std::min)(8, IniInt(ini, L"terrain tiles", L"Sets", 1)));
-    for (int s = 0; s < 8; ++s)  // the INI numbers sets from 1: Set1 is set 0
-        g_config.tileSetTerrains[s] = IniString(ini, L"terrain tiles", (L"Set" + std::to_wstring(s + 1)).c_str(), L"");
+    g_config.tileSetsPatch = IniInt(ini, L"terrain tiles", L"TilePicker", 0) != 0;
+    g_config.hillField = IniInt(ini, L"terrain tiles", L"HillStamps", 0) != 0;
+    g_config.tileSets = (std::max)(1, (std::min)(8, IniInt(ini, L"terrain tiles", L"TileGroups", 1)));
+    for (int s = 0; s < 8; ++s)  // the INI numbers tile groups from 1: TileGroup1 is set 0
+        g_config.tileSetTerrains[s] =
+            IniString(ini, L"terrain tiles", (L"TileGroup" + std::to_wstring(s + 1)).c_str(), L"");
     auto fourInts = [&](const wchar_t* key, int* out) {
         int v[4];
         if (swscanf_s(IniString(ini, L"terrain tiles", key, L"").c_str(), L"%d,%d,%d,%d", &v[0], &v[1], &v[2], &v[3]) == 4)
@@ -511,8 +512,9 @@ void LoadConfig()
     fourInts(L"CoastAtlasCells", g_config.coastAtlasCells);
     fourInts(L"CoastWaveModels", g_config.coastWaveModels);
     for (int k = 0; k < 8; ++k)
-        g_config.landBlends[k] = IniString(ini, L"terrain tiles", (L"LandBlend" + std::to_wstring(k + 1)).c_str(), L"");
-    g_config.landBlendTerrains = IniString(ini, L"terrain tiles", L"LandBlend", L"");
+        g_config.landBlends[k] =
+            IniString(ini, L"terrain tiles", (L"StandardBlendOnLand" + std::to_wstring(k + 1)).c_str(), L"");
+    g_config.landBlendTerrains = IniString(ini, L"terrain tiles", L"StandardBlendOnLand", L"");
     g_config.traceKey = IniKey(ini, L"trace", L"Key", '9');
     std::wstring mods = IniString(ini, L"general", L"KeyModifiers", L"ctrl+shift");
     for (auto& c : mods)
