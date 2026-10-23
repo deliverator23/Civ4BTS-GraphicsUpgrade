@@ -82,6 +82,12 @@ ProxyDevice::ProxyDevice(IDirect3DDevice9* real, ProxyD3D9* parent)
     if (m_shadows.enabled)
         Log::Write("sun shadows on from start (size %u, max radius %g)", g_config.shadowSize, g_config.shadowMaxRadius);
     m_refl.needed = m_water.enabled || m_refl.overlay;
+    // [terrain tiles] PlotStamps<n>HideModels: the models the plot stamps stand in for (any game: the stamps are made
+    // by the terrain hooks, not the effects).
+    const std::wstring hidden = PlotStampsHiddenModels();
+    m_hideModels = !hidden.empty();
+    if (m_hideModels)
+        m_hiddenModels.Load(hidden, "[terrain tiles] PlotStamps<n>HideModels");
     if (!m_effects)
         Log::Write("effects off in this game (game id %s not in Games=%ls); passing everything through",
                    Log::GameId().c_str(), g_config.games.c_str());
@@ -454,6 +460,7 @@ HRESULT ProxyDevice::CreateTexture(UINT Width, UINT Height, UINT Levels, DWORD U
         m_shadows.ForgetTexture(*ppTexture);  // a new texture at a possibly reused address
         m_detail.ForgetTexture(*ppTexture);
         m_light.ForgetTexture(*ppTexture);
+        m_hiddenModels.Forget(*ppTexture);
     }
     if (Usage & (D3DUSAGE_RENDERTARGET | D3DUSAGE_DEPTHSTENCIL))
         Log::Write("CreateTexture %ux%u levels %u usage 0x%x fmt %u pool %u -> 0x%08x tex %s", Width, Height, Levels,
@@ -763,9 +770,27 @@ void ProxyDevice::Ghost(Redraw redraw)
     ++m_frameGhosts;
 }
 
+bool ProxyDevice::HiddenModel()
+{
+    IDirect3DBaseTexture9* base = nullptr;
+    if (FAILED(m_real->GetTexture(0, &base)) || !base)
+        return false;
+    const bool hidden = m_hiddenModels.Contains(base);
+    base->Release();
+    if (hidden && !m_hiddenLogged)
+    {
+        m_hiddenLogged = true;
+        Log::Write("terrain tiles: plot stamps on: models drawn with a PlotStamps<n>HideModels texture left out");
+    }
+    return hidden;
+}
+
 template <class Draw>
 HRESULT ProxyDevice::Dispatch(Draw draw)
 {
+    // [terrain tiles] PlotStamps<n>HideModels: not drawn at all (nor their shadows) while the stamps stand in for them.
+    if (m_hideModels && PlotStampsOn() && HiddenModel())
+        return D3D_OK;
     // Timing: all of this draw's handling (the game's own plain draw is taken off below).
     struct DrawTimer
     {

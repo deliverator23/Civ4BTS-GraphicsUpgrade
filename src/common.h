@@ -57,6 +57,20 @@ struct Config
         float height = 1.0f;
     };
     JigsawSet jigsaw[8];
+    // PlotStampsNTerrains=<terrain types>, N 1..8 (experimental, plot_stamps.h; empty = off): every plot of those
+    // terrains gets one of the one-plot pieces in PlotStampsNFolder (as JigsawPiecesNFolder), added onto the four
+    // squares round it on top of what the engine stamps there. PlotStampsNFeatures=<feature types>: the Nth feature
+    // listed picks the Nth piece (no listed feature on the plot: picked by plot). PlotStampsNHideModels: textures
+    // (TextureList entries) whose models aren't drawn while the stamps are on. PlotStampsNHeight: grid units a height
+    // level (not set: pieces.xml's fHeightScale in world units, over the landscape's fZScale). A plot is in the first N
+    // listing its terrain.
+    struct PlotStampSet
+    {
+        std::wstring terrains, folder, features, hideModels;
+        bool hasHeight = false;
+        float height = 1.0f;
+    };
+    PlotStampSet plotStamps[8];
     int tileSets = 1;
     std::wstring tileSetTerrains[8];
     // Coast art per class (one land corner, two side by side, two diagonal, three): cells of the water's transition
@@ -230,6 +244,10 @@ std::string LandBlendsSummary();  // "" if nothing new since the last call
 // "terrain tile groups: ..." (picks by tile group, hill/peak variants used) when they changed since the last call,
 // else "".
 std::string TileSetsSummary();
+// [terrain tiles] PlotStamps1..8: true once a set's stamps are read and going on the map (terrain_sets.cpp); every set's
+// HideModels entries, joined with ';' (TextureList entries).
+bool PlotStampsOn();
+std::wstring PlotStampsHiddenModels();
 // The Baked* light the INI leaves out, from the SunLight.nif the game uses (the running mod's first); logs it. Once.
 void LoadBakedTerrainLight();
 // Folder the proxy DLL was loaded from (the game folder), without a trailing backslash.

@@ -265,6 +265,7 @@ def main():
         f.write(f'[general]\nOutputDir={OUT}\nGames=*\n[debug]\nTraces=1\nDumpShaders=1\nTerrainVertsPerPlot=33\n'
                 f'[terrain tiles]\nTilePicker=1\nTileGroups=2\nTileGroup2=TERRAIN_DESERT\n'
                 f'StandardBlendOnLand1=TERRAIN_GRASS: 8,0; 1,0; 2,0; 6,0; 13,0; 10,0; 3,0; 5,0; 9,0; 7,0; 4,0; 12,0; 11,0; 14,0\n'
+                'PlotStamps1Terrains=TERRAIN_GRASS\nPlotStamps1HideModels=Art\\NoSuchFolder\\peak_single.dds\n'
                 f'[trace]\nAutoFrame=2\nFrames=1\nHashTextures=1\n')
     request = os.path.join(OUT, 'test_proxy', 'trace.request')
     out = run([os.path.join(TEST, 'test_proxy.exe'), os.path.join(TEST, 'd3d9.dll'), '25', request])
@@ -412,6 +413,24 @@ def main():
     check(js.get('hugecut', 0) > 0 and js.get('fitms', 9999) + js.get('cutms', 9999) < 4000,
           f"a Huge map ({js.get('hugeplots')} plots in a set): placed in {js.get('fitms')} ms, {js.get('hugecut')} "
           f"squares cut at 64x64 in {js.get('cutms')} ms")
+
+    print('plot stamps ([terrain tiles] PlotStamps1..8, experimental, off by default):')
+    check(not re.search(r'^\s*PlotStamps[1-8]Terrains\s*=\s*\S', shipped, re.M), 'the shipped INI sets no plot stamps')
+    check(r'settings: [terrain tiles] PlotStamps<n>HideModels: Art\NoSuchFolder\peak_single.dds: no .dds textures '
+          r'found' in log, 'PlotStamps1HideModels read as a texture list (the harness ran with one that finds nothing)')
+    pout = run([os.path.join(TEST, 'test_proxy.exe'), 'plotstamps'])
+    m = re.search(r'^PLOTSTAMPS (pick=.*)$', pout, re.M)
+    ps = {k: int(v) for k, v in (kv.split('=') for kv in m.group(1).split())} if m else {}
+    check(ps.get('pick') == 1, "a plot's stamp: the Nth listed feature's the Nth piece (wrapping), else picked by "
+          'plot, the same every time')
+    check(ps.get('orient') == 1, "a stamp stands unturned on its plot: its heightmap's north-west on the plot's "
+          "north-west, its centre on the plot's centre, nothing past its plot and the one round it")
+    check(ps.get('exact') == 1 and ps.get('reached') == 1 and ps.get('squares') == 1 and ps.get('peak') == 1,
+          'the four squares round the plot each get their part of the stamp (sampled where the engine lays each '
+          'height, 64 and 16 per plot), its full height in grid units')
+    check(ps.get('combine') == 1, 'stamps on neighbouring plots combine by max')
+    check(ps.get('clip') == 1, "added onto the engine's heights (with a jigsaw piece's under it), clamped at 255; "
+          'the samples clipped there counted (the headroom the stamps lack)')
 
     print('terrain grid, partial updates:')
     cout = run([os.path.join(TEST, 'test_proxy.exe'), 'terraincells'])

@@ -521,6 +521,19 @@ void LoadConfig()
         j.hasHeight = !height.empty();
         j.height = j.hasHeight ? static_cast<float>(_wtof(height.c_str())) : 1.0f;
     }
+    for (int s = 0; s < 8; ++s)  // PlotStamps1..8
+    {
+        const std::wstring n = L"PlotStamps" + std::to_wstring(s + 1);
+        Config::PlotStampSet& p = g_config.plotStamps[s];
+        p = Config::PlotStampSet();
+        p.terrains = IniString(ini, L"terrain tiles", (n + L"Terrains").c_str(), L"");
+        p.folder = IniString(ini, L"terrain tiles", (n + L"Folder").c_str(), L"");
+        p.features = IniString(ini, L"terrain tiles", (n + L"Features").c_str(), L"");
+        p.hideModels = IniString(ini, L"terrain tiles", (n + L"HideModels").c_str(), L"");
+        const std::wstring height = IniString(ini, L"terrain tiles", (n + L"Height").c_str(), L"");
+        p.hasHeight = !height.empty();
+        p.height = p.hasHeight ? static_cast<float>(_wtof(height.c_str())) : 1.0f;
+    }
     g_config.tileSets = (std::max)(1, (std::min)(8, IniInt(ini, L"terrain tiles", L"TileGroups", 1)));
     for (int s = 0; s < 8; ++s)  // the INI numbers tile groups from 1: TileGroup1 is set 0
         g_config.tileSetTerrains[s] =

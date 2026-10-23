@@ -17,6 +17,7 @@
 #include <cstdio>
 #include <cstring>
 #include <limits>
+#include <set>
 #include <string>
 #include <tuple>
 #include <vector>
@@ -42,6 +43,7 @@
 #include "water_vs.h"
 
 #include "../src/jigsaw.h"
+#include "../src/plot_stamps.h"
 #include "../src/hill_field.h"
 #include "../src/terrain_cells.h"
 #include "../src/terrain_patch.h"
@@ -3417,8 +3419,172 @@ static int JigsawTest(const wchar_t* folder)
     return 0;
 }
 
+// test_proxy plotstamps [pieces folder]: plot stamps (plot_stamps.h) with a made-up piece (or, given a folder with
+// pieces.xml, also reports its pieces). Prints "PLOTSTAMPS name=value ..." for run_tests.py.
+static int PlotStampsTest(const wchar_t* folder)
+{
+    using namespace PlotStamps;
+    // the pick: the Nth listed feature the Nth piece (wrapping past the pieces), else by plot
+    const std::vector<int> features = {10, -1, 12, 13};  // -1: a name the game doesn't have keeps its place
+    std::set<int> used;
+    bool steady = true, inRange = true;
+    for (int x = 0; x < 20; ++x)
+        for (int y = 0; y < 10; ++y)
+        {
+            const int k = Pick(-1, features, 3, x, y);
+            used.insert(k);
+            inRange = inRange && k >= 0 && k < 3;
+            steady = steady && Pick(7, features, 3, x, y) == k;  // an unlisted feature: by plot too
+        }
+    const bool pick = Pick(10, features, 3, 4, 4) == 0 && Pick(12, features, 3, 4, 4) == 2 &&
+                      Pick(13, features, 3, 4, 4) == 0 && Pick(10, features, 0, 4, 4) == -1 && used.size() == 3 &&
+                      steady && inRange;
+
+    // a one-plot piece, 64 pixels a plot (128 across: the plot's centre and one plot round it), a cone of 90 levels at
+    // the centre, 0.45 plots across its foot, with a step on its north-west flank
+    const int w = 128;
+    std::vector<uint16_t> px(static_cast<size_t>(w) * w, 0);
+    for (int r = 0; r < w; ++r)
+        for (int c = 0; c < w; ++c)
+        {
+            const float X = -1 + c / 64.0f, Y = 1 - (r + 1) / 64.0f;  // where the pieces' pixels lie (jigsaw.h)
+            const float d = std::sqrt(X * X + Y * Y);
+            float v = d < 0.45f ? 90.0f * (1 - d / 0.45f) : 0.0f;
+            if (X < -0.1f && X > -0.3f && Y > 0.1f && Y < 0.3f)
+                v += 20;
+            px[static_cast<size_t>(r) * w + c] = static_cast<uint16_t>(v * 256);
+        }
+    Jigsaw::Piece piece;
+    std::string why;
+    const bool made = Jigsaw::MakePiece("cone.dds", {{0, 0}}, w, w, px, piece, why);
+    const bool orient = made && Sample(piece, -0.2f, 0.2f) > Sample(piece, 0.2f, -0.2f) + 15 * 256 &&
+                        std::fabs(Sample(piece, 0.2f, 0.2f) - Sample(piece, -0.2f, -0.2f)) < 64 &&
+                        Sample(piece, 0.2f, 0.2f) > 30 * 256 && Sample(piece, 0.7f, 0.0f) == 0 &&
+                        Sample(piece, 1.5f, 0.0f) == 0 && Sample(piece, 0, 0) > 85 * 256;
+
+    // the four squares round plot (5, 5) on a 12-high map: each pixel the stamp sampled there, in grid units (1/256 a
+    // value: a level a grid unit); together they hold the whole stamp
+    const int H = 12, px5 = 5, py5 = 5;
+    const float units = 1.0f / 256;
+    const Stamp one = {&piece, px5, py5, units};
+    const int squares[4][2] = {{px5 + 1, H - py5}, {px5, H - py5}, {px5, H - py5 - 1}, {px5 + 1, H - py5 - 1}};
+    bool exact = true, reached = true, inSquares = true;
+    float highest = 0;
+    for (int n : {64, 16})
+        for (const auto& sq : squares)
+        {
+            int corners[4][2];
+            TileSets::Corners(sq[0], sq[1], H, corners);
+            bool corner = false;
+            for (const auto& c : corners)
+                corner = corner || (c[0] == px5 && c[1] == py5);
+            inSquares = inSquares && corner;
+            std::vector<float> tile(static_cast<size_t>(n) * n);
+            Tile(&one, 1, sq[0], sq[1], H, n, tile.data());
+            float most = 0;
+            for (int j = 0; j < n; ++j)
+                for (int i = 0; i < n; ++i)
+                {
+                    const float X = sq[0] - 1 + static_cast<float>(i) / n, Y = H - sq[1] - static_cast<float>(j) / n;
+                    const float want = Sample(piece, X - px5, Y - py5) * units;
+                    exact = exact && std::fabs(tile[j * n + i] - want) < 1e-3f;
+                    most = (std::max)(most, tile[j * n + i]);
+                }
+            reached = reached && most > 1;
+            highest = (std::max)(highest, most);
+        }
+    const bool peak = highest > 85 && highest <= 90.01f;
+
+    // stamps side by side on square (6, 7) (corners TL (5, 5), TR (6, 5)), the cone and a 10-level slab over the whole
+    // plot round its own: the higher of the two everywhere (the cone over the slab near its top, the slab elsewhere)
+    Jigsaw::Piece slab;
+    Jigsaw::MakePiece("slab.dds", {{0, 0}}, w, w, std::vector<uint16_t>(static_cast<size_t>(w) * w, 10 * 256), slab, why);
+    const Stamp two[2] = {{&piece, 5, 5, units}, {&slab, 6, 5, units}};
+    std::vector<float> both(32 * 32), a(32 * 32), b(32 * 32);
+    Tile(two, 2, 6, H - 5, H, 32, both.data());
+    Tile(&two[0], 1, 6, H - 5, H, 32, a.data());
+    Tile(&two[1], 1, 6, H - 5, H, 32, b.data());
+    bool combine = true, aOver = false, bOver = false;
+    for (size_t i = 0; i < both.size(); ++i)
+    {
+        combine = combine && both[i] == (std::max)(a[i], b[i]);
+        aOver = aOver || (a[i] > b[i] && b[i] > 1);
+        bOver = bOver || (b[i] > a[i] && a[i] > 1);
+    }
+    combine = combine && aOver && bOver;
+
+    // added into the height bytes: where ground + stamp passes 255 the sample is clipped there, and counted
+    std::vector<uint8_t> cells(40 * 40, 200);
+    std::vector<float> tile(16 * 16), total(16 * 16);
+    Tile(&one, 1, px5, H - py5, H, 16, tile.data());
+    int over = 0, under = 0;
+    for (size_t i = 0; i < tile.size(); ++i)
+    {
+        total[i] = tile[i] + 1;  // e.g. a jigsaw piece's unit under it
+        over += tile[i] > 0.5f && 200 + std::lround(total[i]) > 255 ? 1 : 0;
+        under += tile[i] > 0.5f && 200 + std::lround(total[i]) <= 255 ? 1 : 0;
+    }
+    const int clipped = Clipped(cells.data(), 40, 40, 16, 16, 16, total.data(), tile.data());
+    const bool added = Jigsaw::AddTile(cells.data(), 40, 40, 16, 16, 16, total.data());
+    bool capped = true;
+    for (int j = 0; j < 16; ++j)
+        for (int i = 0; i < 16; ++i)
+        {
+            const int v = cells[(16 + j) * 40 + 16 + i];
+            capped = capped && v == (std::min)(255, 200 + static_cast<int>(std::lround(total[j * 16 + i])));
+        }
+    const bool clip = over > 0 && under > 0 && clipped == over && added && capped &&
+                      Clipped(cells.data(), 40, 40, 30, 30, 16, total.data(), tile.data()) == 0;  // off the grid
+
+    if (folder)
+    {
+        std::vector<uint8_t> bytes;
+        Jigsaw::PiecesXml xml;
+        std::string bad = "pieces.xml can't be read";
+        const bool real = JigsawReadFile(std::wstring(folder) + L"\\pieces.xml", bytes) &&
+                          Jigsaw::ParsePiecesXml(std::string(bytes.begin(), bytes.end()), xml, bad);
+        printf("PLOTSTAMPS pieces %ls: %s, fHeightScale %.2f\n", folder, real ? "pieces.xml read" : bad.c_str(),
+               xml.heightScale);
+        for (const Jigsaw::PieceFile& pf : xml.pieces)
+        {
+            std::vector<uint8_t> file;
+            std::vector<uint16_t> pixels;
+            int pw = 0, ph = 0;
+            Jigsaw::Piece p;
+            std::string pwhy = "can't be read";
+            if (pf.plots.size() == 1 &&
+                JigsawReadFile(std::wstring(folder) + L"\\" + std::wstring(pf.file.begin(), pf.file.end()), file) &&
+                Jigsaw::DecodeDds(file.data(), file.size(), pw, ph, pixels, pwhy) &&
+                Jigsaw::MakePiece(pf.file, pf.plots, pw, ph, std::move(pixels), p, pwhy))
+            {
+                // the stamp's foot: how far from the plot's centre it reaches, in plot widths
+                float tallest = 0, reach = 0;
+                for (int r = 0; r < p.h; ++r)
+                    for (int c = 0; c < p.w; ++c)
+                        if (const uint16_t v = p.pixels[static_cast<size_t>(r) * p.w + c])
+                        {
+                            tallest = (std::max)(tallest, v / 256.0f);
+                            reach = (std::max)(reach, (std::max)(std::fabs(p.west + (c + 0.5f) / p.ppp),
+                                                                 std::fabs(p.north - (r + 0.5f) / p.ppp)));
+                        }
+                printf("PLOTSTAMPS piece %s: %dx%d, %.0f pixels a plot, tallest %.1f levels, reaching %.2f plots from "
+                       "the plot's centre\n",
+                       pf.file.c_str(), p.w, p.h, p.ppp, tallest, reach);
+            }
+            else
+                printf("PLOTSTAMPS piece %s left out: %s\n", pf.file.c_str(),
+                       pf.plots.size() != 1 ? "not a one-plot layout" : pwhy.c_str());
+        }
+    }
+    printf("PLOTSTAMPS pick=%d orient=%d exact=%d reached=%d squares=%d peak=%d combine=%d clip=%d\n", pick, orient,
+           exact, reached, inSquares, peak, combine, clip);
+    return 0;
+}
+
 int wmain(int argc, wchar_t** argv)
 {
+    if (argc > 1 && wcscmp(argv[1], L"plotstamps") == 0)
+        return PlotStampsTest(argc > 2 ? argv[2] : nullptr);
     if (argc > 1 && wcscmp(argv[1], L"terrainpatch") == 0)
         return TerrainPatchTest();
     if (argc > 1 && wcscmp(argv[1], L"tilesets") == 0)

@@ -14,10 +14,14 @@
 // [terrain tiles] JigsawPieces1..8 (experimental, jigsaw.h): the base tile stamp (FUN_00478a90) is entered through
 // JigsawBaseThunk, which stamps a square touching a set's plots with those corners as the set says (water, land or as
 // they are), then adds the sets' fields.
+//
+// [terrain tiles] PlotStamps1..8 (experimental, plot_stamps.h): through the same thunk, the stamps on a square's corner
+// plots are added after its base tile too (on top of the jigsaw pieces' fields, where both reach a square).
 #include "common.h"
 #include "assets.h"
 #include "jigsaw.h"
 #include "hill_field.h"
+#include "plot_stamps.h"
 #include "terrain_sets.h"
 
 #include <algorithm>
@@ -36,6 +40,7 @@ struct GameDll
     using MemberArg = void*(__fastcall*)(void* self, void* unused, int a);
     using MemberArgs = void*(__fastcall*)(void* self, void* unused, int a, int b);
     using MemberStr = const char*(__fastcall*)(void* self, void* unused);
+    using MemberFloat = float(__fastcall*)(void* self, void* unused);
     GetInstance getInstance = nullptr;
     Member getMap = nullptr;
     MemberInt width = nullptr, height = nullptr, numTerrains = nullptr, terrainType = nullptr;
@@ -43,6 +48,10 @@ struct GameDll
     MemberArgs plot = nullptr;
     MemberArg terrainInfo = nullptr;
     MemberStr type = nullptr;
+    // optional: plot stamps (features, and the landscape's grid step in world units)
+    MemberInt featureType = nullptr, numFeatures = nullptr, activeLandscape = nullptr;
+    MemberArg featureInfo = nullptr, landscapeInfo = nullptr;
+    MemberFloat zScale = nullptr;
     bool tried = false, ok = false;
 
     bool Resolve()
@@ -68,6 +77,12 @@ struct GameDll
         numTerrains = reinterpret_cast<MemberInt>(get("?getNumTerrainInfos@CvGlobals@@QAEHXZ"));
         terrainInfo = reinterpret_cast<MemberArg>(get("?getTerrainInfo@CvGlobals@@QAEAAVCvTerrainInfo@@W4TerrainTypes@@@Z"));
         type = reinterpret_cast<MemberStr>(get("?getType@CvInfoBase@@QBEPBDXZ"));
+        featureType = reinterpret_cast<MemberInt>(get("?getFeatureType@CvPlot@@QBE?AW4FeatureTypes@@XZ"));
+        numFeatures = reinterpret_cast<MemberInt>(get("?getNumFeatureInfos@CvGlobals@@QAEHXZ"));
+        featureInfo = reinterpret_cast<MemberArg>(get("?getFeatureInfo@CvGlobals@@QAEAAVCvFeatureInfo@@W4FeatureTypes@@@Z"));
+        activeLandscape = reinterpret_cast<MemberInt>(get("?getActiveLandscapeID@CvGlobals@@QAEHXZ"));
+        landscapeInfo = reinterpret_cast<MemberArg>(get("?getLandscapeInfo@CvGlobals@@QAEAAVCvLandscapeInfo@@H@Z"));
+        zScale = reinterpret_cast<MemberFloat>(get("?getZScale@CvLandscapeInfo@@QBEMXZ"));
         ok = getInstance && getMap && width && height && wrapX && wrapY && plot && terrainType && numTerrains &&
              terrainInfo && type;
         if (!ok)
@@ -504,6 +519,227 @@ void JigsawSync()
     }
 }
 
+// [terrain tiles] PlotStamps1..8: a stamp on each plot of a set's terrains (plot_stamps.h), added with the jigsaw
+// pieces after the base tile stamp. A square's stamps come from its corner plots as they are when it's stamped.
+struct PlotStampRun
+{
+    std::string name;                   // "PlotStamps1"...
+    std::vector<Jigsaw::Piece> pieces;  // its one-plot pieces
+    std::vector<int> features;          // PlotStampsNFeatures as feature types, in order (-1: no such feature)
+    float units = 0;                    // grid units a pixel value
+};
+std::vector<PlotStampRun> g_plotStamps;  // the sets that run
+std::vector<int> g_plotStampOf;          // by TerrainTypes: the set (in g_plotStamps) its plots are in, or -1
+bool g_plotStampsRead = false;
+unsigned g_stampSquares = 0, g_stampClipped = 0, g_stampMisfit = 0;
+std::vector<float> g_stampTile;
+
+bool AnyPlotStamps()
+{
+    for (const auto& p : g_config.plotStamps)
+        if (!p.terrains.empty())
+            return true;
+    return false;
+}
+
+// An INI list's names (separated by commas, semicolons or spaces), upper case, in order.
+std::vector<std::string> ListNames(const std::wstring& list)
+{
+    std::vector<std::string> out;
+    std::string name;
+    for (wchar_t c : list + L" ")
+        if (c == ',' || c == ';' || c == ' ' || c == '\t')
+        {
+            if (!name.empty())
+                out.push_back(name);
+            name.clear();
+        }
+        else
+            name += static_cast<char>(towupper(c));
+    return out;
+}
+
+// The game's info types by index (terrains, features), upper case.
+std::vector<std::string> InfoNames(GameDll::MemberInt count, GameDll::MemberArg info)
+{
+    void* gc = g_dll.getInstance();
+    const int n = count(gc, nullptr);
+    std::vector<std::string> names(n > 0 ? n : 0);
+    for (int t = 0; t < n; ++t)
+    {
+        const char* name = g_dll.type(info(gc, nullptr, t), nullptr);
+        for (const char* c = name ? name : ""; *c; ++c)
+            names[t] += static_cast<char>(toupper(static_cast<unsigned char>(*c)));
+    }
+    return names;
+}
+
+// Every set's terrains, features and pieces, once; false if none can run (each one's trouble logged).
+bool PlotStampsReady()
+{
+    if (g_plotStampsRead)
+        return !g_plotStamps.empty();
+    g_plotStampsRead = true;
+    if (!AnyPlotStamps() || !g_dll.Resolve())
+        return false;
+    if (!g_dll.featureType || !g_dll.numFeatures || !g_dll.featureInfo)
+    {
+        Log::Write("terrain tiles: plot stamps off: the game DLL lacks CvPlot::getFeatureType or the feature infos");
+        return false;
+    }
+    // World units a grid step: the active landscape's fZScale (BtS's and Dune Wars' 1.0).
+    void* gc = g_dll.getInstance();
+    float zScale = 1.0f;
+    bool zRead = false;
+    if (g_dll.activeLandscape && g_dll.landscapeInfo && g_dll.zScale)
+        if (void* landscape = g_dll.landscapeInfo(gc, nullptr, g_dll.activeLandscape(gc, nullptr)))
+        {
+            const float z = g_dll.zScale(landscape, nullptr);
+            if (z > 0.001f && z < 1000.0f)
+                zScale = z, zRead = true;
+        }
+    const std::vector<std::string> terrainNames = InfoNames(g_dll.numTerrains, g_dll.terrainInfo);
+    const std::vector<std::string> featureNames = InfoNames(g_dll.numFeatures, g_dll.featureInfo);
+    auto find = [](const std::vector<std::string>& names, const std::string& name) {
+        const auto it = std::find(names.begin(), names.end(), name);
+        return it == names.end() ? -1 : static_cast<int>(it - names.begin());
+    };
+    g_plotStampOf.assign(terrainNames.size(), -1);
+    for (int s = 0; s < 8; ++s)
+    {
+        const Config::PlotStampSet& cfg = g_config.plotStamps[s];
+        if (cfg.terrains.empty())
+            continue;
+        PlotStampRun run;
+        run.name = "PlotStamps" + std::to_string(s + 1);
+        const char* set = run.name.c_str();
+        std::vector<int> terrains;
+        std::string listed;
+        for (const std::string& name : ListNames(cfg.terrains))
+        {
+            const int t = find(terrainNames, name);
+            if (t < 0)
+                Log::Write("terrain tiles: %s: no terrain %s", set, name.c_str());
+            else if (g_plotStampOf[t] >= 0 || std::find(terrains.begin(), terrains.end(), t) != terrains.end())
+                Log::Write("terrain tiles: %s: %s is already in an earlier PlotStamps<n>Terrains", set, name.c_str());
+            else
+            {
+                terrains.push_back(t);
+                listed += (listed.empty() ? "" : ", ") + name;
+            }
+        }
+        if (terrains.empty())
+        {
+            Log::Write("terrain tiles: %s off: no terrain of %ls to stamp", set, cfg.terrains.c_str());
+            continue;
+        }
+        if (cfg.folder.empty())
+        {
+            Log::Write("terrain tiles: %s off: no %sFolder set", set, set);
+            continue;
+        }
+        std::vector<uint8_t> bytes;
+        std::wstring from;
+        Jigsaw::PiecesXml xml;
+        std::string why = "can't be read";
+        if (!ReadPiecesFile(cfg.folder, "pieces.xml", bytes, from) ||
+            !Jigsaw::ParsePiecesXml(std::string(bytes.begin(), bytes.end()), xml, why))
+        {
+            Log::Write("terrain tiles: %s off: %ls: %s", set, from.c_str(), why.c_str());
+            continue;
+        }
+        int left = 0;
+        uint16_t highest = 0;
+        for (const Jigsaw::PieceFile& pf : xml.pieces)
+        {
+            std::vector<uint8_t> dds;
+            std::wstring at = cfg.folder + L"\\" + std::wstring(pf.file.begin(), pf.file.end());
+            std::vector<uint16_t> pixels;
+            int w = 0, h = 0;
+            Jigsaw::Piece p;
+            std::string bad = "can't be read";
+            if (pf.plots.size() != 1)
+                bad = "not a one-plot layout";
+            else if (ReadPiecesFile(cfg.folder, pf.file, dds, at) &&
+                     Jigsaw::DecodeDds(dds.data(), dds.size(), w, h, pixels, bad) &&
+                     Jigsaw::MakePiece(pf.file, pf.plots, w, h, std::move(pixels), p, bad))
+            {
+                for (uint16_t v : p.pixels)
+                    highest = (std::max)(highest, v);
+                run.pieces.push_back(std::move(p));
+                continue;
+            }
+            if (left++ < 5)
+                Log::Write("terrain tiles: %s: piece %ls left out: %s", set, at.c_str(), bad.c_str());
+        }
+        if (run.pieces.empty())
+        {
+            Log::Write("terrain tiles: %s off: no one-plot piece read from %ls", set, from.c_str());
+            continue;
+        }
+        std::string features;
+        for (const std::string& name : ListNames(cfg.features))
+        {
+            const int f = find(featureNames, name);
+            if (f < 0)
+                Log::Write("terrain tiles: %s: no feature %s (its place in PlotStamps<n>Features kept)", set,
+                           name.c_str());
+            const int k = static_cast<int>(run.features.size());
+            if (k < static_cast<int>(run.pieces.size()))
+                features += std::string(features.empty() ? "" : ", ") + name + " " + run.pieces[k].name;
+            run.features.push_back(f);
+        }
+        // Grid units a level: the INI's, else pieces.xml's world units over the grid's.
+        const float level = cfg.hasHeight ? cfg.height : xml.heightScale / zScale;
+        run.units = level / Jigsaw::kValuePerLevel;
+        char scale[96];
+        if (cfg.hasHeight)
+            snprintf(scale, sizeof(scale), "the INI's");
+        else
+            snprintf(scale, sizeof(scale), "pieces.xml's %.2f world units over fZScale %.2f%s", xml.heightScale, zScale,
+                     zRead ? "" : " (assumed)");
+        Log::Write("terrain tiles: %s: %s; %u one-plot pieces from %ls%s; by feature: %s; %.3f grid units a level "
+                   "(%s), the tallest %.1f grid units",
+                   set, listed.c_str(), static_cast<unsigned>(run.pieces.size()), from.c_str(),
+                   left ? (", " + std::to_string(left) + " left out").c_str() : "",
+                   features.empty() ? "none, by plot" : features.c_str(), level, scale, highest * run.units);
+        for (int t : terrains)
+            g_plotStampOf[t] = static_cast<int>(g_plotStamps.size());
+        g_plotStamps.push_back(std::move(run));
+    }
+    return !g_plotStamps.empty();
+}
+
+// The stamps on square (x, y)'s corner plots, as the plots are now; how many.
+int PlotStampsAt(int x, int y, PlotStamps::Stamp out[4])
+{
+    void* map = g_dll.Map();
+    const int width = g_dll.width(map, nullptr), height = g_dll.height(map, nullptr);
+    const bool wrapX = g_dll.wrapX(map, nullptr), wrapY = g_dll.wrapY(map, nullptr);
+    int corners[4][2], count = 0;
+    TileSets::Corners(x, y, height, corners);
+    for (int k = 0; k < 4; ++k)
+    {
+        void* plot = g_dll.plot(map, nullptr, corners[k][0], corners[k][1]);
+        if (!plot)
+            continue;
+        const int t = g_dll.terrainType(plot, nullptr);
+        const int s = t >= 0 && t < static_cast<int>(g_plotStampOf.size()) ? g_plotStampOf[t] : -1;
+        if (s < 0)
+            continue;
+        const PlotStampRun& run = g_plotStamps[s];
+        int px = corners[k][0], py = corners[k][1];  // on the map, for the pick: the same plot across a wrap
+        if (wrapX && width > 0)
+            px = ((px % width) + width) % width;
+        if (wrapY && height > 0)
+            py = ((py % height) + height) % height;
+        const int pick = PlotStamps::Pick(g_dll.featureType(plot, nullptr), run.features,
+                                          static_cast<int>(run.pieces.size()), px, py);
+        out[count++] = {&run.pieces[pick], corners[k][0], corners[k][1], run.units};
+    }
+    return count;
+}
+
 // Before the engine's base stamp (land corner mask in, the mask to stamp with out): a square touching a set's plots
 // is stamped with those corners as the set says, and its tile is added after (JigsawBaseAdd).
 extern "C" int __stdcall JigsawBaseMask(int x, int y, int landMask)
@@ -546,37 +782,56 @@ extern "C" int __stdcall JigsawBaseMask(int x, int y, int landMask)
     return mask;
 }
 
-// After it: the sets' tiles for the square, combined, added into the height grid.
+// After it: the jigsaw sets' tiles for the square, combined, and the plot stamps on its corners on top, added into the
+// height grid.
 extern "C" void __stdcall JigsawBaseAdd(void* grid, int x, int y)
 {
-    if (!g_jigsawPending || x != g_jigsawX || y != g_jigsawY)
-        return;
+    const bool jigsaw = g_jigsawPending && x == g_jigsawX && y == g_jigsawY;
     g_jigsawPending = false;
+    PlotStamps::Stamp stamps[4];
+    const int stampCount = PlotStampsReady() ? PlotStampsAt(x, y, stamps) : 0;
+    if (!jigsaw && !stampCount)
+        return;
     Jigsaw::GridView g;
     if (!Jigsaw::ReadGrid(grid, g) || g.cellX > 256)
     {
-        ++g_jigsawMisfit;
+        ++(jigsaw ? g_jigsawMisfit : g_stampMisfit);
         return;
     }
     const int n = g.cellX;
-    g_jigsawTile.resize(static_cast<size_t>(n) * n);
-    g_jigsawSum.assign(static_cast<size_t>(n) * n, Jigsaw::Combine());
+    g_jigsawTile.assign(static_cast<size_t>(n) * n, 0.0f);
     bool any = false;
-    for (const JigsawRun& j : g_jigsaws)
-        if (j.field.Tile(x, y, n, g_jigsawTile.data()))
-        {
-            any = true;
-            for (size_t i = 0; i < g_jigsawTile.size(); ++i)
-                g_jigsawSum[i].Add(g_jigsawTile[i]);
-        }
-    if (!any)
+    if (jigsaw)
+    {
+        g_jigsawSum.assign(static_cast<size_t>(n) * n, Jigsaw::Combine());
+        for (const JigsawRun& j : g_jigsaws)
+            if (j.field.Tile(x, y, n, g_jigsawTile.data()))
+            {
+                any = true;
+                for (size_t i = 0; i < g_jigsawTile.size(); ++i)
+                    g_jigsawSum[i].Add(g_jigsawTile[i]);
+            }
+        for (size_t i = 0; i < g_jigsawTile.size(); ++i)
+            g_jigsawTile[i] = any ? g_jigsawSum[i].Value() : 0.0f;
+    }
+    if (stampCount)
+    {
+        g_stampTile.resize(static_cast<size_t>(n) * n);
+        PlotStamps::Tile(stamps, stampCount, x, y, g_dll.height(g_dll.Map(), nullptr), n, g_stampTile.data());
+        for (size_t i = 0; i < g_jigsawTile.size(); ++i)
+            g_jigsawTile[i] += g_stampTile[i];
+        g_stampClipped += PlotStamps::Clipped(g.cells, g.rowBytes, g.rows, x * n, y * n, n, g_jigsawTile.data(),
+                                              g_stampTile.data());
+    }
+    if (!any && !stampCount)
         return;
-    for (size_t i = 0; i < g_jigsawTile.size(); ++i)
-        g_jigsawTile[i] = g_jigsawSum[i].Value();
     if (Jigsaw::AddTile(g.cells, g.rowBytes, g.rows, x * n, y * n, n, g_jigsawTile.data()))
-        ++g_jigsawAdded;
+    {
+        g_jigsawAdded += any ? 1 : 0;
+        g_stampSquares += stampCount ? 1 : 0;
+    }
     else
-        ++g_jigsawMisfit;
+        ++(any ? g_jigsawMisfit : g_stampMisfit);
 }
 
 extern "C" uint32_t g_jigsawBaseResume = 0;  // FUN_00478a90 + 6, after the two instructions the hook took
@@ -752,7 +1007,7 @@ extern "C" __declspec(naked) void TileSetsPeakThunk()
 
 void ApplyTileSets()
 {
-    if (!g_config.tileSetsPatch && !g_config.hillField && !AnyJigsaw())
+    if (!g_config.tileSetsPatch && !g_config.hillField && !AnyJigsaw() && !AnyPlotStamps())
         return;
     g_sets = (std::max)(1, (std::min)(TileSets::kMaxSets, g_config.tileSets));
     wchar_t exe[MAX_PATH] = {};
@@ -803,7 +1058,7 @@ void ApplyTileSets()
                    g_config.coastAtlasCells[0], g_config.coastAtlasCells[1], g_config.coastAtlasCells[2],
                    g_config.coastAtlasCells[3], g_config.coastWaveModels[0], g_config.coastWaveModels[1],
                    g_config.coastWaveModels[2], g_config.coastWaveModels[3]);
-    if (!why.empty() || !AnyJigsaw())
+    if (!why.empty() || (!AnyJigsaw() && !AnyPlotStamps()))
         return;
     g_jigsawBaseResume = g_base + Jigsaw::kBaseStamp + 6;
     int jigsawWrites = 0;
@@ -821,9 +1076,10 @@ void ApplyTileSets()
         }
     });
     if (jigsaw.empty())
-        Log::Write("terrain tiles: jigsaw pieces: the base tile stamp hooked (%d site written)", jigsawWrites);
+        Log::Write("terrain tiles: jigsaw pieces, plot stamps: the base tile stamp hooked (%d site written)",
+                   jigsawWrites);
     else
-        Log::Write("terrain tiles: jigsaw pieces not applied: %s", jigsaw.c_str());
+        Log::Write("terrain tiles: jigsaw pieces, plot stamps: not applied: %s", jigsaw.c_str());
 }
 
 // [terrain tiles] StandardBlendOnLand(1..8) (terrain_sets.h): the engine's blend pick, then on a square with no water
@@ -1065,6 +1321,7 @@ std::string TileSetsSummary()
     total += g_folded[0] + g_folded[1];
     total += g_hillCut + g_hillStock + g_hillRefits + g_hillUpdates;
     total += g_jigsawSquares + g_jigsawAdded + g_jigsawMisfit + g_jigsawDisagree + g_jigsawFits + g_jigsawUpdates;
+    total += g_stampSquares + g_stampClipped + g_stampMisfit;
     if (total == g_logged)
         return "";
     g_logged = total;
@@ -1110,6 +1367,9 @@ std::string TileSetsSummary()
              " tiles added, " + std::to_string(g_jigsawDisagree) + " left to the engine (a set's corner not land or "
              "water as read), " + std::to_string(g_jigsawMisfit) + " not fitting the grid, " +
              std::to_string(g_jigsawFits) + " placings, " + std::to_string(g_jigsawUpdates) + " local updates";
+    if (g_stampSquares || g_stampMisfit)
+        s += "; plot stamps: " + std::to_string(g_stampSquares) + " squares, " + std::to_string(g_stampClipped) +
+             " samples clipped at 255 (no headroom), " + std::to_string(g_stampMisfit) + " not fitting the grid";
     if (!g_setFlats.empty() && !g_setFlatsLogged)
     {
         g_setFlatsLogged = g_setFlats.size() >= 12;
@@ -1119,4 +1379,18 @@ std::string TileSetsSummary()
                  ")";
     }
     return s;
+}
+
+bool PlotStampsOn()
+{
+    return g_plotStampsRead && !g_plotStamps.empty();
+}
+
+std::wstring PlotStampsHiddenModels()
+{
+    std::wstring all;
+    for (const auto& p : g_config.plotStamps)
+        if (!p.terrains.empty() && !p.hideModels.empty())
+            all += (all.empty() ? L"" : L";") + p.hideModels;
+    return all;
 }

@@ -93,6 +93,7 @@ private:
     template <class Redraw> void Ghost(Redraw redraw);
     // Every draw goes through here: water detection, the game's draw, then the ghost and reflection redraws.
     template <class Draw> HRESULT Dispatch(Draw draw);
+    bool HiddenModel();  // the draw's texture is one of PlotStamps<n>HideModels (Dispatch skips it while stamps are on)
     const ShaderInfo* CurrentPixelShader();
     // Selection circles under ships: BtS draws them at water level before the water, so the reflective, dynamic water
     // would show them refracted beneath its surface. Such draws are held back and replayed straight after the water.
@@ -112,6 +113,8 @@ private:
     Waves m_waves;  // coast waves drawn with our copy of their shader (opacity over time)
     TerrainNormals m_terrain;  // heights and normals read from the terrain's vertex buffers (per-pixel lighting)
     DetailNormals m_detail;    // the terrain detail textures' normal maps ([textures] DetailNormals)
+    TextureList m_hiddenModels;  // [terrain tiles] PlotStamps<n>HideModels
+    bool m_hideModels = false, m_hiddenLogged = false;
     Perf m_perf;               // timing for the log
     float m_terrainLight[32] = {};  // Lighting::TerrainConstants for the shadows' terrain draws
     bool m_lightKeyWasDown = false;
