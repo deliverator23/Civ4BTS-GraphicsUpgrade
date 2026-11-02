@@ -78,9 +78,10 @@ void Reflection::EnsureCleared()
 
 void Reflection::BeforeDraw(const ShaderInfo* vs)
 {
-    if (!enabled || !needed || !vs || !vs->water || m_waterSeen)
+    if (!vs || !vs->water || m_waterSeen)
         return;
     m_waterSeen = true;  // ships come before this; anything later (land units, wakes) is drawn after the water
+    // The height is read with the reflection off too: the shadows use it (Shadows::waterHeight).
     if (vs->world >= 0)
     {
         // Water mtxWorld is a translation to the plane height: row 2 = (0, 0, 1, height) in both games.
@@ -94,7 +95,8 @@ void Reflection::BeforeDraw(const ShaderInfo* vs)
             m_height = w[11];
         }
     }
-    EnsureCleared();  // so a frame with no ships still shows an empty reflection, not last frame's
+    if (enabled && needed)
+        EnsureCleared();  // so a frame with no ships still shows an empty reflection, not last frame's
 }
 
 bool Reflection::AfterDraw(const ShaderInfo* vs, bool fixedFunction, const std::function<void()>& redraw)

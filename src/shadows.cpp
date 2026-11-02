@@ -261,7 +261,7 @@ void Shadows::SetupFrame(const float* vp)
 {
     if (m_frameFailed || !EnsureResources())
         return;
-    const float h = g_config.waterHeight, maxR = g_config.shadowMaxRadius;
+    const float h = waterHeight, maxR = g_config.shadowMaxRadius;
     // The view's footprint on the ground (z = water height): the screen centre and corners. A corner above the
     // horizon, or very far away, is pulled in along the screen edge towards the centre line.
     float c[3];
@@ -482,7 +482,7 @@ bool Shadows::BuildingPart(DWORD fvf)
     // Not things floating on the water (resource wave rings: clams, fish), only what stands above it.
     D3DMATRIX world;
     if (!zwrite || !lighting || FAILED(m_dev->GetTransform(D3DTS_WORLD, &world)) ||
-        world._43 < g_config.waterHeight + 5.0f)
+        world._43 < waterHeight + 5.0f)
         return false;
     return !PaintedShadow();
 }

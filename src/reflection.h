@@ -24,7 +24,8 @@ public:
 
     // Called after each Present.
     void NewFrame();
-    // Called before every draw with its vertex shader (null for fixed function). Spots the first water draw.
+    // Called before every draw with its vertex shader (null for fixed function), with the reflection on or off. Spots
+    // the first water draw and reads the water's height from it (WaterHeight).
     void BeforeDraw(const ShaderInfo* vs);
     // Called after a draw. If it was a unit/ship draw to the back buffer before the water, redraws it mirrored.
     // Returns true if it did.

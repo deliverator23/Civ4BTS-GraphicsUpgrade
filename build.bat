@@ -29,6 +29,9 @@ rem The coast waves (BtS's wave shader, with an opacity over time).
 %FXC% /T ps_2_0 /E PSMain /Vn g_wavePS /Fh build\shaders\wave_ps.h shaders\wave.hlsl >nul || exit /b 1
 %FXC% /T vs_3_0 /D DRAPE=1 /E VSMain /Vn g_waveDrapeVS /Fh build\shaders\wave_drape_vs.h shaders\wave.hlsl >nul || exit /b 1
 %FXC% /T ps_3_0 /D DRAPE=1 /E PSMain /Vn g_waveDrapePS /Fh build\shaders\wave_drape_ps.h shaders\wave.hlsl >nul || exit /b 1
+rem The culture borders over terrain finer than BtS's ([debug] TerrainVertsPerPlot; Shader Model 3).
+%FXC% /T vs_3_0 /E VSMain /Vn g_borderVS /Fh build\shaders\border_vs.h shaders\border.hlsl >nul || exit /b 1
+%FXC% /T ps_3_0 /E PSMain /Vn g_borderPS /Fh build\shaders\border_ps.h shaders\border.hlsl >nul || exit /b 1
 rem The same water with the shoreline and shallow water (Shader Model 3).
 %FXC% /T vs_3_0 /D SHORE=1 /E VSMain /Vn g_waterShoreVS /Fh build\shaders\water_shore_vs.h shaders\water.hlsl >nul || exit /b 1
 %FXC% /T ps_3_0 /D SHORE=1 /E PSMain /Vn g_waterShorePS /Fh build\shaders\water_shore_ps.h shaders\water.hlsl >nul || exit /b 1

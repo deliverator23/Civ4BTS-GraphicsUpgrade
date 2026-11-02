@@ -9,7 +9,8 @@ files, in a GraphicsUpgrade-<version> folder; the zip's name stays the same so t
   GraphicsUpgrade.ini    settings
   GraphicsUpgrade.md     README.md: what it does, how to install it and the settings
   presets/               [lighting] sections for BtS's, Colonization's and Civilization VI's lighting
-  GraphicsUpgrade/       Colonization's water textures: water_normal.dds (normal map), water_env.dds (environment cube)
+  GraphicsUpgrade/       Colonization's water textures: water_normal.dds (normal map), water_env.dds (environment cube);
+                         Civilization V's caustics: water_caustics1.dds, water_caustics2.dds
 
 To install, copy the folder's contents into the Beyond the Sword folder.
 """
@@ -22,7 +23,7 @@ import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-WATER_TEXTURES = ('water_normal.dds', 'water_env.dds')
+WATER_TEXTURES = ('water_normal.dds', 'water_env.dds', 'water_caustics1.dds', 'water_caustics2.dds')
 
 
 def version():

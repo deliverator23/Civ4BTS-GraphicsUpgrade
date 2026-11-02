@@ -60,12 +60,13 @@ std::string Rect(const RECT* r)
 }
 
 ProxyDevice::ProxyDevice(IDirect3DDevice9* real, ProxyD3D9* parent)
-    : Device9Forward(real), m_parent(parent), m_trace(m_registry), m_refl(real), m_water(real), m_shadows(real), m_light(real), m_waves(real), m_terrain(real), m_detail(real), m_perf(real)
+    : Device9Forward(real), m_parent(parent), m_trace(m_registry), m_refl(real), m_water(real), m_shadows(real), m_light(real), m_waves(real), m_borders(real), m_terrain(real), m_detail(real), m_perf(real)
 {
     m_effects = EffectsAllowed();
     m_refl.enabled = m_effects && g_config.reflectionEnabled;
     m_refl.overlay = m_effects && g_config.overlayEnabled;
     m_water.enabled = m_effects && g_config.waterEnabled;
+    m_borders.enabled = m_effects && g_config.terrainVertsPerPlot > 17;  // the terrain finer than the borders' grid
     m_shadows.enabled = m_effects && g_config.shadowsEnabled;
     m_shadows.overlay = m_effects && g_config.shadowOverlay;
     m_light.enabled = m_effects && g_config.lightingEnabled;
@@ -151,7 +152,7 @@ ULONG ProxyDevice::Release()
     const ULONG shotRefs = (m_compareShots[0] != nullptr) + (m_compareShots[1] != nullptr);  // a capture in progress
     bool timed = false;  // the frames since the log's last timing line, logged
     if (refs != 0 && refs == m_refl.InternalRefs() + m_water.InternalRefs() + m_shadows.InternalRefs() + m_deferRefs +
-                                 m_light.InternalRefs() + m_waves.InternalRefs() + m_terrain.InternalRefs() +
+                                 m_light.InternalRefs() + m_waves.InternalRefs() + m_borders.InternalRefs() + m_terrain.InternalRefs() +
                                  m_detail.InternalRefs() + m_perf.InternalRefs() + shotRefs)
     {
         // Only our own objects still hold the device: the game has let go, so release them, which destroys the
@@ -166,6 +167,7 @@ ULONG ProxyDevice::Release()
         m_shadows.ReleaseAll();
         m_light.ReleaseAll();  // last: these don't read the device's reference count
         m_waves.ReleaseAll();
+        m_borders.ReleaseAll();
         m_terrain.ReleaseAll();
         m_detail.ReleaseAll();
         m_perf.ReleaseAll();
@@ -802,7 +804,7 @@ HRESULT ProxyDevice::Dispatch(Draw draw)
     // state right after its draw.
     const ShaderInfo* vs = nullptr;
     bool fixedFunction = false;
-    if (m_refl.enabled || m_water.enabled || m_shadows.enabled || m_light.enabled || m_aniso)
+    if (m_refl.enabled || m_water.enabled || m_shadows.enabled || m_light.enabled || m_aniso || m_borders.enabled)
     {
         IDirect3DVertexShader9* shader = nullptr;
         m_real->GetVertexShader(&shader);
@@ -937,8 +939,8 @@ HRESULT ProxyDevice::Dispatch(Draw draw)
         m_shadows.terrainGrid[1] = 0.5f / m_terrain.Cells();
     }
     memcpy(m_shadows.hillGrid, m_terrain.HillGrid(), sizeof(m_shadows.hillGrid));
-    if (m_refl.enabled)
-        m_refl.BeforeDraw(vs);
+    m_refl.BeforeDraw(vs);
+    m_shadows.waterHeight = m_refl.WaterHeight();
     if (m_water.enabled)
     {
         // Refraction: copy the screen at the first ship or water draw of the main scene, i.e. after the terrain (the
@@ -1031,7 +1033,16 @@ HRESULT ProxyDevice::Dispatch(Draw draw)
         m_waves.heightCells = m_terrain.Cells();
         m_waves.light = m_light.DecalLight();  // the foam in the light now, as the roads
     }
-    if (!(wave && m_waves.Draw([&] { return draw(); }, hr)))
+    // The culture borders over terrain finer than BtS's own ([debug] TerrainVertsPerPlot): lifted onto it and moved
+    // towards the camera, so its finer relief doesn't rise through them.
+    const bool border = !wave && m_borders.enabled && vs && Borders::IsBorder(*vs, CurrentPixelShader());
+    if (border)
+    {
+        m_borders.heightTexture = m_terrain.HeightTexture();
+        m_borders.heightSpacing = m_terrain.Spacing();
+        m_borders.heightCells = m_terrain.Cells();
+    }
+    if (!(wave && m_waves.Draw([&] { return draw(); }, hr)) && !(border && m_borders.Draw([&] { return draw(); }, hr)))
         hr = draw();
     m_perf.AddGameDraw(Perf::Now() - gameDrawStart);
     if (vs && vs->btsWater)

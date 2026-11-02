@@ -22,6 +22,8 @@
 #include <tuple>
 #include <vector>
 
+#include "border_ps.h"
+#include "border_vs.h"
 #include "test_btswater_ps.h"
 #include "test_btswater_vs.h"
 #include "test_ghost_old_vs.h"
@@ -564,6 +566,8 @@ static int WaterScene(IDirect3DDevice9* dev, int frames)
 //   effectui         the additive one through the orthographic camera, like the interface: left alone
 //   building         a lit fixed-function mesh (normals, depth writes) 100 units up at world (200,300), like a
 //                    building: with [shadows] BuildingShadows=1 its shadow lands at (100,300); adds " bld=."
+//   buildingwater    the same, after a patch of BtS-style water (mtxWorld z 0) at (-450,-450): the water's height is
+//                    read from it, so with [reflection] WaterHeight above the building's base it still casts
 static bool ReadAll(const std::wstring& path, std::vector<DWORD>& out)
 {
     FILE* f = nullptr;
@@ -706,7 +710,8 @@ static int ShadowScene(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS& pp, int fra
                symbol = wcscmp(overlay, L"symbol") == 0, fowDecal = wcscmp(overlay, L"decal") == 0 || symbol,
                uiDecal = wcscmp(overlay, L"overlay") == 0, decal = fowDecal || uiDecal, treeShadow = wcscmp(overlay, L"treeshadow") == 0,
                tree = wcscmp(overlay, L"tree") == 0 || treeShadow,
-               building = wcscmp(overlay, L"building") == 0, ridge = wcscmp(overlay, L"ridge") == 0,
+               buildingWater = wcscmp(overlay, L"buildingwater") == 0,
+               building = wcscmp(overlay, L"building") == 0 || buildingWater, ridge = wcscmp(overlay, L"ridge") == 0,
                vanish = wcscmp(overlay, L"vanish") == 0, waterOverlay = wcscmp(overlay, L"water") == 0,
                slope = wcscmp(overlay, L"slope") == 0 || ridge,
                wideMap = wcscmp(overlay, L"widemap") == 0, ultraMap = wcscmp(overlay, L"ultramap") == 0,
@@ -796,7 +801,7 @@ static int ShadowScene(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS& pp, int fra
     IDirect3DVertexShader9* btsWaterVs = nullptr;
     IDirect3DPixelShader9* btsWaterPs = nullptr;
     IDirect3DVertexDeclaration9* btsWaterDecl = nullptr;
-    if (waterOverlay)
+    if (waterOverlay || buildingWater)
     {
         std::vector<DWORD> wvs = Tokens(g_btsWaterVS, sizeof(g_btsWaterVS)), wps = Tokens(g_btsWaterPS, sizeof(g_btsWaterPS));
         CHECK(dev->CreateVertexShader(wvs.data(), &btsWaterVs));
@@ -971,11 +976,12 @@ static int ShadowScene(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS& pp, int fra
             if (o)
                 o->Release();
 
-        if (waterOverlay)
+        if (waterOverlay || buildingWater)
         {
-            // x, y, z, coast uv, fog uv
-            const float wq[6][7] = {{-500, -500, 1, 0, 0, 0, 0}, {-500, 500, 1, 0, 0, 0, 0}, {500, 500, 1, 0, 0, 0, 0},
-                                    {-500, -500, 1, 0, 0, 0, 0}, {500, 500, 1, 0, 0, 0, 0},  {500, -500, 1, 0, 0, 0, 0}};
+            // x, y, z, coast uv, fog uv (buildingwater: a corner patch, x and y -500 to -400)
+            const float hi = buildingWater ? -400.0f : 500.0f;
+            const float wq[6][7] = {{-500, -500, 1, 0, 0, 0, 0}, {-500, hi, 1, 0, 0, 0, 0}, {hi, hi, 1, 0, 0, 0, 0},
+                                    {-500, -500, 1, 0, 0, 0, 0}, {hi, hi, 1, 0, 0, 0, 0},  {hi, -500, 1, 0, 0, 0, 0}};
             CHECK(dev->SetVertexDeclaration(btsWaterDecl));
             CHECK(dev->SetVertexShader(btsWaterVs));
             CHECK(dev->SetPixelShader(btsWaterPs));
@@ -1910,6 +1916,258 @@ static int WaveCompareScene(IDirect3DDevice9* dev, const std::wstring& gameDir)
     for (int k = 0; k < 2; ++k)
         vs[k]->Release(), ps[k]->Release();
     decl->Release();
+    sys->Release();
+    bb->Release();
+    return 0;
+}
+
+// BtS's culture border shader (CultureBOrderShader.fx TCultureBorder_Shader14 P0 and P1, from gameDir) on a 17 x 17
+// grid over a 400-unit square at z 0, as BtS draws a plot's border (position + uv, no depth writes, alpha-blended),
+// with random border and fog textures, seen from straight above (the camera 500 up, perspective).
+//   Through the proxy (whatever the INI says; with [debug] TerrainVertsPerPlot 33/65 it draws them with ours):
+//     plain: the border over black, no depth in the way. Prints "BORDERPLAIN p=<pass> sum=<all channels> lit=<above 8>"
+//     ridge: a black ridge 10 units above the border, drawn first with depth writes, then the border. Prints
+//            "BORDERRIDGE p=<pass> visible=<channels above 8>"
+//   Ours directly (border.hlsl, Shader Model 3 vertex textures), the proxy not replacing anything (its INI's Games):
+//     moved 0 units, no heights: against BtS's drawn the same. Prints "BORDERCMP same0=<worst P0> same1=<worst P1>"
+//     heights unknown (-10000), then 100 up: "BORDERLIFT flat=<worst vs no heights> moved=<channels changed>"
+static int BorderScene(IDirect3DDevice9* dev, const std::wstring& gameDir)
+{
+    std::vector<DWORD> code[4];
+    const wchar_t* names[4] = {L"border0_vs.bin", L"border0_ps.bin", L"border1_vs.bin", L"border1_ps.bin"};
+    for (int k = 0; k < 4; ++k)
+        if (!ReadAll(gameDir + L"\\" + names[k], code[k]))
+        {
+            printf("FAILED: BtS's border shaders not found in %ls\n", gameDir.c_str());
+            return 1;
+        }
+    IDirect3DVertexShader9* vs[2] = {};
+    IDirect3DPixelShader9* ps[2] = {};
+    for (int p = 0; p < 2; ++p)
+    {
+        CHECK(dev->CreateVertexShader(code[2 * p].data(), &vs[p]));
+        CHECK(dev->CreatePixelShader(code[2 * p + 1].data(), &ps[p]));
+    }
+    unsigned seed = 1717;
+    auto rnd = [&]() { seed = seed * 1103515245u + 12345u; return (seed >> 16) & 0xFF; };
+    IDirect3DTexture9* tex[3] = {};
+    for (int st = 0; st < 3; ++st)
+    {
+        CHECK(dev->CreateTexture(32, 32, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &tex[st], nullptr));
+        D3DLOCKED_RECT lr;
+        CHECK(tex[st]->LockRect(0, &lr, nullptr, 0));
+        for (UINT y = 0; y < 32; ++y)
+            for (UINT x = 0; x < 32; ++x)
+                reinterpret_cast<DWORD*>(static_cast<BYTE*>(lr.pBits) + y * lr.Pitch)[x] =
+                    rnd() << 24 | rnd() << 16 | rnd() << 8 | rnd();
+        tex[st]->UnlockRect(0);
+    }
+    struct V
+    {
+        float x, y, z, u, v;
+    };
+    std::vector<V> verts;
+    for (int gy = 0; gy < 16; ++gy)
+        for (int gx = 0; gx < 16; ++gx)
+        {
+            auto at = [&](int ix, int iy) { return V{-200 + 25.0f * ix, -200 + 25.0f * iy, 0, ix / 16.0f, iy / 16.0f}; };
+            V a = at(gx, gy), b = at(gx + 1, gy), c = at(gx, gy + 1), d = at(gx + 1, gy + 1);
+            verts.insert(verts.end(), {a, b, d, a, d, c});
+        }
+    // The camera 500 up looking down (+y up the screen), 60 degree view, near 10, far 5000: clip rows.
+    const float s = 1.7320508f, q = 5000.0f / 4990.0f;
+    const float wvp[16] = {s, 0, 0, 0, 0, s, 0, 0, 0, 0, -q, 500 * q - 10 * q, 0, 0, -1, 500};
+    const float world[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    const float fow[8] = {0.0011f, 0, 0, 0.5f, 0, -0.0012f, 0, 0.45f};
+    const float mats[2][16] = {{0.9f, 0.2f, 0.05f, 0, -0.1f, 1.1f, 0.3f, 0, 1.3f, 0, 0.25f, 0, 0, 1.2f, 0.5f, 0},
+                               {0, -1.0f, 0.75f, 0, 1.0f, 0, 0.25f, 0, 0.6f, 0.4f, 0.1f, 0, -0.4f, 0.6f, 0.2f, 0}};
+    const float colours[2][8] = {{0.31f, 0.808f, 0.078f, 1, 0.9f, 0.2f, 0.4f, 0.7f},
+                                 {0.2f, 0.4f, 0.9f, 0.8f, 1, 1, 0.3f, 0.5f}};
+    IDirect3DSurface9 *bb = nullptr, *sys = nullptr;
+    CHECK(dev->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &bb));
+    D3DSURFACE_DESC bd;
+    bb->GetDesc(&bd);
+    CHECK(dev->CreateOffscreenPlainSurface(bd.Width, bd.Height, bd.Format, D3DPOOL_SYSTEMMEM, &sys, nullptr));
+    auto capture = [&](std::vector<DWORD>& out) -> int {
+        CHECK(dev->GetRenderTargetData(bb, sys));
+        D3DLOCKED_RECT lr;
+        CHECK(sys->LockRect(&lr, nullptr, D3DLOCK_READONLY));
+        out.clear();
+        for (UINT y = 0; y < bd.Height; ++y)
+            for (UINT x = 0; x < bd.Width; ++x)
+                out.push_back(reinterpret_cast<const DWORD*>(static_cast<const BYTE*>(lr.pBits) + y * lr.Pitch)[x] &
+                              0xFFFFFF);
+        sys->UnlockRect();
+        return 0;
+    };
+    // One frame: (the ridge,) then the border with pass p's shaders as given (BtS's: the proxy may put ours in).
+    auto frame = [&](int p, bool ridge, IDirect3DVertexShader9* v, IDirect3DPixelShader9* f, const float* extra,
+                     std::vector<DWORD>& out) -> int {
+        CHECK(dev->BeginScene());
+        CHECK(dev->Clear(0, nullptr, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER, 0xFF000000, 1.0f, 0));
+        CHECK(dev->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE));
+        CHECK(dev->SetRenderState(D3DRS_ZENABLE, TRUE));
+        CHECK(dev->SetRenderState(D3DRS_ZFUNC, D3DCMP_LESSEQUAL));
+        if (ridge)
+        {
+            // Black, depth written, 10 above the border and wider than it.
+            struct R
+            {
+                float x, y, z;
+                DWORD c;
+            } r[6] = {{-300, -300, 10, 0xFF000000}, {300, -300, 10, 0xFF000000}, {300, 300, 10, 0xFF000000},
+                      {-300, -300, 10, 0xFF000000}, {300, 300, 10, 0xFF000000}, {-300, 300, 10, 0xFF000000}};
+            CHECK(dev->SetVertexShader(nullptr));
+            CHECK(dev->SetPixelShader(nullptr));
+            CHECK(dev->SetRenderState(D3DRS_LIGHTING, FALSE));
+            CHECK(dev->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE));
+            CHECK(dev->SetRenderState(D3DRS_ZWRITEENABLE, TRUE));
+            CHECK(dev->SetTexture(0, nullptr));
+            CHECK(dev->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_SELECTARG1));
+            CHECK(dev->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_DIFFUSE));
+            D3DMATRIX id = {}, view = {}, proj = {};
+            id._11 = id._22 = id._33 = id._44 = 1;
+            view = id;  // the rows above as one matrix: world -> clip, given as the projection (D3D's transposed)
+            for (int i = 0; i < 4; ++i)
+                for (int j = 0; j < 4; ++j)
+                    proj.m[j][i] = wvp[i * 4 + j];
+            CHECK(dev->SetTransform(D3DTS_WORLD, &id));
+            CHECK(dev->SetTransform(D3DTS_VIEW, &view));
+            CHECK(dev->SetTransform(D3DTS_PROJECTION, &proj));
+            CHECK(dev->SetFVF(D3DFVF_XYZ | D3DFVF_DIFFUSE));
+            CHECK(dev->DrawPrimitiveUP(D3DPT_TRIANGLELIST, 2, r, sizeof(R)));
+        }
+        CHECK(dev->SetRenderState(D3DRS_ZWRITEENABLE, FALSE));
+        CHECK(dev->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE));
+        CHECK(dev->SetRenderState(D3DRS_SRCBLEND, D3DBLEND_SRCALPHA));
+        CHECK(dev->SetRenderState(D3DRS_DESTBLEND, D3DBLEND_INVSRCALPHA));
+        CHECK(dev->SetFVF(D3DFVF_XYZ | D3DFVF_TEX1));
+        CHECK(dev->SetVertexShader(v));
+        CHECK(dev->SetPixelShader(f));
+        CHECK(dev->SetVertexShaderConstantF(0, wvp, 4));
+        CHECK(dev->SetVertexShaderConstantF(4, world, 4));
+        CHECK(dev->SetVertexShaderConstantF(8, fow, 2));
+        CHECK(dev->SetVertexShaderConstantF(10, mats[p], 4));
+        if (extra)
+            CHECK(dev->SetVertexShaderConstantF(14, extra, 6));
+        CHECK(dev->SetPixelShaderConstantF(0, colours[p], 2));
+        for (int st = 0; st < 3; ++st)
+        {
+            CHECK(dev->SetTexture(st, tex[st]));
+            CHECK(dev->SetSamplerState(st, D3DSAMP_ADDRESSU, D3DTADDRESS_WRAP));
+            CHECK(dev->SetSamplerState(st, D3DSAMP_ADDRESSV, D3DTADDRESS_WRAP));
+            CHECK(dev->SetSamplerState(st, D3DSAMP_MAGFILTER, D3DTEXF_POINT));
+            CHECK(dev->SetSamplerState(st, D3DSAMP_MINFILTER, D3DTEXF_POINT));
+            CHECK(dev->SetSamplerState(st, D3DSAMP_MIPFILTER, D3DTEXF_NONE));
+        }
+        CHECK(dev->DrawPrimitiveUP(D3DPT_TRIANGLELIST, static_cast<UINT>(verts.size() / 3), verts.data(), sizeof(V)));
+        CHECK(dev->EndScene());
+        if (capture(out))
+            return 1;
+        CHECK(dev->Present(nullptr, nullptr, nullptr, nullptr));
+        return 0;
+    };
+    auto lit = [](const std::vector<DWORD>& img) {
+        size_t n = 0;
+        for (DWORD c : img)
+            for (int k = 0; k < 3; ++k)
+                n += ((c >> (8 * k)) & 0xFF) > 8;
+        return n;
+    };
+    auto worst = [](const std::vector<DWORD>& a, const std::vector<DWORD>& b) {
+        int w = 0;
+        for (size_t i = 0; i < a.size(); ++i)
+            for (int k = 0; k < 3; ++k)
+                w = (std::max)(w, abs(static_cast<int>((a[i] >> (8 * k)) & 0xFF) - static_cast<int>((b[i] >> (8 * k)) & 0xFF)));
+        return w;
+    };
+    std::vector<DWORD> game[2], img;
+    for (int p = 0; p < 2; ++p)
+    {
+        if (frame(p, false, vs[p], ps[p], nullptr, game[p]))
+            return 1;
+        unsigned long long sum = 0;
+        for (DWORD c : game[p])
+            sum += (c & 0xFF) + ((c >> 8) & 0xFF) + ((c >> 16) & 0xFF);
+        printf("BORDERPLAIN p=%d sum=%llu lit=%zu\n", p, sum, lit(game[p]));
+        if (frame(p, true, vs[p], ps[p], nullptr, img))
+            return 1;
+        printf("BORDERRIDGE p=%d visible=%zu\n", p, lit(img));
+    }
+
+    D3DCAPS9 caps = {};
+    dev->GetDeviceCaps(&caps);
+    IDirect3D9* d3d9 = nullptr;
+    D3DDEVICE_CREATION_PARAMETERS cp = {};
+    D3DDISPLAYMODE mode = {};
+    const bool vtf = caps.VertexShaderVersion >= D3DVS_VERSION(3, 0) && SUCCEEDED(dev->GetDirect3D(&d3d9)) &&
+                     SUCCEEDED(dev->GetCreationParameters(&cp)) && SUCCEEDED(dev->GetDisplayMode(0, &mode)) &&
+                     SUCCEEDED(d3d9->CheckDeviceFormat(cp.AdapterOrdinal, cp.DeviceType, mode.Format,
+                                                       D3DUSAGE_QUERY_VERTEXTEXTURE, D3DRTYPE_TEXTURE, D3DFMT_R32F));
+    if (d3d9)
+        d3d9->Release();
+    if (!vtf)
+        printf("BORDERCMP skipped: no vertex textures\n");
+    else
+    {
+        std::vector<DWORD> vsCode = Tokens(g_borderVS, sizeof(g_borderVS)), psCode = Tokens(g_borderPS, sizeof(g_borderPS));
+        IDirect3DVertexShader9* ourVs = nullptr;
+        IDirect3DPixelShader9* ourPs = nullptr;
+        CHECK(dev->CreateVertexShader(vsCode.data(), &ourVs));
+        CHECK(dev->CreatePixelShader(psCode.data(), &ourPs));
+        IDirect3DTexture9* ground[2] = {};
+        for (int g = 0; g < 2; ++g)
+        {
+            CHECK(dev->CreateTexture(64, 64, 1, 0, D3DFMT_R32F, D3DPOOL_MANAGED, &ground[g], nullptr));
+            D3DLOCKED_RECT lr;
+            CHECK(ground[g]->LockRect(0, &lr, nullptr, 0));
+            for (UINT y = 0; y < 64; ++y)
+                for (UINT x = 0; x < 64; ++x)
+                    reinterpret_cast<float*>(static_cast<BYTE*>(lr.pBits) + y * lr.Pitch)[x] = g ? 100.0f : -10000.0f;
+            ground[g]->UnlockRect(0);
+        }
+        // c14-c17 the view-projection (the placement is the identity), c18 the grid, lift and pull, c19 the camera.
+        float extra[24] = {};
+        memcpy(extra, wvp, sizeof(wvp));
+        const float tail[8] = {1.0f / 22.5f, 1.0f / 64, -1e6f, 0, 0, 0, 500, 1};
+        memcpy(extra + 16, tail, sizeof(tail));
+        int same[2] = {};
+        for (int p = 0; p < 2; ++p)
+        {
+            CHECK(dev->SetTexture(D3DVERTEXTEXTURESAMPLER0, nullptr));
+            if (frame(p, false, ourVs, ourPs, extra, img))
+                return 1;
+            same[p] = worst(img, game[p]);
+        }
+        printf("BORDERCMP same0=%d same1=%d\n", same[0], same[1]);
+        extra[18] = 1.5f;  // lifted where the ground is above
+        std::vector<DWORD> lifted[2];
+        for (int g = 0; g < 2; ++g)
+        {
+            CHECK(dev->SetTexture(D3DVERTEXTEXTURESAMPLER0, ground[g]));
+            CHECK(dev->SetSamplerState(D3DVERTEXTEXTURESAMPLER0, D3DSAMP_MINFILTER, D3DTEXF_POINT));
+            CHECK(dev->SetSamplerState(D3DVERTEXTEXTURESAMPLER0, D3DSAMP_MAGFILTER, D3DTEXF_POINT));
+            CHECK(dev->SetSamplerState(D3DVERTEXTEXTURESAMPLER0, D3DSAMP_MIPFILTER, D3DTEXF_NONE));
+            if (frame(0, false, ourVs, ourPs, extra, lifted[g]))
+                return 1;
+        }
+        size_t moved = 0;
+        for (size_t i = 0; i < lifted[1].size(); ++i)
+            moved += lifted[1][i] != game[0][i];
+        printf("BORDERLIFT flat=%d moved=%zu\n", worst(lifted[0], game[0]), moved);
+        CHECK(dev->SetTexture(D3DVERTEXTEXTURESAMPLER0, nullptr));
+        ground[0]->Release();
+        ground[1]->Release();
+        ourVs->Release();
+        ourPs->Release();
+    }
+    for (int st = 0; st < 3; ++st)
+    {
+        CHECK(dev->SetTexture(st, nullptr));
+        tex[st]->Release();
+    }
+    for (int p = 0; p < 2; ++p)
+        vs[p]->Release(), ps[p]->Release();
     sys->Release();
     bb->Release();
     return 0;
@@ -3720,6 +3978,17 @@ int wmain(int argc, wchar_t** argv)
         ULONG d3dRefs = d3d->Release();
         DestroyWindow(wnd);
         printf("OK: wavecmp, final refs device %lu, d3d %lu\n", devRefs, d3dRefs);
+        return 0;
+    }
+    if (argc > 3 && wcscmp(argv[2], L"border") == 0)
+    {
+        // test_proxy <dll> border <folder of BtS's extracted shaders>
+        if (BorderScene(dev, argv[3]) != 0)
+            return 1;
+        ULONG devRefs = dev->Release();
+        ULONG d3dRefs = d3d->Release();
+        DestroyWindow(wnd);
+        printf("OK: border, final refs device %lu, d3d %lu\n", devRefs, d3dRefs);
         return 0;
     }
     if (argc > 3 && wcscmp(argv[2], L"watercmp") == 0)

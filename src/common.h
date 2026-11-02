@@ -11,7 +11,7 @@
 #include <string>
 #include <vector>
 
-#define GRAPHICSUPGRADE_VERSION "1.0.3"
+#define GRAPHICSUPGRADE_VERSION "1.0.4"
 
 // What BtS lights with which light (Lighting).
 enum LightGroup
@@ -99,7 +99,7 @@ struct Config
     // alpha 0 each frame) that the water shader reads.
     bool reflectionEnabled = false;
     UINT reflectionSize = 512;
-    float waterHeight = 49.5f;          // updated from the water draw's mtxWorld each frame; this is the start value
+    float waterHeight = 49.5f;          // the start value: the water draw's mtxWorld gives the real one (Reflection)
     UINT reflectionKey = 0;
     bool overlayEnabled = false;        // debug: show the reflection texture (colour and alpha) in a screen corner
     UINT overlayKey = 0;

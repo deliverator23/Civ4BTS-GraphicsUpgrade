@@ -15,7 +15,7 @@ cast shadows. These apply only while that mod is running. See [For modders](#for
 | | Plain BtS | With GraphicsUpgrade |
 |---|---|---|
 | **Water** | Flat, animated surface | Ripples that reflect the sky, show the sea floor through the waves, and sparkle in the sun |
-| **Coasts** | Flat water up to the shore | Sunlight shimmering on the shallow sea floor (with Civilization V installed), and a sun glint that follows the sun |
+| **Coasts** | Flat water up to the shore | Sunlight shimmering on the shallow sea floor, and a sun glint that follows the sun |
 | **Ship reflections** | None | Ships mirrored in the water |
 | **Under the water** | Hulls show through the semi-transparent sea | They still show through, fading out with depth like real shallows |
 | **Unit, ship and tree shadows** | Round blobs under units; nothing for trees | Real shadows cast by the sun, weapons and rigging included |
@@ -43,7 +43,7 @@ part can be turned off in the settings. Shadows fall on the terrain, rivers, roa
    ```
    d3d9.dll
    GraphicsUpgrade.ini
-   GraphicsUpgrade\      (the folder, with water_normal.dds and water_env.dds)
+   GraphicsUpgrade\      (the folder, with the water and caustic textures)
    presets\              (optional lighting presets)
    ```
 
@@ -104,7 +104,6 @@ The ones you're most likely to want:
 | `[water] FoamLight` | How much of the light's colour and brightness the coast waves' foam takes (0 = always white, 1 = like the ground) |
 | `[water] RiverGlint` | How bright the glint off the rivers is (0 = off, 128 = normal, up to 255) |
 | `[water] RiverShimmer` | How far the rivers' ripples sway back and forth along the channel (0 = still, up to 3) |
-| `[water] Civ5Dir` | Your Civilization V folder: the caustics use its textures |
 | `[reflection] Size` | Reflection sharpness: 1024, or 512 to save a little speed |
 | `[lighting] Enabled` | GraphicsUpgrade's lighting (1), or BtS's own (0) |
 | `[lighting] LightCycleOn` | The day–night cycle on (1) or off (0) |
@@ -310,7 +309,7 @@ GraphicsUpgrade by Deliverator.
 
 The water shader is reverse engineered from the one in Sid Meier's Civilization IV: Colonization. The water textures
 (`water_normal.dds`, which is Colonization's `water_001.dds`, and `water_env.dds`) are from Colonization, © Firaxis
-Games / 2K; `water_env.dds`'s sun glint has been redrawn to remove a seam. The caustics use textures
-from Sid Meier's Civilization V (© Firaxis Games / 2K), read from your own Civilization V installation. GraphicsUpgrade
-is an unofficial fan project,
+Games / 2K; `water_env.dds`'s sun glint has been redrawn to remove a seam. The caustic textures
+(`water_caustics1.dds` and `water_caustics2.dds`, Civilization V's `fx_caustics_base_01.dds` and `_02.dds`) are from
+Sid Meier's Civilization V, © Firaxis Games / 2K. GraphicsUpgrade is an unofficial fan project,
 not affiliated with or endorsed by Firaxis Games, 2K or Take-Two Interactive.

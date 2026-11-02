@@ -109,6 +109,9 @@ Builds on the before/after screenshots.
 - **Civilopedia previews keep BtS's water:** a known limitation.
 - **The game hung on exit once,** stuck while shutting down, which locked the DLL. Watch for it happening again.
 - **Culture borders sink into the terrain with 65 samples per plot** (Iain, DuneWars Messiah, 2026-10-20):
-  the border fill and outline pass under the ground in places instead of lying on it. Likely cause: the border is its
-  own mesh, draped over the terrain at the engine's usual height resolution, so the finer terrain rises through it.
-  Not investigated yet. Details in the research repo's FINDINGS (terrain patch).
+  the border fill and outline pass under the ground in places instead of lying on it. Cause (trace, 2026-10-28): each
+  border draw is one plot, a 17 x 17 grid (a vertex every 11.25 units) that BtS still builds at its own resolution,
+  so the terrain's 65 samples a plot rise between its vertices. Fixed (Iain, in game, 2026-11-02): with
+  TerrainVertsPerPlot 33/65 the borders are drawn with our copy of their shader (`shaders/border.hlsl`,
+  `src/borders.cpp`): each vertex lifted onto our height grid where the ground is above it, and its depth taken from
+  24 units nearer the camera along its line of sight (same place on the screen).

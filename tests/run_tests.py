@@ -127,7 +127,9 @@ def bts_shaders(reader, shader_dir, out_dir):
     for effect, technique, passes, roles in (('ContourShader.fx', 'Contour_Shader', [0], ['tree_vs', 'tree_ps']),
                                              ('River.fx', 'River_Shader', [0, 1],
                                               ['river0_vs', 'river0_ps', 'river1_vs', 'river1_ps']),
-                                             ('Civ4Wave.fx', 'Wave_Shader', [0], ['wave_vs', 'wave_ps'])):
+                                             ('Civ4Wave.fx', 'Wave_Shader', [0], ['wave_vs', 'wave_ps']),
+                                             ('CultureBOrderShader.fx', 'TCultureBorder_Shader14', [0, 1],
+                                              ['border0_vs', 'border0_ps', 'border1_vs', 'border1_ps'])):
         names = game_shaders.extract(reader, shader_dir, effect, technique, passes, out_dir) or []
         for name, role in zip(names, roles):
             shutil.copyfile(os.path.join(out_dir, name), os.path.join(out_dir, role + '.bin'))
@@ -508,9 +510,9 @@ def main():
 
     def shadow_run(label, enabled, overlay='none', extra='', buildings=1, shadows_extra='', flagpole=False,
                    old=False, game_dir=None, flag_stage=0, mod_files=None, flag_dds=None, ramp=False, sun='-1,0,-1',
-                   sheet='0'):
+                   sheet='0', water_height=0):
         """Harness 'shadow' scene with shadows on or off; returns its SHADOW values and session log. sun: [shadows]
-        SunDirection. old: the
+        SunDirection; water_height: [reflection] WaterHeight. old: the
         terrain and unit shaders named as in older BtS builds; game_dir: BtS's tree and river shaders from there;
         flag_stage: the texture stage the flag texture is on (flag_dds: another texture there); mod_files: {path in a
         mod folder: bytes}, run with mod= that folder; ramp: the detail texture brightens along u (256 texels); sheet '1':
@@ -524,7 +526,7 @@ def main():
         os.makedirs(sdir)
         shutil.copyfile(DLL, os.path.join(sdir, 'd3d9.dll'))
         with TestIni(os.path.join(sdir, 'GraphicsUpgrade.ini')) as f:
-            f.write(f'[general]\nOutputDir={sout_dir}\nGames=*\n[reflection]\nWaterHeight=0\n'
+            f.write(f'[general]\nOutputDir={sout_dir}\nGames=*\n[reflection]\nWaterHeight={water_height}\n'
                     f'[shadows]\nEnabled={enabled}\nSunDirection={sun}\nDarkness=0.5\nOverlay=1\nBuildingShadows={buildings}\n'
                     f'HillShadowLength=1\n{textures_ini}{shadows_extra}'
                     f'{extra}')
@@ -755,6 +757,58 @@ def main():
                   f"{md.group(1) if md else '?'}); ground above them lifts them onto it ({md.group(2) if md else '?'} "
                   f"channels moved)")
         check('final refs device 0, d3d 0' in wout2, 'wave comparison: device released')
+
+    print('culture borders:')
+    # With [debug] TerrainVertsPerPlot 33/65 the borders are drawn with our copy of BtS's border shader (border.hlsl):
+    # lifted onto the terrain's heights and nearer the camera in depth, so finer terrain doesn't rise through them.
+    if not os.path.exists(os.path.join(GAME_SHADERS, 'border1_ps.bin')):
+        print(f"  skip  culture borders: BtS's CultureBOrderShader.fx not found under {BTS}")
+    else:
+        def border_run(label, ini):
+            bdir = os.path.join(TEST, label)
+            if os.path.isdir(bdir):
+                shutil.rmtree(bdir)
+            os.makedirs(bdir)
+            shutil.copyfile(DLL, os.path.join(bdir, 'd3d9.dll'))
+            with TestIni(os.path.join(bdir, 'GraphicsUpgrade.ini')) as f:
+                f.write(f'[general]\nOutputDir={os.path.join(bdir, "out")}\n{ini}')
+            out = run([os.path.join(TEST, 'test_proxy.exe'), os.path.join(bdir, 'd3d9.dll'), 'border', GAME_SHADERS])
+            plain = {int(p): (int(s), int(n)) for p, s, n in re.findall(r'BORDERPLAIN p=(\d) sum=(\d+) lit=(\d+)', out)}
+            ridge = {int(p): int(n) for p, n in re.findall(r'BORDERRIDGE p=(\d) visible=(\d+)', out)}
+            log_path = os.path.join(bdir, 'out', 'test_proxy', 'session.log')
+            log = open(log_path, encoding='latin-1').read() if os.path.exists(log_path) else ''
+            return out, plain, ridge, log
+
+        bout, _, _, _ = border_run('bordercmp', 'Games=none\n')
+        if 'BORDERCMP skipped' in bout:
+            print('  skip  our border shader: no vertex textures here')
+        else:
+            mc = re.search(r'BORDERCMP same0=(\d+) same1=(\d+)', bout)
+            check(mc and int(mc.group(1)) <= 1 and int(mc.group(2)) <= 1,
+                  f"our border shader draws what BtS's does, both passes, nothing lifted or moved (worst "
+                  f"{mc.group(1) if mc else '?'} and {mc.group(2) if mc else '?'} of 255)")
+            ml = re.search(r'BORDERLIFT flat=(\d+) moved=(\d+)', bout)
+            check(ml and int(ml.group(1)) <= 1 and int(ml.group(2)) > 1000,
+                  f"our border shader: where the ground is unknown it's drawn as BtS draws it (worst "
+                  f"{ml.group(1) if ml else '?'}); ground 100 above it lifts it onto it "
+                  f"({ml.group(2) if ml else '?'} pixels changed)")
+        check('final refs device 0, d3d 0' in bout, 'border comparison: device released')
+        textures = '[textures]\nAnisotropy=1\n'
+        sout, splain, sridge, slog = border_run('borderstock', f'Games=*\n{textures}')
+        fout, fplain, fridge, flog = border_run('borderfine', f'Games=*\n{textures}[debug]\nTerrainVertsPerPlot=65\n')
+        check(len(sridge) == 2 and all(v == 0 for v in sridge.values()) and 'borders:' not in slog,
+              f"stock terrain: the borders drawn as BtS draws them, a ridge 10 units in front hides them "
+              f"({sridge.get(0)}, {sridge.get(1)} channels lit)")
+        check(len(fridge) == 2 and all(v > 10000 for v in fridge.values()) and
+              'borders: culture borders drawn with our border shader, 24 units nearer the camera; not lifted' in flog,
+              f"TerrainVertsPerPlot=65: the borders drawn with ours, nearer the camera in depth, so a ridge 10 units "
+              f"in front no longer hides them ({fridge.get(0)}, {fridge.get(1)} channels lit)")
+        check(len(fplain) == 2 and all(fplain[p][1] > 10000 and abs(fplain[p][0] - splain[p][0]) <= splain[p][0] * 0.0005
+                                       for p in (0, 1)),
+              f"TerrainVertsPerPlot=65: with nothing in front, the borders look as BtS draws them (sums "
+              f"{[fplain.get(p, (0,))[0] for p in (0, 1)]} vs {[splain.get(p, (0,))[0] for p in (0, 1)]})")
+        check('final refs device 0, d3d 0' in sout and 'final refs device 0, d3d 0' in fout,
+              'culture borders: device released, stock and finer terrain')
 
     print('lighting:')
 
@@ -1323,6 +1377,16 @@ def main():
     check(abs(b_on.get('bld', 0) - round(b_on.get('lit', 0) * 0.32)) <= 3 and b_on['released'],
           f'building (lit fixed-function mesh) casts a shadow at the default BuildingDarkness 0.68 '
           f'({b_on.get("bld")}, expected {round(b_on.get("lit", 0) * 0.32)})')
+    # Wave rings at the water's height don't cast; that height is the water draw's, not [reflection] WaterHeight's
+    # start value (a mod's water can lie far below it, its land too: Dune Wars' desert floor). The building stands at
+    # z 10: under WaterHeight=49.5, 10 above the water drawn at 0.
+    b_low, _ = shadow_run('lowwater', 1, 'buildingwater', '', buildings=1, water_height=49.5)
+    b_high, _ = shadow_run('highwater', 1, 'building', '', buildings=1, water_height=49.5)
+    check(abs(b_low.get('bld', 0) - round(b_low.get('lit', 0) * 0.32)) <= 3 and
+          abs(b_high.get('bld', 0) - b_high.get('lit', 0)) <= 2,
+          f'buildings cast down to the height of the water drawn: {b_low.get("bld")} with the water at 0 (expected '
+          f'{round(b_low.get("lit", 0) * 0.32)}); with no water drawn, the WaterHeight=49.5 start value keeps the '
+          f'building at z 10 from casting ({b_high.get("bld")}, lit {b_high.get("lit")})')
     b_light, _ = shadow_run('bdark', 1, 'building', '', buildings=1, shadows_extra='BuildingDarkness=0.25\n')
     check(abs(b_light.get('bld', 0) - round(b_light.get('lit', 0) * 0.75)) <= 3 and
           abs(b_light.get('shadowed', 0) - b_light.get('lit', 0) // 2) <= 2,
@@ -1542,19 +1606,14 @@ def main():
             check(abs(same_sum - base_sum) <= base_sum * 0.001,
                   f'glint follows the sun: with the sun where the sky texture painted it, the picture is as before '
                   f'(frame {same_sum} vs {base_sum})')
-            # Caustics: Civ 5's textures from the GraphicsUpgrade folder load (no terrain here, so no shore
-            # is known and the picture is the glint's alone).
-            civ5 = os.path.join(ROOT, 'work', 'civ5')
-            files = [(os.path.join(civ5, 'EffectTextures', a), b) for a, b in
-                     (('fx_caustics_base_01.dds', 'water_caustics1.dds'), ('fx_caustics_base_02.dds', 'water_caustics2.dds'))]
-            if all(os.path.exists(f) for f, _ in files):
-                (tex_sum, _), tlog, tout = shore_run('textures', 'GlintFollowsSun=1\nCaustics=1\n', painted, files)
-                check('shoreline and shallow water ready' in tlog and 'shore not read yet or off' in tlog and
-                      abs(tex_sum - base_sum) <= base_sum * 0.001 and 'final refs device 0, d3d 0' in tout,
-                      f'caustics: their textures load from the GraphicsUpgrade folder; with no shore '
-                      f'known the water is unchanged (frame {tex_sum} vs {base_sum}); device released')
-            else:
-                print(f'  skip  caustics textures: Civ 5 textures not extracted to {civ5}')
+            # Caustics: the bundled textures (Civ 5's) from the GraphicsUpgrade folder load (no terrain here, so no
+            # shore is known and the picture is the glint's alone).
+            files = [(os.path.join(ROOT, 'textures', fn), fn) for fn in ('water_caustics1.dds', 'water_caustics2.dds')]
+            (tex_sum, _), tlog, tout = shore_run('textures', 'GlintFollowsSun=1\nCaustics=1\n', painted, files)
+            check('shoreline and shallow water ready' in tlog and 'shore not read yet or off' in tlog and
+                  abs(tex_sum - base_sum) <= base_sum * 0.001 and 'final refs device 0, d3d 0' in tout,
+                  f'caustics: the bundled textures load from the GraphicsUpgrade folder; with no shore '
+                  f'known the water is unchanged (frame {tex_sum} vs {base_sum}); device released')
             # Wave shading: the waves lit by the glint's light change the picture; off, it's as before.
             (wave_sum, _), wlog, wout = shore_run('wave_shading', 'GlintFollowsSun=0\nWaveShading=255\n')
             check('wave shading 255/255' in wlog and wave_sum != base_sum and 'final refs device 0, d3d 0' in wout,

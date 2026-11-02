@@ -38,6 +38,9 @@ public:
     // of their settings (the light cycle).
     const float* sunDirection = g_config.sunDirection;
     float darknessScale = 1.0f;
+    // Set before each draw: the water's height as the water draw gives it (Reflection::WaterHeight; [reflection]
+    // WaterHeight until the first water draw). Models standing at it don't cast; the sun camera is fitted at it.
+    float waterHeight = g_config.waterHeight;
     IDirect3DTexture9* terrainNormals = nullptr;  // TerrainNormals' map for per-pixel terrain lighting (s5), or null
     IDirect3DTexture9* hillShadows = nullptr;     // TerrainNormals' hill shadow mask (s6), or null
     const float* decalLight = nullptr;            // unlit ground decals' change of light (Lighting::DecalLight), or null
