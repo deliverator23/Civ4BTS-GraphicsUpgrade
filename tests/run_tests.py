@@ -13,6 +13,7 @@ A few tests use files from the installed games, found at the Steam locations or 
 GU_BTS (the "Sid Meier's Civilization IV Beyond the Sword" folder) and GU_COL (the Colonization folder):
   - BtS's compiled tree and river shaders, and Colonization's water shader, extracted from their Shaders/FXO effects
   - BtS's unit blob shadow texture (Assets/Art0.FPK) and a unit flag texture
+  - Civ4BeyondSword.exe from Steam and GOG (GU_BTS_GOG: GOG's "Civ4" folder): the exe patches' addresses checked
 Tests whose files are missing are skipped. GU_BTS_OLD_SHADERS may name the Shaders folder of an older (non-Steam)
 BtS build: its tree and river shaders are then tested too.
 """
@@ -36,6 +37,7 @@ FAILS = []
 STEAM = r'C:\Program Files (x86)\Steam\steamapps\common'
 BTS = os.environ.get('GU_BTS', os.path.join(STEAM, "Sid Meier's Civilization IV Beyond the Sword"))
 COL = os.environ.get('GU_COL', os.path.join(STEAM, 'Civilization IV Colonization'))
+GOG_BTS = os.environ.get('GU_BTS_GOG', r'C:\Program Files (x86)\GOG Galaxy\Games\Civilization IV Complete\Civ4')
 GAME_SHADERS = os.path.join(TEST, 'game_shaders')  # BtS's tree and river shaders
 OLD_GAME_SHADERS = os.path.join(TEST, 'old_game_shaders')  # the same from GU_BTS_OLD_SHADERS
 OLD_SHADER_DIR = os.environ.get('GU_BTS_OLD_SHADERS')
@@ -313,6 +315,29 @@ def main():
           "patch's strings; the scale masks' format prints the new prefix and skips the old one's argument")
     check(tp.get('maskflat') == 1 and tp.get('maskramp') == 1,
           'a 16x16 mask resampled to 64x64: flat stays flat; a ramp stays an evenly spaced ramp, the same either way round')
+
+    print("the BtS builds the exe patches know (exe_layout.h), on the installed exes:")
+    for label, exe, steam in (('GOG', os.path.join(GOG_BTS, 'Beyond the Sword', 'Civ4BeyondSword.exe'), False),
+                              ('Steam', os.path.join(BTS, 'Beyond the Sword', 'Civ4BeyondSword.exe'), True)):
+        if not os.path.exists(exe):
+            print(f'  skip  {label}: no {exe} (set {"GU_BTS" if steam else "GU_BTS_GOG"})')
+            continue
+        xout = run([os.path.join(TEST, 'test_proxy.exe'), 'exelayout', exe] + (['steam'] if steam else []))
+        m = re.search(r'^EXELAYOUT build=(\S+) timestamp=(\S+) (identified.*)$', xout, re.M)
+        xl = {k: int(v) for k, v in (kv.split('=') for kv in m.group(3).split())} if m else {}
+        if not steam:
+            check(m and m.group(1) == 'GOG' and xl.get('identified') == 1,
+                  f'GOG ({m.group(2) if m else "?"}): recognised by its three calls to the tile picker {xl}')
+            check(all(xl.get(k) == 1 for k in ('verts', 'masks', 'folders', 'tilesets', 'landblend', 'jigsaw')),
+                  'GOG: every patch site holds BtS\'s bytes (TerrainVertsPerPlot 33 and 65, coast scale masks, heightmap '
+                  'folder, tile groups, land blends, jigsaw base stamp)' + ('' if xl else f'\n{xout}'))
+            check(xl.get('lists') == 1, "GOG: the tile loader fills the layout's eight tile lists, in its order")
+        else:
+            check(xl.get('identified') == 1, f'Steam ({m.group(2) if m else "?"}): its code is encrypted on disk, so only '
+                  f'its data is checked {xl}')
+        check(xl.get('strings') == 1 and xl.get('cellslots') == 1 and xl.get('crt') == 1,
+              f"{label}: the heightmap path strings, the landscape getters' delay-load slots and the CRT's srand / rand "
+              'where the layout has them')
 
     print('terrain tile groups ([terrain tiles], experimental):')
     check("terrain tile groups: not applied: test_proxy.exe isn't Civ4BeyondSword.exe" in log,

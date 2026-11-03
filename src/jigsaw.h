@@ -682,12 +682,11 @@ inline bool AddTile(uint8_t* cells, int rowBytes, int rows, int ox, int oy, int 
 
 // The base tile stamp (FUN_00478a90: EDI = the square's land corners, [ESP+4] the height grid, [ESP+8] x, EBX = y;
 // RET 8), hooked at its entry: SUB ESP,0x10; CMP EDI,1 (6 bytes) become a JMP to the thunk and a NOP; the thunk runs
-// those two itself and comes back at +6.
-const uint32_t kBaseStamp = 0x78a90;
-inline std::vector<TerrainPatch::Site> Sites(uint32_t base, uint32_t thunk)
+// those two itself and comes back at +6. Its address: Exe::Layout's baseStamp.
+inline std::vector<TerrainPatch::Site> Sites(uint32_t base, uint32_t thunk, const Exe::Layout& x)
 {
-    const uint32_t rel = thunk - (base + kBaseStamp + 5);
-    return {{kBaseStamp,
+    const uint32_t rel = thunk - (base + x.baseStamp + 5);
+    return {{x.baseStamp,
              {0x83, 0xec, 0x10, 0x83, 0xff, 0x01},
              {0xe9, static_cast<uint8_t>(rel), static_cast<uint8_t>(rel >> 8), static_cast<uint8_t>(rel >> 16),
               static_cast<uint8_t>(rel >> 24), 0x90},

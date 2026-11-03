@@ -2582,11 +2582,11 @@ static int TerrainPatchTest()
 {
     const size_t size = 0xbb000;
     std::vector<uint8_t> stock(size, 0xcc);
-    for (const auto& site : TerrainPatch::Sites(33))
+    for (const auto& site : TerrainPatch::Sites(33, Exe::kSteam))
         memcpy(stock.data() + site.rva, site.original.data(), site.original.size());
     auto run = [&](std::vector<uint8_t>& image, int verts, int& writes) {
         writes = 0;
-        return TerrainPatch::Apply(image.data(), image.size(), verts, [&](uint32_t rva, const uint8_t* b, size_t n) {
+        return TerrainPatch::Apply(image.data(), image.size(), verts, Exe::kSteam, [&](uint32_t rva, const uint8_t* b, size_t n) {
             memcpy(image.data() + rva, b, n);
             ++writes;
         });
@@ -2636,11 +2636,11 @@ static int TerrainPatchTest()
     };
     const bool cells = cellsAre(33, 4, 33, 4, 129) && cellsAre(65, 4, 65, 2, 129) && cellsAre(65, 2, 65, 2, 129) &&
                        cellsAre(17, 4, 17, 4, 65) && cellsAre(65, 1, 65, 1, 65) && cellsAre(33, 8, 33, 4, 129) &&
-                       TerrainPatch::CellImports().size() == 6;
+                       TerrainPatch::CellImports(Exe::kSteam).size() == 6;
     // The heightmap folder: the nine PUSHes of the tile loader's path strings pointed at ours (heightmap64 at 65); the
     // scale masks' format prints the new prefix and skips the old one's argument.
     std::vector<uint8_t> hmImg = stock;
-    const auto prefixes = TerrainPatch::TilePrefixes();
+    const auto prefixes = TerrainPatch::TilePrefixes(Exe::kSteam);
     for (const auto& p : prefixes)
     {
         const uint8_t push[5] = {0x68, uint8_t(p.stringVa), uint8_t(p.stringVa >> 8), uint8_t(p.stringVa >> 16),
@@ -2679,21 +2679,21 @@ static int TerrainPatchTest()
     // Hills' and peaks' coast scale masks: the two calls to the picker sent to a thunk; a mask resampled to the tiles.
     const uint32_t base = 0x400000, thunk = 0x12345678;
     std::vector<uint8_t> maskImg = stock;
-    for (uint32_t rva : TerrainPatch::kMaskCalls)
+    for (uint32_t rva : Exe::kSteam.maskCalls)
     {
-        const auto call = TerrainPatch::CallTo(base + rva, base + TerrainPatch::kMaskPicker);
+        const auto call = TerrainPatch::CallTo(base + rva, base + Exe::kSteam.maskPicker);
         memcpy(maskImg.data() + rva, call.data(), call.size());
     }
     const bool maskCalls = maskImg[0x78d24] == 0xe8 && maskImg[0x78d24 + 1] == 0x27 && maskImg[0x78e39 + 1] == 0x12;
     int maskWrites = 0;
     const std::string maskWhy = TerrainPatch::ApplySites(maskImg.data(), maskImg.size(),
-                                                         TerrainPatch::MaskSites(base, thunk),
+                                                         TerrainPatch::MaskSites(base, thunk, Exe::kSteam),
                                                          [&](uint32_t rva, const uint8_t* b, size_t n) {
         memcpy(maskImg.data() + rva, b, n);
         ++maskWrites;
     });
     bool maskSites = maskCalls && maskWhy.empty() && maskWrites == 2;
-    for (uint32_t rva : TerrainPatch::kMaskCalls)
+    for (uint32_t rva : Exe::kSteam.maskCalls)
     {
         int32_t rel;
         memcpy(&rel, maskImg.data() + rva + 1, 4);
@@ -2832,9 +2832,12 @@ static int TileSetsTest()
                          c[2][1] == 6 && c[3][0] == 4 && c[3][1] == 6;
     const bool seed = Seed(1, 1) == 0x1C81u + 0xB5Du && Seed(3, 0) == 3u * 0x1C81u;
     // The sites on a fake image: rewritten with JMP / CALL to the thunks only when every one holds BtS's bytes.
+    const Exe::Layout& steam = Exe::kSteam;
+    const uint32_t kPicker = steam.picker, kHills = steam.hills, kPeaks = steam.peaks, kAtlasCall = steam.atlasCall,
+                   kWaveCall = steam.waveCall, kCoastClassFn = steam.coastClassFn, kBlendPick = steam.blendPick;
     const uint32_t base = 0x400000, picker = 0x10001000, hill = 0x10002000, peak = 0x10003000, atlas = 0x10004000,
                    wave = 0x10005000;
-    const auto sites = Sites(base, picker, hill, peak, atlas, wave);
+    const auto sites = Sites(base, picker, hill, peak, atlas, wave, steam);
     std::vector<uint8_t> stock(0x220000, 0xcc);
     for (const auto& s : sites)
         memcpy(stock.data() + s.rva, s.original.data(), s.original.size());
@@ -2901,19 +2904,19 @@ static int TileSetsTest()
                                          "14,0; 15,0", lb, w4);
     std::vector<uint8_t> limg(0x7a000, 0xcc);
     const uint32_t lbase = 0x400000, lthunk = 0x12345678;
-    for (uint32_t rva : kBlendPickCalls)
+    for (uint32_t rva : steam.blendPickCalls)
     {
         const auto call = Rel32(0xE8, lbase + rva, lbase + kBlendPick);
         memcpy(limg.data() + rva, call.data(), call.size());
     }
     int lwrites = 0;
-    const std::string lres = TerrainPatch::ApplySites(limg.data(), limg.size(), LandBlendSites(lbase, lthunk),
+    const std::string lres = TerrainPatch::ApplySites(limg.data(), limg.size(), LandBlendSites(lbase, lthunk, steam),
                                                       [&](uint32_t rva, const uint8_t* b, size_t n) {
         memcpy(limg.data() + rva, b, n);
         ++lwrites;
     });
     bool landSites = lres.empty() && lwrites == 3;
-    for (uint32_t rva : kBlendPickCalls)
+    for (uint32_t rva : steam.blendPickCalls)
     {
         int32_t rel;
         memcpy(&rel, limg.data() + rva + 1, 4);
@@ -3747,9 +3750,9 @@ static int JigsawTest(const wchar_t* folder)
         sameEdge = sameEdge && a == b && (!a || t0 == tw);
     }
     // the hook site: a JMP to the thunk and a NOP over SUB ESP,0x10; CMP EDI,1, only over those bytes
-    const uint32_t imgBase = 0x400000, thunk = 0x10006000;
+    const uint32_t imgBase = 0x400000, thunk = 0x10006000, kBaseStamp = Exe::kSteam.baseStamp;
     std::vector<uint8_t> img(0x80000, 0xcc);
-    const auto sites = Sites(imgBase, thunk);
+    const auto sites = Sites(imgBase, thunk, Exe::kSteam);
     memcpy(img.data() + kBaseStamp, sites[0].original.data(), sites[0].original.size());
     std::vector<uint8_t> otherImg = img;
     otherImg[kBaseStamp + 5] = 0x02;
@@ -3961,8 +3964,106 @@ static int PlotStampsTest(const wchar_t* folder)
     return 0;
 }
 
+// test_proxy exelayout <Civ4BeyondSword.exe> [steam]: a real exe file laid out as Windows loads it, recognised by
+// Exe::Identify, and every patch's sites checked against it (each holding BtS's own bytes, so each applies), with the
+// layout's data: the tile lists the loader fills, its path strings, the delay-load slots and the CRT's srand / rand.
+// Steam's file is encrypted on disk (only its code: the data checks still run), so it isn't recognised; "steam" checks
+// its data against Exe::kSteam. Prints "EXELAYOUT name=0/1 ..." for run_tests.py.
+static int ExeLayoutTest(const wchar_t* path, bool steam)
+{
+    std::vector<uint8_t> file;
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, path, L"rb") == 0 && f)
+    {
+        fseek(f, 0, SEEK_END);
+        file.resize(static_cast<size_t>(ftell(f)));
+        fseek(f, 0, SEEK_SET);
+        file.resize(fread(file.data(), 1, file.size(), f));
+        fclose(f);
+    }
+    if (file.size() < 0x400)
+    {
+        printf("EXELAYOUT no file\n");
+        return 1;
+    }
+    const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(file.data());
+    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS32*>(file.data() + dos->e_lfanew);
+    const uint32_t base = nt->OptionalHeader.ImageBase;
+    std::vector<uint8_t> img(nt->OptionalHeader.SizeOfImage, 0);
+    memcpy(img.data(), file.data(), nt->OptionalHeader.SizeOfHeaders);
+    const IMAGE_SECTION_HEADER* sec = IMAGE_FIRST_SECTION(nt);
+    for (int i = 0; i < nt->FileHeader.NumberOfSections; ++i)
+    {
+        const size_t raw = sec[i].SizeOfRawData, inFile = file.size() - sec[i].PointerToRawData,
+                     inImage = img.size() - sec[i].VirtualAddress;
+        const size_t n = (std::min)(raw, (std::min)(inFile, inImage));
+        memcpy(img.data() + sec[i].VirtualAddress, file.data() + sec[i].PointerToRawData, n);
+    }
+    const Exe::Layout* found = Exe::Identify(img.data(), img.size());
+    const Exe::Layout& x = steam ? Exe::kSteam : (found ? *found : Exe::kSteam);
+    const bool identified = steam ? found == nullptr : found != nullptr;  // Steam's code is encrypted on disk
+    auto at = [&](uint32_t va) { return img.data() + (va - base); };
+    // the code: every patch's sites hold BtS's bytes (each set applied to its own copy, as the game would)
+    auto applies = [&](const std::vector<TerrainPatch::Site>& sites) {
+        std::vector<uint8_t> copy = img;
+        size_t writes = 0;
+        const std::string why = TerrainPatch::ApplySites(copy.data(), copy.size(), sites,
+                                                         [&](uint32_t rva, const uint8_t* b, size_t n) {
+            memcpy(copy.data() + rva, b, n);
+            ++writes;
+        });
+        if (!why.empty())
+            printf("  %s\n", why.c_str());
+        return why.empty() && writes == sites.size();
+    };
+    const auto prefixes = TerrainPatch::TilePrefixes(x);
+    std::vector<uint32_t> strings;
+    for (size_t k = 0; k < prefixes.size(); ++k)
+        strings.push_back(0x10000000 + static_cast<uint32_t>(k) * 0x100);
+    const bool code = !steam && found;
+    const bool verts = code && applies(TerrainPatch::Sites(33, x)) && applies(TerrainPatch::Sites(65, x));
+    const bool masks = code && applies(TerrainPatch::MaskSites(base, 0x10001000, x));
+    const bool folders = code && applies(TerrainPatch::TileFolderSites(base, prefixes, strings));
+    const bool tileSets = code && applies(TileSets::Sites(base, 0x10002000, 0x10003000, 0x10004000, 0x10005000,
+                                                          0x10006000, x));
+    const bool landBlend = code && applies(TileSets::LandBlendSites(base, 0x10007000, x));
+    const bool jigsaw = code && applies(Jigsaw::Sites(base, 0x10008000, x));
+    // the loader: PUSH <prefix>; MOV ESI,<list>, for each list in the layout's order
+    bool lists = code;
+    for (int k = 0; k < 8 && lists; ++k)
+    {
+        uint32_t list;
+        memcpy(&list, img.data() + x.tilePushes[k] + 6, 4);
+        lists = img[x.tilePushes[k] + 5] == 0xbe && list == x.lists[k];
+    }
+    // the data: the path strings, the delay-load slots' thunks, the CRT imports (unbound on disk: hint / name RVAs)
+    bool strs = true;
+    for (const auto& p : prefixes)
+        strs = strs && strcmp(reinterpret_cast<const char*>(at(p.stringVa)), p.scale ? "%s%02d.tga" : p.prefix) == 0;
+    bool cellSlots = true;
+    for (const auto& s : TerrainPatch::CellImports(x))
+    {
+        uint32_t held;
+        memcpy(&held, at(s.slot), 4);
+        cellSlots = cellSlots && held == s.thunk;
+    }
+    auto imports = [&](uint32_t slot, const char* name) {
+        uint32_t hint;
+        memcpy(&hint, at(slot), 4);
+        return hint && hint + 2 < img.size() && strcmp(reinterpret_cast<const char*>(img.data() + hint + 2), name) == 0;
+    };
+    const bool crt = imports(x.srand, "srand") && imports(x.rand, "rand");
+    printf("EXELAYOUT build=%s timestamp=0x%08lx identified=%d verts=%d masks=%d folders=%d tilesets=%d landblend=%d "
+           "jigsaw=%d lists=%d strings=%d cellslots=%d crt=%d\n",
+           found ? found->name : "-", static_cast<unsigned long>(nt->FileHeader.TimeDateStamp), identified, verts,
+           masks, folders, tileSets, landBlend, jigsaw, lists, strs, cellSlots, crt);
+    return 0;
+}
+
 int wmain(int argc, wchar_t** argv)
 {
+    if (argc > 2 && wcscmp(argv[1], L"exelayout") == 0)
+        return ExeLayoutTest(argv[2], argc > 3 && wcscmp(argv[3], L"steam") == 0);
     if (argc > 1 && wcscmp(argv[1], L"plotstamps") == 0)
         return PlotStampsTest(argc > 2 ? argv[2] : nullptr);
     if (argc > 1 && wcscmp(argv[1], L"terrainpatch") == 0)

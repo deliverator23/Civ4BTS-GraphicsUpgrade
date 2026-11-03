@@ -110,6 +110,7 @@ struct GameDll
 GameDll g_dll;
 
 uint32_t g_base = 0;
+const Exe::Layout* g_exe = &Exe::kSteam;  // the running build's, once a patch has found it (Exe::Identify)
 int g_sets = 1;
 const int kUnlisted = -2;
 // by TerrainTypes: the set (0-based; the INI's TileGroup1 is 0) it's listed in, or kUnlisted
@@ -118,7 +119,7 @@ bool g_tableBuilt = false;
 unsigned g_picks[TileSets::kMaxSets] = {}, g_hillVariants[16] = {}, g_peakVariants[16] = {};
 unsigned g_logged = 0;
 
-// Which list a pick was for: FUN_00478180 (return +0x781a1) gets it in ESI; the other callers by where they return.
+// Which list a pick was for: FUN_00478180 (listCaller) gets it in ESI; the other callers by where they return.
 enum List
 {
     kOcean, kFlats, kCoast1, kCoast3, kCoast5, kCoast7, kCoastClass, kScale, kOther, kLists
@@ -136,23 +137,21 @@ bool g_setFlatsLogged = false;
 
 List ListOf(uint32_t returnAddress, uint32_t esi)
 {
+    const Exe::Layout& x = *g_exe;
     const uint32_t rva = returnAddress - g_base;
-    if (rva == 0x781a1)  // FUN_00478180: the list object in ESI
-        switch (esi)
-        {
-        case 0xb85340: return kOcean;
-        case 0xb85350: return kFlats;
-        case 0xb85380: return kCoast1;
-        case 0xb85390: return kCoast3;
-        case 0xb853a0: return kCoast7;
-        case 0xb853b0: return kCoast5;
-        default: return kOther;
-        }
-    if (rva == 0x78c40)  // FUN_00478a90's one-land-corner coasts
+    if (rva == x.listCaller)  // FUN_00478180: the list object in ESI (lists in the loader's order)
+    {
+        const List byLoad[8] = {kOcean, kFlats, kOther, kOther, kCoast1, kCoast3, kCoast7, kCoast5};
+        for (int k = 0; k < 8; ++k)
+            if (esi == x.lists[k])
+                return byLoad[k];
+        return kOther;
+    }
+    if (rva == x.coast1Caller)  // FUN_00478a90's one-land-corner coasts
         return kCoast1;
-    if (rva >= 0x788e0 && rva < 0x789c0)  // FUN_004788e0: the coast class index the waves and atlas use
+    if (rva >= x.coastClassFn && rva < x.coastClassFnEnd)  // FUN_004788e0: the coast class index the waves and atlas use
         return kCoastClass;
-    if (rva >= 0x78f50 && rva < 0x78fd0)  // FUN_00478f50: the coast scale mask
+    if (rva >= x.maskPicker && rva < x.maskPickerEnd)  // FUN_00478f50: the coast scale mask
         return kScale;
     return kOther;
 }
@@ -887,12 +886,12 @@ extern "C" int __stdcall TileSetsPicker(int x, int y, int lo, int hi, uint32_t r
     Wrap(wx, wy);
     using Srand = void(__cdecl*)(unsigned);
     using Rand = int(__cdecl*)();
-    (*reinterpret_cast<Srand*>(TileSets::kSrand))(TileSets::Seed(wx, wy));
-    const int r = (*reinterpret_cast<Rand*>(TileSets::kRand))();
+    (*reinterpret_cast<Srand*>(g_exe->srand))(TileSets::Seed(wx, wy));
+    const int r = (*reinterpret_cast<Rand*>(g_exe->rand))();
     const int count = hi - lo;
     if (count <= 0)
         return lo;
-    if (g_sets <= 1 || returnAddress == g_base + TileSets::kBlendCaller)
+    if (g_sets <= 1 || returnAddress == g_base + g_exe->blendCaller)
         return lo + r % count;
     const int set = SquareSet(x, y);
     ++g_picks[set];
@@ -916,7 +915,7 @@ extern "C" int __stdcall TileSetsPicker(int x, int y, int lo, int hi, uint32_t r
 // A hill (family 0) or peak (1) tile for a corner mask: hill1_<mask + 15 v>, v a variant from the square's set.
 extern "C" void* __stdcall TileSetsTile(int family, int mask, int x, int y)
 {
-    const uint32_t list = family ? TileSets::kPeakList : TileSets::kHillList;
+    const uint32_t list = family ? TileSets::PeakList(*g_exe) : TileSets::HillList(*g_exe);
     void** begin = *reinterpret_cast<void***>(list + 4);
     void** end = *reinterpret_cast<void***>(list + 8);
     const int n = begin ? static_cast<int>(end - begin) : 0;
@@ -1043,13 +1042,21 @@ void ApplyTileSets()
         Log::Write("terrain tile groups: not applied: the exe is loaded at %p, not 0x400000", base);
         return;
     }
+    const Exe::Layout* exeLayout = Exe::Identify(base, nt->OptionalHeader.SizeOfImage);
+    if (!exeLayout)
+    {
+        Log::Write("terrain tile groups: not applied: not a BtS 3.1.9.0 build it knows (Steam's or GOG's; exe timestamp "
+                   "0x%08lx)", static_cast<unsigned long>(nt->FileHeader.TimeDateStamp));
+        return;
+    }
+    g_exe = exeLayout;
     g_base = reinterpret_cast<uint32_t>(base);
-    g_tileSetsCoastClassFn = g_base + TileSets::kCoastClassFn;
+    g_tileSetsCoastClassFn = g_base + g_exe->coastClassFn;
     const auto sites = TileSets::Sites(g_base, reinterpret_cast<uint32_t>(&TileSetsPickerThunk),
                                        reinterpret_cast<uint32_t>(&TileSetsHillThunk),
                                        reinterpret_cast<uint32_t>(&TileSetsPeakThunk),
                                        reinterpret_cast<uint32_t>(&TileSetsAtlasThunk),
-                                       reinterpret_cast<uint32_t>(&TileSetsWaveThunk));
+                                       reinterpret_cast<uint32_t>(&TileSetsWaveThunk), *g_exe);
     int written = 0;
     const std::string why = TerrainPatch::ApplySites(base, nt->OptionalHeader.SizeOfImage, sites,
                                                      [&](uint32_t rva, const uint8_t* bytes, size_t count) {
@@ -1064,21 +1071,23 @@ void ApplyTileSets()
         }
     });
     if (!why.empty())
-        Log::Write("terrain tile groups: not applied: %s (exe timestamp 0x%08lx)", why.c_str(),
+        Log::Write("terrain tile groups: not applied: %s (%s build, exe timestamp 0x%08lx)", why.c_str(), g_exe->name,
                    static_cast<unsigned long>(nt->FileHeader.TimeDateStamp));
     else
-        Log::Write("terrain tile groups: %d of %u code sites written (picker, hill and peak lookups, coast atlas and wave "
-                   "models); %d tile group%s; coast art per class: atlas cells %d,%d,%d,%d, wave models %d,%d,%d,%d",
-                   written, static_cast<unsigned>(sites.size()), g_sets, g_sets == 1 ? "" : "s",
+        Log::Write("terrain tile groups: %d of %u code sites written (%s build: picker, hill and peak lookups, coast atlas "
+                   "and wave models); %d tile group%s; coast art per class: atlas cells %d,%d,%d,%d, wave models "
+                   "%d,%d,%d,%d",
+                   written, static_cast<unsigned>(sites.size()), g_exe->name, g_sets, g_sets == 1 ? "" : "s",
                    g_config.coastAtlasCells[0], g_config.coastAtlasCells[1], g_config.coastAtlasCells[2],
                    g_config.coastAtlasCells[3], g_config.coastWaveModels[0], g_config.coastWaveModels[1],
                    g_config.coastWaveModels[2], g_config.coastWaveModels[3]);
     if (!why.empty() || (!AnyJigsaw() && !AnyPlotStamps()))
         return;
-    g_jigsawBaseResume = g_base + Jigsaw::kBaseStamp + 6;
+    g_jigsawBaseResume = g_base + g_exe->baseStamp + 6;
     int jigsawWrites = 0;
     const std::string jigsaw = TerrainPatch::ApplySites(base, nt->OptionalHeader.SizeOfImage,
-                                                        Jigsaw::Sites(g_base, reinterpret_cast<uint32_t>(&JigsawBaseThunk)),
+                                                        Jigsaw::Sites(g_base, reinterpret_cast<uint32_t>(&JigsawBaseThunk),
+                                                                      *g_exe),
                                                         [&](uint32_t rva, const uint8_t* bytes, size_t count) {
         void* at = const_cast<uint8_t*>(base) + rva;
         DWORD old = 0;
@@ -1424,9 +1433,17 @@ void ApplyLandBlends()
         Log::Write("terrain land blends: not applied: the exe is loaded at %p, not 0x400000", base);
         return;
     }
+    const Exe::Layout* exeLayout = Exe::Identify(base, nt->OptionalHeader.SizeOfImage);
+    if (!exeLayout)
+    {
+        Log::Write("terrain land blends: not applied: not a BtS 3.1.9.0 build it knows (Steam's or GOG's; exe timestamp "
+                   "0x%08lx)", static_cast<unsigned long>(nt->FileHeader.TimeDateStamp));
+        return;
+    }
+    g_exe = exeLayout;
     g_base = reinterpret_cast<uint32_t>(base);
-    g_blendPickFn = g_base + TileSets::kBlendPick;
-    const auto sites = TileSets::LandBlendSites(g_base, reinterpret_cast<uint32_t>(&LandBlendThunk));
+    g_blendPickFn = g_base + g_exe->blendPick;
+    const auto sites = TileSets::LandBlendSites(g_base, reinterpret_cast<uint32_t>(&LandBlendThunk), *g_exe);
     int written = 0;
     const std::string why = TerrainPatch::ApplySites(base, nt->OptionalHeader.SizeOfImage, sites,
                                                      [&](uint32_t rva, const uint8_t* bytes, size_t count) {
@@ -1441,11 +1458,11 @@ void ApplyLandBlends()
         }
     });
     if (!why.empty())
-        Log::Write("terrain land blends: not applied: %s (exe timestamp 0x%08lx)", why.c_str(),
+        Log::Write("terrain land blends: not applied: %s (%s build, exe timestamp 0x%08lx)", why.c_str(), g_exe->name,
                    static_cast<unsigned long>(nt->FileHeader.TimeDateStamp));
     else
-        Log::Write("terrain land blends: %d of %u code sites written; %u terrain%s with land entries", written,
-                   static_cast<unsigned>(sites.size()), static_cast<unsigned>(g_landBlends.size()),
+        Log::Write("terrain land blends: %d of %u code sites written (%s build); %u terrain%s with land entries", written,
+                   static_cast<unsigned>(sites.size()), g_exe->name, static_cast<unsigned>(g_landBlends.size()),
                    g_landBlends.size() == 1 ? "" : "s");
 }
 

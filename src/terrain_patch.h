@@ -2,7 +2,8 @@
 //
 // CIV4TerrainSettings.xml's iGameCellSizeX/Y sets the samples per plot, and the heightmap tiles
 // (art/terrain/heightmap/*.tga) must then be that minus 1 pixels square. But two places in Civ4BeyondSword.exe
-// hard-code 17 (found in a memory dump of the Steam build, 3.1.9.0; the file itself is encrypted):
+// hard-code 17 (found in a memory dump of the Steam build, 3.1.9.0, whose file is encrypted; GOG's build has the same
+// code at other addresses: exe_layout.h):
 //   - the terrain chunk's constructor sets its samples per plot to 17 and its plots to (samples - 1) >> 4, so at 33 a
 //     chunk reads layer records past its own plots, gets an empty one and crashes (+0xbb54a);
 //   - the river canyon mask is read as a 16x16 window (offset << 4, width and height 16), so river beds need a
@@ -17,6 +18,8 @@
 // are scaled by the mask, the rest by whatever memory follows it. So the patch also calls the picker through a thunk
 // that hands back a copy of the mask resampled to the tile size (MaskSites, ResampleMask).
 #pragma once
+
+#include "exe_layout.h"
 
 #include <algorithm>
 #include <cstddef>
@@ -39,7 +42,7 @@ struct Site
 constexpr int kStockVerts = 17;
 
 // The sites for this many samples per plot: 17, 33 or 65 (a power of two plus 1). Empty for anything else.
-inline std::vector<Site> Sites(int verts)
+inline std::vector<Site> Sites(int verts, const Exe::Layout& x)
 {
     int shift = 0;
     while ((1 << shift) < verts - 1)
@@ -49,13 +52,13 @@ inline std::vector<Site> Sites(int verts)
     const uint8_t v = static_cast<uint8_t>(verts), cells = static_cast<uint8_t>(verts - 1),
                   s = static_cast<uint8_t>(shift);
     return {
-        {0xba862, {0xba, 0x11, 0, 0, 0}, {0xba, v, 0, 0, 0}, "terrain chunk: samples per plot (MOV EDX,17)"},
-        {0xba884, {0xc1, 0xe9, 0x04}, {0xc1, 0xe9, s}, "terrain chunk: plots across (SHR ECX,4)"},
-        {0xba887, {0xc1, 0xe8, 0x04}, {0xc1, 0xe8, s}, "terrain chunk: plots down (SHR EAX,4)"},
-        {0x78db3, {0xc1, 0xe0, 0x04}, {0xc1, 0xe0, s}, "river canyon 1: window offset (SHL EAX,4)"},
-        {0x78dc4, {0xb8, 0x10, 0, 0, 0}, {0xb8, cells, 0, 0, 0}, "river canyon 1: window size (MOV EAX,16)"},
-        {0x78ef3, {0xc1, 0xe0, 0x04}, {0xc1, 0xe0, s}, "river canyon 2: window offset (SHL EAX,4)"},
-        {0x78f04, {0xb8, 0x10, 0, 0, 0}, {0xb8, cells, 0, 0, 0}, "river canyon 2: window size (MOV EAX,16)"},
+        {x.chunkVerts, {0xba, 0x11, 0, 0, 0}, {0xba, v, 0, 0, 0}, "terrain chunk: samples per plot (MOV EDX,17)"},
+        {x.chunkPlotsX, {0xc1, 0xe9, 0x04}, {0xc1, 0xe9, s}, "terrain chunk: plots across (SHR ECX,4)"},
+        {x.chunkPlotsY, {0xc1, 0xe8, 0x04}, {0xc1, 0xe8, s}, "terrain chunk: plots down (SHR EAX,4)"},
+        {x.canyonShift[0], {0xc1, 0xe0, 0x04}, {0xc1, 0xe0, s}, "river canyon 1: window offset (SHL EAX,4)"},
+        {x.canyonSize[0], {0xb8, 0x10, 0, 0, 0}, {0xb8, cells, 0, 0, 0}, "river canyon 1: window size (MOV EAX,16)"},
+        {x.canyonShift[1], {0xc1, 0xe0, 0x04}, {0xc1, 0xe0, s}, "river canyon 2: window offset (SHL EAX,4)"},
+        {x.canyonSize[1], {0xb8, 0x10, 0, 0, 0}, {0xb8, cells, 0, 0, 0}, "river canyon 2: window size (MOV EAX,16)"},
     };
 }
 
@@ -88,9 +91,8 @@ std::string ApplySites(const uint8_t* image, size_t size, const std::vector<Site
 }
 
 // The coast scale mask picker (FUN_00478f50: EAX = the square's water corners, EDI = where it writes the mask: width,
-// height, row bytes, pixels; x and y on the stack, popped by RET 8) and its two calls, from the hill and peak stamps.
-constexpr uint32_t kMaskPicker = 0x78f50;
-constexpr uint32_t kMaskCalls[2] = {0x78d24, 0x78e39};
+// height, row bytes, pixels; x and y on the stack, popped by RET 8) and its two calls, from the hill and peak stamps:
+// Exe::Layout's maskPicker and maskCalls.
 
 inline std::vector<uint8_t> CallTo(uint32_t from, uint32_t to)
 {
@@ -100,13 +102,13 @@ inline std::vector<uint8_t> CallTo(uint32_t from, uint32_t to)
 }
 
 // The two calls to the picker, sent to thunk instead (base: where the exe is loaded).
-inline std::vector<Site> MaskSites(uint32_t base, uint32_t thunk)
+inline std::vector<Site> MaskSites(uint32_t base, uint32_t thunk, const Exe::Layout& x)
 {
     std::vector<Site> sites;
-    for (uint32_t rva : kMaskCalls)
-        sites.push_back({rva, CallTo(base + rva, base + kMaskPicker), CallTo(base + rva, thunk),
-                         rva == kMaskCalls[0] ? "hill stamp: coast scale mask (CALL FUN_00478f50)"
-                                              : "peak stamp: coast scale mask (CALL FUN_00478f50)"});
+    for (uint32_t rva : x.maskCalls)
+        sites.push_back({rva, CallTo(base + rva, base + x.maskPicker), CallTo(base + rva, thunk),
+                         rva == x.maskCalls[0] ? "hill stamp: coast scale mask (CALL FUN_00478f50)"
+                                               : "peak stamp: coast scale mask (CALL FUN_00478f50)"});
     return sites;
 }
 
@@ -153,20 +155,23 @@ struct TilePrefix
     const char* prefix;   // that string (the scale masks: the prefix their format is given)
     const char* first;    // the list's first file after the prefix
     const char* what;
+    bool scale;           // the scale masks: the PUSH is their sprintf format ("%s%02d.tga")
 };
-inline std::vector<TilePrefix> TilePrefixes()
+inline std::vector<TilePrefix> TilePrefixes(const Exe::Layout& x)
 {
+    const uint32_t* p = x.tilePushes;
+    const uint32_t* s = x.tileStrings;
     return {
-        {0x77faa, 0xc3cad0, "art/Terrain/heightmap/Ocean1_", "1.tga", "ocean"},
-        {0x77fb9, 0xc3caac, "art/Terrain/heightmap/flats/flat1_", "1.tga", "flats"},
-        {0x77fc8, 0xc3ca88, "art/Terrain/heightmap/hills/hill1_", "1.tga", "hills"},
-        {0x77fd7, 0xc3ca64, "art/Terrain/heightmap/peaks/Peak_", "1.tga", "peaks"},
-        {0x77fe6, 0xc3ca38, "art/Terrain/heightmap/Coasts/CoastTile1_0", "1.tga", "coasts 1"},
-        {0x77ff5, 0xc3ca0c, "art/Terrain/heightmap/Coasts/CoastTile3_0", "1.tga", "coasts 3"},
-        {0x78004, 0xc3c9e0, "art/Terrain/heightmap/Coasts/CoastTile7_0", "1.tga", "coasts 7"},
-        {0x78013, 0xc3c9b4, "art/Terrain/heightmap/Coasts/CoastTile5_0", "1.tga", "coasts 5"},
-        // the scale masks' sprintf format ("%s%02d.tga"): ours prints the new prefix and skips the old one's argument
-        {0x7804a, 0xc3c970, "art/Terrain/heightmap/CoastBlendMasks/CoastScaleMask", "00.tga", "coast scale masks"},
+        {p[0], s[0], "art/Terrain/heightmap/Ocean1_", "1.tga", "ocean", false},
+        {p[1], s[1], "art/Terrain/heightmap/flats/flat1_", "1.tga", "flats", false},
+        {p[2], s[2], "art/Terrain/heightmap/hills/hill1_", "1.tga", "hills", false},
+        {p[3], s[3], "art/Terrain/heightmap/peaks/Peak_", "1.tga", "peaks", false},
+        {p[4], s[4], "art/Terrain/heightmap/Coasts/CoastTile1_0", "1.tga", "coasts 1", false},
+        {p[5], s[5], "art/Terrain/heightmap/Coasts/CoastTile3_0", "1.tga", "coasts 3", false},
+        {p[6], s[6], "art/Terrain/heightmap/Coasts/CoastTile7_0", "1.tga", "coasts 7", false},
+        {p[7], s[7], "art/Terrain/heightmap/Coasts/CoastTile5_0", "1.tga", "coasts 5", false},
+        // the scale masks' sprintf format: ours prints the new prefix and skips the old one's argument
+        {p[8], s[8], "art/Terrain/heightmap/CoastBlendMasks/CoastScaleMask", "00.tga", "coast scale masks", true},
     };
 }
 // A path in the folder for this many samples per plot: "heightmap/" -> "heightmap<verts - 1>/".
@@ -182,7 +187,7 @@ inline std::string InTileFolder(const std::string& path, int verts)
 inline std::string TileString(const TilePrefix& p, int verts)
 {
     const std::string moved = InTileFolder(p.prefix, verts);
-    return p.stringVa == 0xc3c970 ? "%.0s" + moved + "%02d.tga" : moved;
+    return p.scale ? "%.0s" + moved + "%02d.tga" : moved;
 }
 inline std::vector<Site> TileFolderSites(uint32_t base, const std::vector<TilePrefix>& prefixes,
                                          const std::vector<uint32_t>& strings)
@@ -219,25 +224,25 @@ struct ImportSlot
     uint32_t slot, thunk;
     const char* name;  // the DLL export
 };
-inline std::vector<ImportSlot> CellImports()
+inline std::vector<ImportSlot> CellImports(const Exe::Layout& x)
 {
-    return {
-        {0xb7845c, 0x8ebfa4, "?getHorizontalVertCnt@CvLandscapeInfo@@QBEHXZ"},
-        {0xb78460, 0x8ebfae, "?getVerticalVertCnt@CvLandscapeInfo@@QBEHXZ"},
-        {0xb78464, 0x8ebfb8, "?getPlotsPerCellX@CvLandscapeInfo@@QBEHXZ"},
-        {0xb78468, 0x8ebfc2, "?getPlotsPerCellY@CvLandscapeInfo@@QBEHXZ"},
-        {0xb7846c, 0x8ebfcc, "?getHorizontalGameCell@CvLandscapeInfo@@QBEHXZ"},
-        {0xb78470, 0x8ebfd6, "?getVerticalGameCell@CvLandscapeInfo@@QBEHXZ"},
-    };
+    const char* const names[6] = {
+        "?getHorizontalVertCnt@CvLandscapeInfo@@QBEHXZ",  "?getVerticalVertCnt@CvLandscapeInfo@@QBEHXZ",
+        "?getPlotsPerCellX@CvLandscapeInfo@@QBEHXZ",      "?getPlotsPerCellY@CvLandscapeInfo@@QBEHXZ",
+        "?getHorizontalGameCell@CvLandscapeInfo@@QBEHXZ", "?getVerticalGameCell@CvLandscapeInfo@@QBEHXZ"};
+    std::vector<ImportSlot> slots;
+    for (int k = 0; k < 6; ++k)
+        slots.push_back({x.cellSlots[k], x.cellThunks[k], names[k]});
+    return slots;
 }
 
 // The terrain patch for this many samples per plot (ApplySites); "" when patched (or verts is 17: nothing to do).
 template <class Write>
-std::string Apply(const uint8_t* image, size_t size, int verts, Write write)
+std::string Apply(const uint8_t* image, size_t size, int verts, const Exe::Layout& x, Write write)
 {
     if (verts == kStockVerts)
         return "";
-    std::vector<Site> sites = Sites(verts);
+    std::vector<Site> sites = Sites(verts, x);
     if (sites.empty())
         return "TerrainVertsPerPlot " + std::to_string(verts) + " isn't 17, 33 or 65";
     return ApplySites(image, size, sites, write);

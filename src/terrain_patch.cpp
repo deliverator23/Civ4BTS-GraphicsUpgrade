@@ -48,10 +48,10 @@ int __fastcall GameCellY(void* self, void*) { return CellsFor(self, 1).samples; 
 
 // Points the six import slots at the functions above; only if each still holds its delay-load thunk or the DLL's own
 // function. Returns "" when done.
-std::string HookCellImports()
+std::string HookCellImports(const Exe::Layout& exeLayout)
 {
     const Getter ours[6] = {HorizontalVertCnt, VerticalVertCnt, PlotsPerCellX, PlotsPerCellY, GameCellX, GameCellY};
-    const auto slots = TerrainPatch::CellImports();
+    const auto slots = TerrainPatch::CellImports(exeLayout);
     HMODULE dll = GetModuleHandleW(L"CvGameCoreDLL.dll");
     for (const auto& s : slots)
     {
@@ -157,8 +157,17 @@ void ApplyTerrainPatch()
     const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
     const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS32*>(base + dos->e_lfanew);
     const size_t size = nt->OptionalHeader.SizeOfImage;
+    const unsigned long stamp = static_cast<unsigned long>(nt->FileHeader.TimeDateStamp);
+    const Exe::Layout* exeLayout = Exe::Identify(base, size);
+    if (!exeLayout)
+    {
+        Log::Write("terrain patch: TerrainVertsPerPlot %d not applied: not a BtS 3.1.9.0 build it knows (Steam's or "
+                   "GOG's; exe timestamp 0x%08lx)", verts, stamp);
+        return;
+    }
+    const Exe::Layout& x = *exeLayout;
     int written = 0;
-    std::string why = TerrainPatch::Apply(base, size, verts, [&](uint32_t rva, const uint8_t* bytes, size_t count) {
+    std::string why = TerrainPatch::Apply(base, size, verts, x, [&](uint32_t rva, const uint8_t* bytes, size_t count) {
         void* at = const_cast<uint8_t*>(base) + rva;
         DWORD old = 0;
         if (VirtualProtect(at, count, PAGE_EXECUTE_READWRITE, &old))
@@ -171,19 +180,19 @@ void ApplyTerrainPatch()
     });
     if (!why.empty())
     {
-        Log::Write("terrain patch: TerrainVertsPerPlot %d not applied: %s (exe timestamp 0x%08lx)", verts, why.c_str(),
-                   static_cast<unsigned long>(nt->FileHeader.TimeDateStamp));
+        Log::Write("terrain patch: TerrainVertsPerPlot %d not applied: %s (%s build, exe timestamp 0x%08lx)", verts,
+                   why.c_str(), x.name, stamp);
         return;
     }
-    const std::string imports = HookCellImports();
+    const std::string imports = HookCellImports(x);
     // Hills' and peaks' coast scale masks: resampled to the tile size when they aren't (the exe at its usual base).
     std::string masks = "not at the usual base";
     if (reinterpret_cast<uint32_t>(base) == 0x400000)
     {
-        g_terrainMaskPicker = reinterpret_cast<uint32_t>(base) + TerrainPatch::kMaskPicker;
+        g_terrainMaskPicker = reinterpret_cast<uint32_t>(base) + x.maskPicker;
         int maskWrites = 0;
         masks = TerrainPatch::ApplySites(base, size, TerrainPatch::MaskSites(reinterpret_cast<uint32_t>(base),
-                                                                              reinterpret_cast<uint32_t>(&TerrainMaskThunk)),
+                                                                              reinterpret_cast<uint32_t>(&TerrainMaskThunk), x),
                                          [&](uint32_t rva, const uint8_t* bytes, size_t count) {
             void* at = const_cast<uint8_t*>(base) + rva;
             DWORD old = 0;
@@ -205,7 +214,7 @@ void ApplyTerrainPatch()
     if (reinterpret_cast<uint32_t>(base) == 0x400000)
     {
         static std::vector<std::string> strings;  // pushed by the patched code: kept for the game's lifetime
-        const auto prefixes = TerrainPatch::TilePrefixes();
+        const auto prefixes = TerrainPatch::TilePrefixes(x);
         std::vector<TerrainPatch::TilePrefix> moved;
         std::vector<uint32_t> movedStrings;
         std::string fromNew, fromOld;
@@ -215,7 +224,7 @@ void ApplyTerrainPatch()
         for (const auto& p : prefixes)
         {
             const std::string prefix = TerrainPatch::InTileFolder(p.prefix, verts);
-            const bool scale = p.stringVa == 0xc3c970;
+            const bool scale = p.scale;
             auto name = [&](int n) {
                 char num[16];
                 snprintf(num, sizeof(num), scale ? "%02d.tga" : "%d.tga", n);
@@ -253,10 +262,9 @@ void ApplyTerrainPatch()
             Log::Write("terrain patch: heightmap tiles from %s: %s; from art/Terrain/heightmap/: %s", folder.c_str(),
                        fromNew.empty() ? "none" : fromNew.c_str(), fromOld.empty() ? "none" : fromOld.c_str());
     }
-    Log::Write("terrain patch: %d samples per plot; %d of %u code sites written (exe timestamp 0x%08lx); %s. "
+    Log::Write("terrain patch: %d samples per plot; %d of %u code sites written (%s build, exe timestamp 0x%08lx); %s. "
                "Needs %dx%d heightmap tiles",
-               verts, written, static_cast<unsigned>(TerrainPatch::Sites(verts).size()),
-               static_cast<unsigned long>(nt->FileHeader.TimeDateStamp),
+               verts, written, static_cast<unsigned>(TerrainPatch::Sites(verts, x).size()), x.name, stamp,
                imports.empty() ? "the landscape's cell sizes come from the patch, not CIV4TerrainSettings.xml"
                                : ("CIV4TerrainSettings.xml's cell sizes used as they are: " + imports).c_str(),
                verts - 1, verts - 1);

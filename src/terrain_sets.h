@@ -93,25 +93,23 @@ inline int CycleIndex(int variant, int landMask, const int art[4])
     return variant % cap;
 }
 
-// Where the hooks go (RVAs; Steam build 3.1.9.0, image base 0x400000, which the lookups' list addresses assume):
-const uint32_t kPicker = 0x77ef0;    // the variant picker: replaced by a jump
-const uint32_t kBlendCaller = 0x79979;  // its caller choosing terrain blend textures: always the engine's pick
-const uint32_t kHills = 0x78ce0;     // MOV ECX,[hills.begin]; MOV EDX,[ECX+EAX*4-4]
-const uint32_t kPeaks = 0x78e20;     // MOV ECX,[peaks.begin]; PUSH ESI; MOV ESI,[ECX+EAX*4-4]
-const uint32_t kHillList = 0xb85360, kPeakList = 0xb85370;  // std::vector<texture*>: begin at +4, end at +8 (VAs)
-const uint32_t kSrand = 0xa5a4e0, kRand = 0xa5a4dc;         // the exe's CRT srand / rand (import slots, VAs)
-const uint32_t kCoastClassFn = 0x788e0;  // FUN_004788e0: a coast square's variant index (ECX x, EAX y, EDX land mask)
-const uint32_t kAtlasCall = 0xcdec2;     // its call for the transition atlas's cell (FUN_004cde80)
-const uint32_t kWaveCall = 0x211a18;     // its call for the wave model's number (FUN_006119c0)
+// Where the hooks go: Exe::Layout (exe_layout.h; image base 0x400000, which the lookups' list addresses assume). The
+// variant picker is replaced by a jump, except from its caller choosing terrain blend textures (blendCaller), which
+// always gets the engine's pick. The hill and peak lookups (MOV ECX,[hills.begin]; MOV EDX,[ECX+EAX*4-4] and MOV
+// ECX,[peaks.begin]; PUSH ESI; MOV ESI,[ECX+EAX*4-4]) become calls; the lists are std::vector<texture*>s, begin at +4,
+// end at +8. The coast class index (FUN_004788e0: ECX x, EAX y, EDX land mask) keeps its own caller, the coast tile
+// pick; its calls for the transition atlas's cell (from FUN_004cde80) and the wave model's number (from FUN_006119c0)
+// go to thunks.
+inline uint32_t HillList(const Exe::Layout& x) { return x.lists[2]; }
+inline uint32_t PeakList(const Exe::Layout& x) { return x.lists[3]; }
 
 // [terrain tiles] StandardBlendOnLand1..8: a terrain's blend entries on squares with no water corner. The engine picks
 // each terrain layer's blend entry for a square from its art define's TextureBlend<mask> list (FUN_00479920: mask and
 // &tile, &rotation, x, y on the stack, popped by RET 0x14; EAX = the terrain; called from the layer records'
-// builder, FUN_004795b0, at the three sites below). A list paired with the coast heightmap tiles (painted coasts)
-// would put a coast's cliff on land-to-land borders too; with a land list, those squares take an entry from it
-// instead (a square with a water corner, or a corner off the map, keeps the engine's pick, so it stays paired).
-const uint32_t kBlendPick = 0x79920;
-const uint32_t kBlendPickCalls[3] = {0x796b8, 0x79787, 0x79845};
+// builder, FUN_004795b0, at three sites: Exe::Layout's blendPick and blendPickCalls). A list paired with the coast
+// heightmap tiles (painted coasts) would put a coast's cliff on land-to-land borders too; with a land list, those
+// squares take an entry from it instead (a square with a water corner, or a corner off the map, keeps the engine's
+// pick, so it stays paired).
 
 // The settings. StandardBlendOnLand=TERRAIN_A, TERRAIN_B...: those terrains take BtS's standard blend layout on all-land
 // squares (the atlas tile painted for each corner arrangement, unturned: the layout of BtS's own Grass and most
@@ -315,33 +313,42 @@ inline std::vector<uint8_t> Rel32(uint8_t opcode, uint32_t from, uint32_t to)
 }
 
 // The three calls to the blend pick, sent to thunk instead.
-inline std::vector<TerrainPatch::Site> LandBlendSites(uint32_t base, uint32_t thunk)
+inline std::vector<TerrainPatch::Site> LandBlendSites(uint32_t base, uint32_t thunk, const Exe::Layout& x)
 {
     std::vector<TerrainPatch::Site> sites;
-    for (uint32_t rva : kBlendPickCalls)
-        sites.push_back({rva, Rel32(0xE8, base + rva, base + kBlendPick), Rel32(0xE8, base + rva, thunk),
+    for (uint32_t rva : x.blendPickCalls)
+        sites.push_back({rva, Rel32(0xE8, base + rva, base + x.blendPick), Rel32(0xE8, base + rva, thunk),
                          "terrain layer blend pick (CALL FUN_00479920)"});
     return sites;
 }
 
 // The five sites, given where the module is loaded and the thunks' addresses.
 inline std::vector<TerrainPatch::Site> Sites(uint32_t base, uint32_t pickerThunk, uint32_t hillThunk, uint32_t peakThunk,
-                                             uint32_t atlasThunk, uint32_t waveThunk)
+                                             uint32_t atlasThunk, uint32_t waveThunk, const Exe::Layout& x)
 {
-    std::vector<uint8_t> picker = Rel32(0xE9, base + kPicker, pickerThunk);  // JMP
-    std::vector<uint8_t> hills = Rel32(0xE8, base + kHills, hillThunk);      // CALL; 5 NOPs
+    std::vector<uint8_t> picker = Rel32(0xE9, base + x.picker, pickerThunk);  // JMP
+    std::vector<uint8_t> hills = Rel32(0xE8, base + x.hills, hillThunk);      // CALL; 5 NOPs
     hills.insert(hills.end(), 5, 0x90);
     std::vector<uint8_t> peaks = {0x56};  // PUSH ESI; CALL (sets ESI); 5 NOPs
-    std::vector<uint8_t> call = Rel32(0xE8, base + kPeaks + 1, peakThunk);
+    std::vector<uint8_t> call = Rel32(0xE8, base + x.peaks + 1, peakThunk);
     peaks.insert(peaks.end(), call.begin(), call.end());
     peaks.insert(peaks.end(), 5, 0x90);
+    // MOV ECX,[list.begin] (8B 0D <VA>)
+    auto movBegin = [](uint32_t list) {
+        const uint32_t at = list + 4;
+        return std::vector<uint8_t>{0x8b, 0x0d, static_cast<uint8_t>(at), static_cast<uint8_t>(at >> 8),
+                                    static_cast<uint8_t>(at >> 16), static_cast<uint8_t>(at >> 24)};
+    };
+    std::vector<uint8_t> hillsWas = movBegin(HillList(x)), peaksWas = movBegin(PeakList(x));
+    hillsWas.insert(hillsWas.end(), {0x8b, 0x54, 0x81, 0xfc});
+    peaksWas.insert(peaksWas.end(), {0x56, 0x8b, 0x74, 0x81, 0xfc});
     return {
-        {kPicker, {0x53, 0x55, 0x8b, 0x6c, 0x24}, picker, "variant picker (PUSH EBX; PUSH EBP; MOV EBP,[ESP+10])"},
-        {kHills, {0x8b, 0x0d, 0x64, 0x53, 0xb8, 0x00, 0x8b, 0x54, 0x81, 0xfc}, hills, "hill tile by mask"},
-        {kPeaks, {0x8b, 0x0d, 0x74, 0x53, 0xb8, 0x00, 0x56, 0x8b, 0x74, 0x81, 0xfc}, peaks, "peak tile by mask"},
-        {kAtlasCall, Rel32(0xE8, base + kAtlasCall, base + kCoastClassFn), Rel32(0xE8, base + kAtlasCall, atlasThunk),
-         "coast atlas cell (CALL FUN_004788e0)"},
-        {kWaveCall, Rel32(0xE8, base + kWaveCall, base + kCoastClassFn), Rel32(0xE8, base + kWaveCall, waveThunk),
+        {x.picker, {0x53, 0x55, 0x8b, 0x6c, 0x24}, picker, "variant picker (PUSH EBX; PUSH EBP; MOV EBP,[ESP+10])"},
+        {x.hills, hillsWas, hills, "hill tile by mask"},
+        {x.peaks, peaksWas, peaks, "peak tile by mask"},
+        {x.atlasCall, Rel32(0xE8, base + x.atlasCall, base + x.coastClassFn),
+         Rel32(0xE8, base + x.atlasCall, atlasThunk), "coast atlas cell (CALL FUN_004788e0)"},
+        {x.waveCall, Rel32(0xE8, base + x.waveCall, base + x.coastClassFn), Rel32(0xE8, base + x.waveCall, waveThunk),
          "coast wave model (CALL FUN_004788e0)"},
     };
 }
