@@ -52,6 +52,14 @@ struct GameDll
     MemberInt featureType = nullptr, numFeatures = nullptr, activeLandscape = nullptr;
     MemberArg featureInfo = nullptr, landscapeInfo = nullptr;
     MemberFloat zScale = nullptr;
+    // optional: MixedCoastBlend (each terrain's art: its layer order and blend sheet; plot centres in the world)
+    using MemberNamed = void*(__fastcall*)(void* self, void* unused, const char* name);
+    using MemberFloatArg = float(__fastcall*)(void* self, void* unused, int a);
+    MemberStr artDefineTag = nullptr, baseTexture = nullptr;
+    GetInstance artFileMgr = nullptr;
+    MemberNamed terrainArt = nullptr;
+    MemberInt layerOrder = nullptr;
+    MemberFloatArg plotX = nullptr, plotY = nullptr;
     bool tried = false, ok = false;
 
     bool Resolve()
@@ -83,6 +91,13 @@ struct GameDll
         activeLandscape = reinterpret_cast<MemberInt>(get("?getActiveLandscapeID@CvGlobals@@QAEHXZ"));
         landscapeInfo = reinterpret_cast<MemberArg>(get("?getLandscapeInfo@CvGlobals@@QAEAAVCvLandscapeInfo@@H@Z"));
         zScale = reinterpret_cast<MemberFloat>(get("?getZScale@CvLandscapeInfo@@QBEMXZ"));
+        artDefineTag = reinterpret_cast<MemberStr>(get("?getArtDefineTag@CvTerrainInfo@@QBEPBDXZ"));
+        artFileMgr = reinterpret_cast<GetInstance>(get("?GetInstance@CvArtFileMgr@@SAAAV1@XZ"));
+        terrainArt = reinterpret_cast<MemberNamed>(get("?getTerrainArtInfo@CvArtFileMgr@@QBEPAVCvArtInfoTerrain@@PBD@Z"));
+        layerOrder = reinterpret_cast<MemberInt>(get("?getLayerOrder@CvArtInfoTerrain@@QAEHXZ"));
+        baseTexture = reinterpret_cast<MemberStr>(get("?getBaseTexture@CvArtInfoTerrain@@QAEPBDXZ"));
+        plotX = reinterpret_cast<MemberFloatArg>(get("?plotXToPointX@CvMap@@QAEMH@Z"));
+        plotY = reinterpret_cast<MemberFloatArg>(get("?plotYToPointY@CvMap@@QAEMH@Z"));
         ok = getInstance && getMap && width && height && wrapX && wrapY && plot && terrainType && numTerrains &&
              terrainInfo && type;
         if (!ok)
@@ -1130,6 +1145,118 @@ namespace
 TileSets::BlendSquare g_blendSquare;
 unsigned g_mixedSquares = 0;    // mixed-land coast squares given the full-mask pick
 unsigned g_overlaySquares = 0;  // coast squares where an overlay (peaks) covering part of the land took the full mask
+unsigned g_blendedSquares = 0;  // MixedCoastBlend: squares whose paired land layers blend
+
+// [terrain tiles] MixedCoastBlend: what the terrain shader needs to weight a blended square's paired land layers
+// (terrain_shadow.hlsl, MixWeight). Per plot: r = terrain + 1, g = 255 where water, b = the terrain's rank among the
+// paired land terrains by layer order (1, 2...; 0: none), a = 255 where the square with this plot at its south-west
+// corner (its lowest x and y) is blended. Filled by the blend pick hook as the engine builds the layers.
+struct MixData
+{
+    bool tried = false, on = false;
+    int width = 0, height = 0;
+    bool wrapX = false, wrapY = false;
+    float toPlot[3] = {};
+    std::vector<uint8_t> rgba;
+    std::vector<int> rank;  // by TerrainTypes
+    std::vector<MixedCoastSheet> sheets;
+    unsigned version = 0;
+    int squareX = -0x7fffffff, squareY = -0x7fffffff;
+} g_mix;
+
+// Once, and again for a map of another size; false (logged once) if it can't run.
+bool MixReady()
+{
+    if (!g_config.mixedCoastBlend || !(g_config.lightingEnabled || g_config.shadowsEnabled))
+        return false;
+    void* map = g_dll.Map();
+    const int w = g_dll.width(map, nullptr), h = g_dll.height(map, nullptr);
+    if (g_mix.tried && (!g_mix.on || (w == g_mix.width && h == g_mix.height)))
+        return g_mix.on;
+    const bool first = !g_mix.tried;
+    g_mix.tried = true;
+    g_mix.on = false;
+    if (!g_dll.artDefineTag || !g_dll.artFileMgr || !g_dll.terrainArt || !g_dll.layerOrder || !g_dll.baseTexture ||
+        !g_dll.plotX || !g_dll.plotY || w <= 0 || h <= 0 || w > 1024 || h > 1024)
+    {
+        Log::Write("terrain land blends: MixedCoastBlend off: the game DLL lacks the terrain art or plot position exports");
+        return false;
+    }
+    const float x0 = g_dll.plotX(map, nullptr, 0), dx = g_dll.plotX(map, nullptr, 1) - x0;
+    const float y0 = g_dll.plotY(map, nullptr, 0), dy = g_dll.plotY(map, nullptr, 1) - y0;
+    if (dx < 1 || std::fabs(dx - dy) > 0.01f * dx)
+    {
+        Log::Write("terrain land blends: MixedCoastBlend off: plots %.1f by %.1f world units", dx, dy);
+        return false;
+    }
+    void* gc = g_dll.getInstance();
+    const int n = static_cast<int>(g_landBlendFor.size());
+    struct Paired
+    {
+        int terrain, order;
+        std::string name, sheet;
+    };
+    std::vector<Paired> paired;
+    for (int t = 0; t < n; ++t)
+    {
+        if (g_landBlendFor[t] < 0)
+            continue;
+        void* info = g_dll.terrainInfo(gc, nullptr, t);
+        const char* tag = g_dll.artDefineTag(info, nullptr);
+        void* art = tag ? g_dll.terrainArt(g_dll.artFileMgr(), nullptr, tag) : nullptr;
+        const char* sheet = art ? g_dll.baseTexture(art, nullptr) : nullptr;
+        if (art && sheet && *sheet)
+            paired.push_back({t, g_dll.layerOrder(art, nullptr), g_dll.type(info, nullptr), sheet});
+    }
+    std::stable_sort(paired.begin(), paired.end(), [](const Paired& a, const Paired& b) { return a.order < b.order; });
+    g_mix.rank.assign(n, 0);
+    g_mix.sheets.clear();
+    std::string listed;
+    for (size_t k = 0; k < paired.size(); ++k)
+    {
+        g_mix.rank[paired[k].terrain] = static_cast<int>(k) + 1;
+        g_mix.sheets.push_back({std::wstring(paired[k].sheet.begin(), paired[k].sheet.end()), paired[k].terrain + 1,
+                                static_cast<int>(k) + 1});
+        listed += (listed.empty() ? "" : ", ") + paired[k].name + " (layer " + std::to_string(paired[k].order) + ", " +
+                  paired[k].sheet + ")";
+    }
+    g_mix.width = w;
+    g_mix.height = h;
+    g_mix.wrapX = g_dll.wrapX(map, nullptr);
+    g_mix.wrapY = g_dll.wrapY(map, nullptr);
+    g_mix.toPlot[0] = 1.0f / dx;
+    g_mix.toPlot[1] = -x0 / dx;
+    g_mix.toPlot[2] = -y0 / dy;
+    g_mix.rgba.assign(static_cast<size_t>(w) * h * 4, 0);
+    ++g_mix.version;
+    g_mix.on = paired.size() >= 2;
+    if (first || g_mix.on)
+        Log::Write("terrain land blends: MixedCoastBlend %s: %s; a %dx%d map, %.1f world units a plot",
+                   g_mix.on ? "on" : "off (fewer than two land terrains with paired lists)",
+                   listed.empty() ? "none" : listed.c_str(), w, h, dx);
+    return g_mix.on;
+}
+
+// A plot's place in g_mix.rgba (wrapped onto the map), or -1 off it.
+int MixIndex(int px, int py)
+{
+    if (g_mix.wrapX)
+        px = ((px % g_mix.width) + g_mix.width) % g_mix.width;
+    if (g_mix.wrapY)
+        py = ((py % g_mix.height) + g_mix.height) % g_mix.height;
+    if (px < 0 || py < 0 || px >= g_mix.width || py >= g_mix.height)
+        return -1;
+    return (py * g_mix.width + px) * 4;
+}
+
+void MixSet(int at, uint8_t value)
+{
+    if (at >= 0 && g_mix.rgba[at] != value)
+    {
+        g_mix.rgba[at] = value;
+        ++g_mix.version;
+    }
+}
 }  // namespace
 
 // The engine's blend pick (FUN_00479920) called again, for another mask: EAX = terrain, EDI = where it writes its
@@ -1176,7 +1303,37 @@ extern "C" void __stdcall LandBlendFix(int terrain, int mask, int* tile, int* ro
     }
     const int own = g_landBlendFor[terrain];
     int fullMask = 0;
-    switch (g_blendSquare.Next(x, y, corners, terrain, mask, own >= 0, fullMask))
+    const bool mix = MixReady();
+    if (mix)
+    {
+        // The corners as the shader reads them, and the square's mark cleared as the engine starts on it.
+        for (int k = 0; k < 4; ++k)
+        {
+            const int i = MixIndex(at[k][0], at[k][1]);
+            if (i < 0)
+                continue;
+            const int t = corners.terrain[k];
+            MixSet(i, static_cast<uint8_t>(t >= 0 && t < 254 ? t + 1 : 0));
+            MixSet(i + 1, corners.water[k] ? 255 : 0);
+            MixSet(i + 2, static_cast<uint8_t>(t >= 0 && t < static_cast<int>(g_mix.rank.size()) ? g_mix.rank[t] : 0));
+        }
+        if (x != g_mix.squareX || y != g_mix.squareY)
+        {
+            g_mix.squareX = x;
+            g_mix.squareY = y;
+            const int i = MixIndex(x - 1, top - 1);
+            MixSet(i < 0 ? -1 : i + 3, 0);
+        }
+    }
+    const TileSets::BlendAction action = g_blendSquare.Next(x, y, corners, terrain, mask, own >= 0, fullMask, mix);
+    if (mix && g_blendSquare.blended)
+    {
+        const int i = MixIndex(x - 1, top - 1);
+        if (i >= 0 && g_mix.rgba[i + 3] != 255)
+            ++g_blendedSquares;
+        MixSet(i < 0 ? -1 : i + 3, 255);
+    }
+    switch (action)
     {
     case TileSets::BlendAction::Engine:
         return;
@@ -1298,15 +1455,16 @@ std::string LandBlendsSummary()
     unsigned total = 0;
     for (unsigned n : g_landPicks)
         total += n;
-    total += g_mixedSquares + g_overlaySquares;
+    total += g_mixedSquares + g_overlaySquares + g_blendedSquares;
     if (total == logged)
         return "";
     logged = total;
     std::string s = "terrain land blends: land entries given:";
     for (size_t k = 0; k < g_landBlends.size(); ++k)
         s += " " + g_landBlends[k].terrain + "=" + std::to_string(g_landPicks[k]);
-    s += "; coast squares of two or more land terrains painted by their lowest land layer for the whole land: " +
-         std::to_string(g_mixedSquares) + "; coast squares where a hill or peak layer covering part of the land "
+    s += "; land layers of coast squares of two or more land terrains painted for the whole land: " +
+         std::to_string(g_mixedSquares) + " (squares blending their paired land terrains, MixedCoastBlend: " +
+         std::to_string(g_blendedSquares) + "); coast squares where a hill or peak layer covering part of the land "
          "painted the whole: " + std::to_string(g_overlaySquares);
     return s;
 }
@@ -1393,4 +1551,23 @@ std::wstring PlotStampsHiddenModels()
         if (!p.terrains.empty() && !p.hideModels.empty())
             all += (all.empty() ? L"" : L";") + p.hideModels;
     return all;
+}
+
+bool MixedCoastPlots(MixedCoastMap& out)
+{
+    if (!g_mix.on)
+        return false;
+    out.rgba = g_mix.rgba.data();
+    out.width = g_mix.width;
+    out.height = g_mix.height;
+    out.wrapX = g_mix.wrapX;
+    out.wrapY = g_mix.wrapY;
+    out.version = g_mix.version;
+    memcpy(out.toPlot, g_mix.toPlot, sizeof(out.toPlot));
+    return true;
+}
+
+std::vector<MixedCoastSheet> MixedCoastSheets()
+{
+    return g_mix.on ? g_mix.sheets : std::vector<MixedCoastSheet>();
 }

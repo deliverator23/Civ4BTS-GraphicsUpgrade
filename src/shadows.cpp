@@ -167,7 +167,7 @@ void Shadows::ReleaseAll()
     ReleaseDefault();
     IUnknown* objects[] = {m_terrainVs, m_terrainPs,   m_blurPs, m_riverFloodVs, m_riverFloodPs,
                            m_riverVs,   m_riverPs,     m_waterVs, m_waterPs, m_riverFlow,
-                           m_terrainSheetVs, m_terrainSheetPs};
+                           m_terrainSheetVs, m_terrainSheetPs, m_mixTex};
     for (IUnknown* o : objects)
         if (o)
             o->Release();
@@ -175,6 +175,11 @@ void Shadows::ReleaseAll()
     m_terrainSheetVs = nullptr;
     m_terrainSheetPs = nullptr;
     m_terrainSheetTried = false;
+    m_mixTex = nullptr;
+    m_mixVersion = 0;
+    m_mixSheets.clear();
+    m_mixSheetsLoaded = false;
+    m_mixSheetOf.clear();
     m_riverFlowTried = false;
     m_terrainVs = m_riverFloodVs = m_riverVs = m_waterVs = nullptr;
     m_terrainPs = m_blurPs = m_riverFloodPs = m_riverPs = m_waterPs = nullptr;
@@ -183,6 +188,87 @@ void Shadows::ReleaseAll()
     m_noShadowTextures.Clear();
     m_surfaceTextures.Clear();
     m_paintedTextures.clear();
+}
+
+bool Shadows::MixFor(IDirect3DBaseTexture9* sheet)
+{
+    memset(m_mix, 0, sizeof(m_mix));
+    MixedCoastMap map;
+    if (!sheet || !MixedCoastPlots(map))
+        return false;
+    if (!m_mixSheetsLoaded)
+    {
+        m_mixSheetsLoaded = true;
+        const std::vector<MixedCoastSheet> sheets = MixedCoastSheets();
+        m_mixSheets.resize(sheets.size());
+        for (size_t k = 0; k < sheets.size(); ++k)
+        {
+            m_mixSheets[k].match.Load(sheets[k].path, "[terrain tiles] MixedCoastBlend's blend sheets");
+            m_mixSheets[k].terrain = sheets[k].terrain;
+            m_mixSheets[k].rank = sheets[k].rank;
+        }
+    }
+    auto it = m_mixSheetOf.find(sheet);
+    if (it == m_mixSheetOf.end())
+    {
+        int which = -1;
+        for (size_t k = 0; k < m_mixSheets.size() && which < 0; ++k)
+            if (m_mixSheets[k].match.Contains(sheet))
+                which = static_cast<int>(k);
+        it = m_mixSheetOf.emplace(sheet, which).first;
+    }
+    if (it->second < 0)
+        return false;
+    // The plots' texture: made for the map's size, filled again when the data changes.
+    if (m_mixTex && (m_mixSize[0] != map.width || m_mixSize[1] != map.height))
+    {
+        const ULONG before = DeviceRefs(m_dev);
+        m_mixTex->Release();
+        m_mixTex = nullptr;
+        const ULONG after = DeviceRefs(m_dev);
+        m_internalRefs -= (before > after && m_internalRefs >= before - after) ? before - after : 0;
+    }
+    if (!m_mixTex)
+    {
+        const ULONG before = DeviceRefs(m_dev);
+        if (FAILED(m_dev->CreateTexture(map.width, map.height, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &m_mixTex,
+                                        nullptr)))
+        {
+            m_mixTex = nullptr;
+            return false;
+        }
+        m_internalRefs += DeviceRefs(m_dev) - before;
+        m_mixSize[0] = map.width;
+        m_mixSize[1] = map.height;
+        m_mixVersion = map.version - 1;
+    }
+    if (m_mixVersion != map.version)
+    {
+        D3DLOCKED_RECT lr;
+        if (FAILED(m_mixTex->LockRect(0, &lr, nullptr, 0)))
+            return false;
+        for (int y = 0; y < map.height; ++y)
+        {
+            uint8_t* row = static_cast<uint8_t*>(lr.pBits) + y * lr.Pitch;
+            const uint8_t* from = map.rgba + static_cast<size_t>(y) * map.width * 4;
+            for (int x = 0; x < map.width; ++x)  // A8R8G8B8: b, g, r, a in memory
+            {
+                row[x * 4 + 0] = from[x * 4 + 2];
+                row[x * 4 + 1] = from[x * 4 + 1];
+                row[x * 4 + 2] = from[x * 4 + 0];
+                row[x * 4 + 3] = from[x * 4 + 3];
+            }
+        }
+        m_mixTex->UnlockRect(0);
+        m_mixVersion = map.version;
+    }
+    const MixSheet& s = m_mixSheets[it->second];
+    const float mix[12] = {static_cast<float>(s.terrain), static_cast<float>(s.rank), 0, 1,
+                           map.toPlot[0], map.toPlot[1], map.toPlot[2], 0,
+                           static_cast<float>(map.width), static_cast<float>(map.height), map.wrapX ? 1.0f : 0.0f,
+                           map.wrapY ? 1.0f : 0.0f};
+    memcpy(m_mix, mix, sizeof(m_mix));
+    return true;
 }
 
 bool Shadows::TargetIsBackBuffer()
@@ -632,9 +718,10 @@ bool Shadows::DrawReceiver(const ShaderInfo& vs, const ShaderInfo* ps, const std
             m_sheet[1] = static_cast<float>(d.Height);
             m_sheet[3] = 1;
         }
+        MixFor(sheet);
         if (sheet)
             sheet->Release();
-        if ((map || m_sheet[3] > 0) && !m_terrainSheetTried)
+        if ((map || m_sheet[3] > 0 || m_mix[3] > 0) && !m_terrainSheetTried)
         {
             m_terrainSheetTried = true;
             const ULONG before = DeviceRefs(m_dev);
@@ -646,7 +733,7 @@ bool Shadows::DrawReceiver(const ShaderInfo& vs, const ShaderInfo* ps, const std
                            "BtS reads them, without their normal maps");
             m_internalRefs += DeviceRefs(m_dev) - before;
         }
-        if ((map || m_sheet[3] > 0) && m_terrainSheetVs && m_terrainSheetPs)
+        if ((map || m_sheet[3] > 0 || m_mix[3] > 0) && m_terrainSheetVs && m_terrainSheetPs)
         {
             m_sheetNormals = map;
             m_sheetPass = true;
@@ -855,6 +942,11 @@ const D3DSAMPLERSTATETYPE kShadowSamplerStates[8] = {
 const D3DSAMPLERSTATETYPE kDetailSamplerStates[9] = {
     D3DSAMP_ADDRESSU,  D3DSAMP_ADDRESSV,  D3DSAMP_MAGFILTER,     D3DSAMP_MINFILTER, D3DSAMP_MIPFILTER,
     D3DSAMP_MAXANISOTROPY, D3DSAMP_MIPMAPLODBIAS, D3DSAMP_MAXMIPLEVEL, D3DSAMP_SRGBTEXTURE};
+// MixedCoastBlend's plots (s9): each texel as it is.
+const D3DSAMPLERSTATETYPE kMixSamplerStates[6] = {D3DSAMP_ADDRESSU,  D3DSAMP_ADDRESSV,  D3DSAMP_MAGFILTER,
+                                                  D3DSAMP_MINFILTER, D3DSAMP_MIPFILTER, D3DSAMP_SRGBTEXTURE};
+const DWORD kMixSamplerValues[6] = {D3DTADDRESS_CLAMP, D3DTADDRESS_CLAMP, D3DTEXF_POINT, D3DTEXF_POINT, D3DTEXF_NONE,
+                                    FALSE};
 
 // Shadow texture sampler: bilinear, no mips, and outside the area BORDER = no shadow.
 void SetShadowSampler(IDirect3DDevice9* dev, DWORD stage)
@@ -907,9 +999,9 @@ HRESULT Shadows::DrawShadowed(IDirect3DVertexShader9* vs, IDirect3DPixelShader9*
     IDirect3DVertexShader9* oldVs = nullptr;
     IDirect3DPixelShader9* oldPs = nullptr;
     IDirect3DBaseTexture9* oldTex = nullptr;
-    float oldVsc[16], oldPsc[4], oldLight[32], oldHillGrid[4], oldDetail[8], oldSheet[12];
-    IDirect3DBaseTexture9* oldSheetMap = nullptr;
-    DWORD oldSamp8[9];
+    float oldVsc[16], oldPsc[4], oldLight[32], oldHillGrid[4], oldDetail[8], oldSheet[24];
+    IDirect3DBaseTexture9 *oldSheetMap = nullptr, *oldMixMap = nullptr;
+    DWORD oldSamp8[9], oldSamp9[6];
     IDirect3DBaseTexture9 *oldNormals = nullptr, *oldHills = nullptr, *oldDetailMap = nullptr;
     DWORD oldSamp5[8], oldSamp6[8], oldSamp7[9];
     DWORD oldSamp[8];
@@ -967,9 +1059,17 @@ HRESULT Shadows::DrawShadowed(IDirect3DVertexShader9* vs, IDirect3DPixelShader9*
         if (m_sheetPass)
         {
             // The blend sheet's normal map (s8; none: strength 0), filtered and addressed like the sheet (s0); its
-            // strength (c22); the sheet's size and the clamp (c23); TerrainDebug 4's flat colour (c24).
+            // strength (c22); the sheet's size and the clamp (c23); TerrainDebug 4's flat colour (c24); MixedCoastBlend's
+            // layer, plot mapping and map size (c25-c27) and the plots (s9, point sampled, clamped).
             m_dev->GetTexture(8, &oldSheetMap);
-            m_dev->GetPixelShaderConstantF(22, oldSheet, 3);
+            m_dev->GetTexture(9, &oldMixMap);
+            m_dev->GetPixelShaderConstantF(22, oldSheet, 6);
+            for (int k = 0; k < 6; ++k)
+            {
+                m_dev->GetSamplerState(9, kMixSamplerStates[k], &oldSamp9[k]);
+                m_dev->SetSamplerState(9, kMixSamplerStates[k], kMixSamplerValues[k]);
+            }
+            m_dev->SetTexture(9, m_mix[3] > 0 ? m_mixTex : nullptr);
             for (int k = 0; k < 9; ++k)
             {
                 DWORD v = 0;
@@ -983,6 +1083,7 @@ HRESULT Shadows::DrawShadowed(IDirect3DVertexShader9* vs, IDirect3DPixelShader9*
                                      m_sheet[0], m_sheet[1], m_sheet[2], m_sheet[3],
                                      debugFlat[0], debugFlat[1], debugFlat[2], debugFlat[3]};
             m_dev->SetPixelShaderConstantF(22, sheet, 3);
+            m_dev->SetPixelShaderConstantF(25, m_mix, 3);
         }
     }
     else
@@ -1024,7 +1125,12 @@ HRESULT Shadows::DrawShadowed(IDirect3DVertexShader9* vs, IDirect3DPixelShader9*
         if (m_sheetPass)
         {
             m_dev->SetTexture(8, oldSheetMap);
-            m_dev->SetPixelShaderConstantF(22, oldSheet, 3);
+            m_dev->SetTexture(9, oldMixMap);
+            m_dev->SetPixelShaderConstantF(22, oldSheet, 6);
+            for (int k = 0; k < 6; ++k)
+                m_dev->SetSamplerState(9, kMixSamplerStates[k], oldSamp9[k]);
+            if (oldMixMap)
+                oldMixMap->Release();
             for (int k = 0; k < 9; ++k)
                 m_dev->SetSamplerState(8, kDetailSamplerStates[k], oldSamp8[k]);
             if (oldSheetMap)

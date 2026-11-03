@@ -87,6 +87,11 @@ struct Config
     std::wstring landBlends[8];
     // StandardBlendOnLand (no number): terrains taking BtS's standard blend layout on land squares
     std::wstring landBlendTerrains;
+    // MixedCoastBlend=1 (terrain_sets.h, BlendSquare): on a coast square of two or more land terrains with paired lists,
+    // each paired land layer paints the whole land and the terrain shader weights it by its share of the square's land
+    // corners, so they blend across the square instead of meeting in square blocks. Needs our terrain shader (the
+    // lighting or the shadows on).
+    bool mixedCoastBlend = true;
     int coastAtlasCells[4] = {8, 8, 6, 7};
     int coastWaveModels[4] = {8, 8, 6, 7};
     float waterTime = -1;       // debug: the water's clock stopped at this many seconds (< 0: running)
@@ -255,6 +260,26 @@ std::string TileSetsSummary();
 // HideModels entries, joined with ';' (TextureList entries).
 bool PlotStampsOn();
 std::wstring PlotStampsHiddenModels();
+// [terrain tiles] MixedCoastBlend (terrain_sets.cpp): the plots the terrain shader weights blended squares by (false
+// when off): rgba a plot (r = terrain + 1, g = 255 where water, b = the paired land terrain's rank by layer order, a =
+// 255 where the square with this plot at its south-west corner blends), the map's size and wrap, a version that changes
+// with the data, and world xy -> plot coordinates (x = scale, yz = offset; plot centres at whole numbers). And the
+// paired land terrains' blend sheets (paths under Assets), each with its terrain + 1 and rank.
+struct MixedCoastMap
+{
+    const uint8_t* rgba = nullptr;
+    int width = 0, height = 0;
+    bool wrapX = false, wrapY = false;
+    unsigned version = 0;
+    float toPlot[3] = {};
+};
+bool MixedCoastPlots(MixedCoastMap& out);
+struct MixedCoastSheet
+{
+    std::wstring path;
+    int terrain = 0, rank = 0;
+};
+std::vector<MixedCoastSheet> MixedCoastSheets();
 // The Baked* light the INI leaves out, from the SunLight.nif the game uses (the running mod's first); logs it. Once.
 void LoadBakedTerrainLight();
 // Folder the proxy DLL was loaded from (the game folder), without a trailing backslash.

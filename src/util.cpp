@@ -552,6 +552,7 @@ void LoadConfig()
         g_config.landBlends[k] =
             IniString(ini, L"terrain tiles", (L"StandardBlendOnLand" + std::to_wstring(k + 1)).c_str(), L"");
     g_config.landBlendTerrains = IniString(ini, L"terrain tiles", L"StandardBlendOnLand", L"");
+    g_config.mixedCoastBlend = IniInt(ini, L"terrain tiles", L"MixedCoastBlend", 1) != 0;
     g_config.traceKey = IniKey(ini, L"trace", L"Key", '9');
     std::wstring mods = IniString(ini, L"general", L"KeyModifiers", L"ctrl+shift");
     for (auto& c : mods)

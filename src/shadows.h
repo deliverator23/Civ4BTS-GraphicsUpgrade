@@ -88,6 +88,9 @@ public:
         m_noShadowTextures.Forget(texture);
         m_surfaceTextures.Forget(texture);
         m_paintedTextures.erase(texture);
+        m_mixSheetOf.erase(texture);
+        for (auto& s : m_mixSheets)
+            s.match.Forget(texture);
     }
     // A fixed-function mesh at the last blob shadow: part of that unit (weapons, shields)?
     bool UnitPart(DWORD fvf) { return RigidUnitPart(fvf); }
@@ -162,6 +165,21 @@ private:
     bool m_sheetNm = false;   // ...in DXT5nm
     bool m_sheetPass = false;  // this terrain draw goes through that shader (the sheet read inside its tile, its normals)
     float m_sheet[4] = {};     // its c23: the sheet's size in texels, w = 1: clamp to the tile
+    // [terrain tiles] MixedCoastBlend: the plots' data (s9, MixedCoastPlots, uploaded when its version changes), which
+    // paired land terrain each blend sheet is (by content), and this draw's c25-c27 (c25.w = 1: weighted).
+    struct MixSheet
+    {
+        TextureList match;
+        int terrain = 0, rank = 0;
+    };
+    IDirect3DTexture9* m_mixTex = nullptr;
+    unsigned m_mixVersion = 0;
+    int m_mixSize[2] = {};
+    std::vector<MixSheet> m_mixSheets;
+    bool m_mixSheetsLoaded = false;
+    std::unordered_map<const void*, int> m_mixSheetOf;  // by sheet: index in m_mixSheets, or -1
+    float m_mix[12] = {};
+    bool MixFor(IDirect3DBaseTexture9* sheet);  // sets m_mix (and the texture) for a terrain draw with this sheet
     bool m_loggedClamp = false;
     IDirect3DPixelShader9* m_blurPs = nullptr;
     IDirect3DVertexShader9* m_riverFloodVs = nullptr;  // River_Shader P0 (floodplain) with shadows

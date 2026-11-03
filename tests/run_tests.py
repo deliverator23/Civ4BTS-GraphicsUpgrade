@@ -341,6 +341,11 @@ def main():
           'keeps its paired pick; a coast of two land terrains has its lowest land layer re-picked for the whole land '
           'mask and the higher ones take land entries; untouched when the lowest land terrain has no list or is drawn '
           'whole')
+    mb = re.search(r'^TILESETS mixblend=(\d) (.*)$', sout, re.M)
+    check(mb and mb.group(1) == '1',
+          'MixedCoastBlend: on a coast of two land terrains every paired land layer takes the whole land mask (the '
+          'square marked blended; the rest as before), and weighted by their share of the land corners, drawn one over '
+          f"another, each terrain ends up at its share, the same either side of an edge ({mb.group(2) if mb else ''})")
     check(ts.get('overlays') == 1,
           'StandardBlendOnLand, hill and peak layers (at no corner): land entries on all land; on a coast, covering '
           "part of the land, re-picked for the whole land mask (Mesa paints the cliff); covering all of it, or without "

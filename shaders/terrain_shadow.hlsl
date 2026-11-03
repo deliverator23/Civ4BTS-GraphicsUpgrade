@@ -65,6 +65,46 @@ sampler2D BlendNormals : register(s8);    // the blend sheet's normal map (red a
 float4 f4BlendNormal : register(c22);     // x = strength, y = 1: the map is DXT5nm (x in alpha, y in green)
 float4 f4Sheet : register(c23);           // the blend sheet: xy = its size in texels; w = 1: read inside the tile
 float4 f4Debug : register(c24);           // [debug] TerrainDebug 4: w = 1, a flat colour (rgb) with the sheet's alpha
+// [terrain tiles] MixedCoastBlend: on a coast square of two or more land terrains with paired lists, each of those
+// layers paints the whole land (terrain_sets.h, BlendSquare); here each is weighted by its share of the square's land
+// corners. The plots (s9): r = terrain + 1, g = 1 where water, b = the paired land terrain's rank by layer order (0:
+// none), a = 1 where the square with this plot at its south-west corner blends.
+sampler2D MixPlots : register(s9);
+float4 f4Mix : register(c25);        // x = this layer's terrain + 1, y = its rank, w = 1: weight it
+float4 f4MixToPlot : register(c26);  // world xy -> plot coordinates (plot centres at whole numbers): x = scale, yz = offset
+float4 f4MixSize : register(c27);    // the map: xy = its size in plots, zw = 1 where it wraps
+
+// Plot i's data (wrapped onto the map); off the map, water (as the heightmap counts it).
+float4 MixPlot(float2 i)
+{
+    float2 s = f4MixSize.xy;
+    float2 j = lerp(i, i - s * floor(i / s), f4MixSize.zw);
+    if (j.x < 0 || j.y < 0 || j.x > s.x - 1 || j.y > s.y - 1)
+        return float4(0, 1, 0, 0);
+    return tex2Dlod(MixPlots, float4((j + 0.5) / s, 0, 0));
+}
+
+// This layer's weight at world xy (at: the same point taken inside the triangle, which picks the square). Corners SW,
+// SE, NW, NE, bilinear between them. Drawn one over another in layer order, the lowest paired terrain whole and each
+// higher one at its share of the paired land among it and those below, every terrain ends up weighted by its share of
+// the paired land corners. Along an edge only its two corners count, so the squares either side agree.
+float MixWeight(float2 world, float2 at)
+{
+    float2 i0 = floor(at * f4MixToPlot.x + f4MixToPlot.yz);
+    float2 f = saturate(world * f4MixToPlot.x + f4MixToPlot.yz - i0);
+    float4 c0 = MixPlot(i0), c1 = MixPlot(i0 + float2(1, 0)), c2 = MixPlot(i0 + float2(0, 1)), c3 = MixPlot(i0 + 1);
+    if (c0.a < 0.5)
+        return 1;  // not a blended square
+    float4 bw = float4((1 - f.x) * (1 - f.y), f.x * (1 - f.y), (1 - f.x) * f.y, f.x * f.y);
+    float4 land = 1 - step(0.5, float4(c0.g, c1.g, c2.g, c3.g));
+    float4 terrain = floor(float4(c0.r, c1.r, c2.r, c3.r) * 255 + 0.5);
+    float4 rank = floor(float4(c0.b, c1.b, c2.b, c3.b) * 255 + 0.5) * land;
+    float4 own = (1 - step(0.5, abs(terrain - f4Mix.x))) * land;
+    float4 lower = step(0.5, rank) * (1 - step(f4Mix.y - 0.5, rank));
+    if (dot(own, 1) == 0 || dot(lower, 1) == 0)
+        return 1;  // not at this square's land corners (an overlay), or the lowest paired terrain: drawn whole
+    return dot(bw, own) / max(dot(bw, own + lower), 1e-5);
+}
 
 // The sheet's texture coordinates kept inside this pixel's tile (at: the coordinates at the centroid, inside the
 // triangle; uv: at the pixel's centre, for the derivatives): one texel of the next coarser mip than the widest
@@ -92,7 +132,8 @@ struct VSOut
     float4 shadow : TEXCOORD4;
     float2 worldXY : TEXCOORD5;
 #ifdef BLENDNORMALS
-    float2 baseAt : TEXCOORD6;  // the base coordinates again, read at the centroid
+    float2 baseAt : TEXCOORD6;   // the base coordinates again, read at the centroid
+    float2 worldAt : TEXCOORD7;  // and the world position (MixWeight's square)
 #endif
 };
 
@@ -108,6 +149,7 @@ VSOut VSMain(float3 pos : POSITION, float2 uv0 : TEXCOORD0, float2 uv1 : TEXCOOR
     o.base = uv0;
 #ifdef BLENDNORMALS
     o.baseAt = uv0;
+    o.worldAt = world.xy;
 #endif
     o.shadow = mul(world, mtxShadow);
     o.worldXY = world.xy;
@@ -117,13 +159,15 @@ VSOut VSMain(float3 pos : POSITION, float2 uv0 : TEXCOORD0, float2 uv1 : TEXCOOR
 float4 PSMain(float2 base : TEXCOORD0, float2 fow : TEXCOORD1, float2 lightmap : TEXCOORD2, float2 detail : TEXCOORD3,
               float4 shadow : TEXCOORD4, float2 worldXY : TEXCOORD5
 #ifdef BLENDNORMALS
-              , float2 baseAt : TEXCOORD6_centroid
+              , float2 baseAt : TEXCOORD6_centroid, float2 worldAt : TEXCOORD7_centroid
 #endif
               ) : COLOR
 {
 #ifdef BLENDNORMALS
     float2 sheetUV = SheetCoords(base, baseAt);
     float4 b = tex2Dgrad(TerrainBase, sheetUV, ddx(base), ddy(base));
+    if (f4Mix.w > 0)
+        b.a *= MixWeight(worldXY, worldAt);
 #else
     float4 b = tex2D(TerrainBase, base);
 #endif

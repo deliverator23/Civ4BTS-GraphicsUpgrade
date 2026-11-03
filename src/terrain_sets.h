@@ -225,6 +225,11 @@ inline bool ParseLandBlend(const std::string& text, LandBlend& out, std::string&
 // paired list that covers only part of the land re-picks for the whole land mask too, painting the whole cliff (Dune
 // Wars' Mesa, the peak layer: Iain's choice). Corners: TL, TR, BR, BL; water = water or off the map (as the heightmap
 // counts them).
+// [terrain tiles] MixedCoastBlend (blendAll): on such a mixed coast square, once the lowest land layer has taken the
+// full land mask, every higher land layer with a paired list takes its own paired pick for the full land mask too
+// (instead of its land entry), and the square is marked blended: the terrain shader then weights each of those layers
+// by its share of the square's land corners (terrain_shadow.hlsl, MixWeight), so the terrains blend across the square
+// and agree along every edge with the squares beside it. A square left to the engine stays so.
 struct BlendCorners
 {
     int terrain[4];
@@ -240,12 +245,14 @@ struct BlendSquare
 {
     int x = -0x7fffffff, y = -0x7fffffff;
     bool landSeen = false, untouched = false;
-    BlendAction Next(int sx, int sy, const BlendCorners& c, int terrain, int mask, bool hasLand, int& fullMask)
+    bool blended = false;  // MixedCoastBlend: this square's paired land layers all took the full land mask
+    BlendAction Next(int sx, int sy, const BlendCorners& c, int terrain, int mask, bool hasLand, int& fullMask,
+                     bool blendAll = false)
     {
         if (sx != x || sy != y)
         {
             x = sx, y = sy;
-            landSeen = untouched = false;
+            landSeen = untouched = blended = false;
         }
         bool anyWater = false, atLandCorner = false, atAnyCorner = false;
         int full = 0, distinct[4], n = 0;
@@ -286,9 +293,17 @@ struct BlendSquare
                 return BlendAction::Engine;
             }
             fullMask = full;
+            blended = blendAll;
             return BlendAction::FullMask;
         }
-        return untouched ? BlendAction::Engine : land;
+        if (untouched)
+            return BlendAction::Engine;
+        if (blendAll && land == BlendAction::Land)  // a higher paired land layer: the whole land too, weighted
+        {
+            fullMask = full;
+            return BlendAction::FullMask;
+        }
+        return land;
     }
 };
 

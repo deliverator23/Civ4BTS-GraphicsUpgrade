@@ -2966,6 +2966,102 @@ static int TileSetsTest()
     int f = -1;
     bool fresh = sq2.Next(1, 1, mixed, 13, 2, true, f) == A::FullMask && sq2.Next(1, 1, mixed, 14, 1, true, f) == A::Land &&
                  sq2.Next(2, 1, mixed, 13, 2, true, f) == A::FullMask;
+
+    // [terrain tiles] MixedCoastBlend (blendAll): every higher paired land layer of a mixed coast square takes the full
+    // land mask too, and the square is marked blended; nothing else changes.
+    auto runAll = [](const BlendCorners& c, std::vector<std::tuple<int, int, bool>> layers, std::vector<A> want,
+                     bool wantBlended, int wantFull = -1) {
+        BlendSquare sq;
+        int full = -1;
+        for (size_t i = 0; i < layers.size(); ++i)
+        {
+            int f = -1;
+            if (sq.Next(5, 7, c, std::get<0>(layers[i]), std::get<1>(layers[i]), std::get<2>(layers[i]), f, true) !=
+                want[i])
+                return false;
+            if (f >= 0)
+                full = f;
+        }
+        return sq.blended == wantBlended && (wantFull < 0 || full == wantFull);
+    };
+    const bool blendPicks =
+        runAll(mixed, {{0, 15, false}, {13, 2, true}, {14, 1, true}}, {A::Engine, A::FullMask, A::FullMask}, true, 3) &&
+        runAll(mixed, {{0, 15, false}, {13, 2, true}, {9, 1, false}}, {A::Engine, A::FullMask, A::Engine}, true, 3) &&
+        runAll(mixedNo, {{0, 15, false}, {9, 1, false}, {14, 2, true}}, {A::Engine, A::Engine, A::Engine}, false) &&
+        runAll(landBase, {{13, 15, true}, {0, 12, false}, {14, 1, true}}, {A::Engine, A::Engine, A::Engine}, false) &&
+        runAll(oneLand, {{0, 15, false}, {14, 3, true}}, {A::Engine, A::Engine}, false) &&
+        runAll(allLand, {{13, 15, true}, {14, 3, true}}, {A::Engine, A::Land}, false) &&
+        runAll(mixed, {{0, 15, false}, {13, 2, true}, {14, 1, true}, {40, 2, true}},
+               {A::Engine, A::FullMask, A::FullMask, A::FullMask}, true, 3);
+    // The shader's weight (terrain_shadow.hlsl, MixWeight), as written there: corners SW, SE, NW, NE; terrain + 1, water,
+    // rank (0: not paired). Drawn one over another in rank order, each terrain should end up at its share of the paired
+    // land corners, and two squares should agree along their shared edge.
+    struct Corner
+    {
+        int terrain;
+        bool water;
+        int rank;
+    };
+    auto weight = [](const Corner c[4], int layer, int layerRank, float fx, float fy) {
+        const float bw[4] = {(1 - fx) * (1 - fy), fx * (1 - fy), (1 - fx) * fy, fx * fy};
+        float own = 0, lower = 0;
+        bool anyOwn = false, anyLower = false;
+        for (int k = 0; k < 4; ++k)
+        {
+            const bool land = !c[k].water;
+            const bool isOwn = land && c[k].terrain == layer;
+            const bool isLower = land && c[k].rank > 0 && c[k].rank < layerRank;
+            anyOwn = anyOwn || isOwn;
+            anyLower = anyLower || isLower;
+            own += isOwn ? bw[k] : 0;
+            lower += isLower ? bw[k] : 0;
+        }
+        return !anyOwn || !anyLower ? 1.0f : own / (std::max)(own + lower, 1e-5f);
+    };
+    // Layers Rock (15, rank 1), Rugged (14, rank 2), Mesa-as-terrain (41, rank 3), drawn as "over" with alpha = weight:
+    // a terrain's part of the result.
+    auto shares = [&](const Corner c[4], float fx, float fy, float out[3]) {
+        const int layers[3] = {15, 14, 41};
+        float rest = 1;  // what the layers drawn later leave of the ones before
+        for (int k = 2; k >= 0; --k)
+        {
+            bool present = false;
+            for (int i = 0; i < 4; ++i)
+                present = present || (!c[i].water && c[i].terrain == layers[k]);
+            const float a = present ? weight(c, layers[k], k + 1, fx, fy) : 0.0f;
+            out[k] = rest * a;
+            rest *= 1 - a;
+        }
+    };
+    const Corner sqA[4] = {{15, false, 1}, {14, false, 2}, {1, true, 0}, {41, false, 3}};  // SW Rock, SE Rugged, NW water
+    const Corner sqB[4] = {{14, false, 2}, {15, false, 1}, {41, false, 3}, {1, true, 0}};   // east of A: shares A's SE, NE
+    bool partition = true, edges = true;
+    for (int i = 0; i <= 8; ++i)
+        for (int j = 0; j <= 8; ++j)
+        {
+            const float fx = i / 8.0f, fy = j / 8.0f;
+            const float bw[4] = {(1 - fx) * (1 - fy), fx * (1 - fy), (1 - fx) * fy, fx * fy};
+            const float land = bw[0] + bw[1] + bw[3];
+            float s[3];
+            shares(sqA, fx, fy, s);
+            if (land > 0.05f)
+                partition = partition && std::fabs(s[0] - bw[0] / land) < 1e-4f && std::fabs(s[1] - bw[1] / land) < 1e-4f &&
+                            std::fabs(s[2] - bw[3] / land) < 1e-4f;
+        }
+    for (int j = 0; j <= 8; ++j)  // A's east edge (fx = 1) is B's west edge (fx = 0)
+    {
+        float a[3], b2[3];
+        shares(sqA, 1, j / 8.0f, a);
+        shares(sqB, 0, j / 8.0f, b2);
+        for (int k = 0; k < 3; ++k)
+            edges = edges && std::fabs(a[k] - b2[k]) < 1e-4f;
+    }
+    const Corner single[4] = {{15, false, 1}, {15, false, 1}, {1, true, 0}, {1, true, 0}};  // one land terrain: whole
+    const bool whole = weight(single, 15, 1, 0.3f, 0.6f) == 1.0f && weight(sqA, 41, 3, 0, 0) == 0.0f &&
+                       weight(sqA, 15, 1, 0.9f, 0.9f) == 1.0f && weight(sqA, 99, 4, 0.5f, 0.5f) == 1.0f;
+    const bool mixBlend = blendPicks && partition && edges && whole;
+    printf("TILESETS mixblend=%d (picks %d, partition %d, edges %d, whole %d)\n", mixBlend, blendPicks, partition, edges,
+           whole);
     printf("TILESETS ranges=%d majority=%d corners=%d seed=%d patched=%d refused=%d cycle=%d landparse=%d landbad=%d "
            "landsites=%d mixed=%d overlays=%d landshort=%d\n", ranges, majority, corners, seed, patched, refused, cycle,
            parsed, badOnes, landSites, squares && fresh, overlays, shortForm);
