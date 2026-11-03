@@ -44,6 +44,10 @@ public:
     // Set before each draw: the water's height as the water draw gives it (Reflection::WaterHeight; [reflection]
     // WaterHeight until the first water draw). Models standing at it don't cast; the sun camera is fitted at it.
     float waterHeight = g_config.waterHeight;
+    // ...and whether that height came from a water draw (this frame or an earlier one). Then units and ships cast only
+    // what's above it: the coverage has no depth, so a part under the surface (a whale's tail, a hull's keel) would
+    // shade the water on its sunward side. Not before: a mod's land can lie below the start value.
+    bool waterDrawn = false;
     IDirect3DTexture9* terrainNormals = nullptr;  // TerrainNormals' map for per-pixel terrain lighting (s5), or null
     IDirect3DTexture9* hillShadows = nullptr;     // TerrainNormals' hill shadow mask (s6), or null
     const float* decalLight = nullptr;            // unlit ground decals' change of light (Lighting::DecalLight), or null

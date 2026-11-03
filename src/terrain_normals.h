@@ -16,6 +16,8 @@
 #include "trace.h"
 
 #include <array>
+#include <cmath>
+#include <limits>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -69,6 +71,14 @@ public:
     IDirect3DTexture9* HeightTexture() { return m_spacing > 0 && EnsureHeightTexture() ? m_heightTex : nullptr; }
     float Spacing() const { return m_spacing; }
     UINT Cells() const { return m_cells; }
+    // The terrain's height at world (x, y), from the nearest cell; NaN where it hasn't been read.
+    float GroundAt(float x, float y) const
+    {
+        if (m_spacing <= 0 || m_heights.empty())
+            return std::numeric_limits<float>::quiet_NaN();
+        return m_heights[Index(static_cast<int>(std::floor(x / m_spacing + 0.5f)),
+                               static_cast<int>(std::floor(y / m_spacing + 0.5f)))];
+    }
     // The grid's size for this spacing: the smallest power of two (kMinCells to kMaxCells) whose cells cover the map
     // (mapSpan world units across, from mtxLightmap; 0 if unknown) and at least a Huge map (128 plots), so a later,
     // bigger map loaded at the same spacing fits too. Maps wider than kMaxCells cells wrap onto themselves.

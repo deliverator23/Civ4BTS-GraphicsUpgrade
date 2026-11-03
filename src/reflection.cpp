@@ -99,7 +99,8 @@ void Reflection::BeforeDraw(const ShaderInfo* vs)
         EnsureCleared();  // so a frame with no ships still shows an empty reflection, not last frame's
 }
 
-bool Reflection::AfterDraw(const ShaderInfo* vs, bool fixedFunction, const std::function<void()>& redraw)
+bool Reflection::AfterDraw(const ShaderInfo* vs, bool fixedFunction, const std::function<void()>& redraw,
+                           float clipAbove)
 {
     if (!enabled || !needed || m_waterSeen)
         return false;
@@ -152,7 +153,7 @@ bool Reflection::AfterDraw(const ShaderInfo* vs, bool fixedFunction, const std::
         float plane[4] = {0, 0, 0, 0};
         if (mat::Invert(m, inv))
         {
-            const double world[4] = {0, 0, 1, -h};
+            const double world[4] = {0, 0, 1, -(h + clipAbove)};
             for (int c = 0; c < 4; ++c)
                 plane[c] = static_cast<float>(world[0] * inv[0 * 4 + c] + world[1] * inv[1 * 4 + c] +
                                               world[2] * inv[2 * 4 + c] + world[3] * inv[3 * 4 + c]);
@@ -180,7 +181,7 @@ bool Reflection::AfterDraw(const ShaderInfo* vs, bool fixedFunction, const std::
         p = proj;
         for (int r = 0; r < 4; ++r)
             p.m[r][0] = -proj.m[r][0];
-        const float plane[4] = {0, 0, 1, -h};
+        const float plane[4] = {0, 0, 1, -(h + clipAbove)};
         m_dev->SetClipPlane(0, plane);
         m_dev->SetRenderState(D3DRS_CLIPPLANEENABLE, D3DCLIPPLANE0);
         m_dev->SetTransform(D3DTS_VIEW, &v);

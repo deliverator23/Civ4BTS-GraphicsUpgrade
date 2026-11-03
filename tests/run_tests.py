@@ -1808,6 +1808,55 @@ def main():
               f'the ship above the surface stays out of the refraction ({ship_red})')
         check(none_red == 0, f'UnderwaterDepth=0: nothing under the surface shown, as before ({none_red})')
 
+        # Sea resources (whales, fish...), which BtS draws after the water: kept and drawn into the next frame's
+        # reflection and refraction, before its water, as ships are. Frame 2 (traced) replays frame 1's models through
+        # its own camera, which has moved 0.1 right (clip x) since: the two above the water reflected there (mirrored in
+        # x), the one under it in the refraction there; the model over land not kept, so not reflected; one lying flat at
+        # the water's height (like clams) in neither, so it can't flicker in and out of them at the surface.
+        sdir = os.path.join(TEST, 'water_sea')
+        if os.path.isdir(sdir):
+            shutil.rmtree(sdir)
+        os.makedirs(sdir)
+        shutil.copyfile(DLL, os.path.join(sdir, 'd3d9.dll'))
+        install_water(sdir)
+        with TestIni(os.path.join(sdir, 'GraphicsUpgrade.ini')) as f:
+            f.write(f'[general]\nOutputDir={os.path.join(sdir, "out")}\nGames=*\n[debug]\nTraces=1\n[trace]\nAutoFrame=2\n'
+                    f'[water]\nEnabled=1\nColonizationDir={col_dir}\nUnderwaterDepth=50\nUnderwaterVisibility=0.7\n'
+                    f'UnderwaterBands=8\n[reflection]\nEnabled=1\nSize=512\n')
+        sres = run([os.path.join(TEST, 'test_proxy.exe'), os.path.join(sdir, 'd3d9.dll'), 'sea'])
+        straces = os.path.join(sdir, 'out', 'test_proxy', 'traces')
+        stdir = os.path.join(straces, os.listdir(straces)[0]) if os.path.isdir(straces) and os.listdir(straces) else ''
+
+        def bmp_at(name, x, y):
+            """(blue, green, red, alpha) at clip (x, y) of one of the trace's 32-bit BMPs."""
+            path = os.path.join(stdir, name)
+            if not os.path.exists(path):
+                return (0, 0, 0, 0)
+            bmp = open(path, 'rb').read()
+            size = struct.unpack_from('<i', bmp, 18)[0]
+            o = 54 + (int((1 - y) / 2 * size) * size + int((x + 1) / 2 * size)) * 4
+            return tuple(bmp[o:o + 4])
+
+        refl = {k: int(bmp_at('reflection.bmp', *p)[3] > 128) for k, p in
+                {'S1': (0.1, -0.2), 'S1_old_camera': (0.2, -0.2), 'F': (0.1, 0.2), 'F_old_camera': (0.2, 0.2),
+                 'L': (-0.6, -0.5), 'C': (0.5, 0.6)}.items()}
+        under = {k: (lambda c: c[2] - c[1])(bmp_at('refraction.bmp', *p)) for k, p in
+                 {'S2': (0.3, 0.2), 'S2_old_camera': (0.2, 0.2), 'C': (-0.5, 0.6)}.items()}
+        sevents = [json.loads(line) for line in open(os.path.join(stdir, 'trace.jsonl'))] if stdir else []
+        held = sum(1 for e in sevents if e.get('ev') == 'sea_model_held')
+        replayed = [e.get('draws') for e in sevents if e.get('ev') == 'sea_models_replayed']
+        ms = re.search(r'SEA restored=(\d) s1=([0-9a-f]{8})', sres)
+        check(refl == {'S1': 1, 'S1_old_camera': 0, 'F': 1, 'F_old_camera': 0, 'L': 0, 'C': 0} and under['S2'] > 40 and
+              under['S2_old_camera'] < 10 and abs(under['C']) < 10 and held == 4 and replayed == [4],
+              f"sea resources drawn after the water (unit shader and fixed function) are kept and drawn into the next "
+              f"frame's reflection and refraction through its camera: reflected {refl}; under the water, in the "
+              f"refraction (red over green {under}); {held} kept (not the one over land), {replayed} replayed")
+        check(ms and ms.group(1) == '1' and 'final refs device 0, d3d 0' in sres,
+              "the game's water draw state is back after the replays before it; device fully released")
+        check(ms and int(ms.group(2), 16) & 0xFFFFFF == 0xFF0000,
+              f"the map shows the sea resource from the game's own draw after the water, untouched (pixel "
+              f"{ms.group(2) if ms else '?'})")
+
         # Bundled files only (as in the release package: a GraphicsUpgrade folder next to the DLL), with ColonizationDir
         # pointing nowhere: the water must still be Colonization's. Then neither: BtS water left alone.
         for label, bundle in (('bundled', True), ('oldname', True), ('none', False)):

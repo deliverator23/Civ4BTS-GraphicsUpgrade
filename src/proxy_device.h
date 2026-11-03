@@ -106,7 +106,14 @@ private:
                               UINT start, UINT count);
     void ReplayDeferred();
     void ReleaseDeferredBlocks();  // the held-back draws' state blocks
-    void DropDeferred();           // those and the replay state block (before Reset, at the end)
+    void DropDeferred();           // those, the sea resources' and the replay state block (before Reset, at the end)
+    // Sea resources (whales, fish, clams...): skinned models BtS draws after the water, over the sea, too late for the
+    // water's reflection and its view under the surface, which ships (drawn before the water) are in. Each is drawn as
+    // BtS draws it, and kept (KeepSeaModel) to be drawn into the next frame's reflection and refraction before that
+    // frame's water (ReplaySeaModels), one frame late there.
+    void KeepSeaModel(bool indexed, D3DPRIMITIVETYPE type, INT base, UINT minVertex, UINT numVertices, UINT start,
+                      UINT count);
+    void ReplaySeaModels();
 
     ProxyD3D9* m_parent;
     Registry m_registry;
@@ -157,6 +164,15 @@ private:
         UINT minVertex, numVertices, start, count;
     };
     std::vector<DeferredDraw> m_deferred;
+    struct SeaDraw
+    {
+        DeferredDraw draw;
+        D3DMATRIX view, projection;  // fixed function's camera
+        float camera[16];            // the main view's camera that frame (Camera::Get)
+    };
+    std::vector<SeaDraw> m_seaHeld, m_seaReplay;  // kept this frame / last frame, to draw at this frame's water
+    uint32_t m_frameSeaModels = 0;
+    void ReleaseSeaDraws(std::vector<SeaDraw>& draws);
     IDirect3DStateBlock9* m_replayState = nullptr;  // the game's state around a replay
     ULONG m_deferRefs = 0;  // device references held by those state blocks (see Release)
     uint32_t m_frameDeferred = 0;

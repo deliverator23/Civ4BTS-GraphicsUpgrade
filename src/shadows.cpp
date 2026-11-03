@@ -1470,7 +1470,22 @@ bool Shadows::AfterDraw(const ShaderInfo* vs, bool fixedFunction, const std::fun
         if (Camera::UnitViewProj(m_dev, *vs, m_lightVP, sun))
         {
             m_dev->SetVertexShaderConstantF(reg, sun, 4);
+            // Only what's above the water (waterDrawn), as for the trees' ground below.
+            float inv[16], oldPlane[4];
+            const bool clip = waterDrawn && mat::Invert(m_lightVP, inv);
+            if (clip)
+            {
+                const float p[4] = {0, 0, 1, -waterHeight};
+                float plane[4];
+                for (int c = 0; c < 4; ++c)
+                    plane[c] = inv[c] * p[0] + inv[4 + c] * p[1] + inv[8 + c] * p[2] + inv[12 + c] * p[3];
+                m_dev->GetClipPlane(0, oldPlane);
+                m_dev->SetClipPlane(0, plane);
+                m_dev->SetRenderState(D3DRS_CLIPPLANEENABLE, D3DCLIPPLANE0);
+            }
             redraw();
+            if (clip)
+                m_dev->SetClipPlane(0, oldPlane);
             m_dev->SetVertexShaderConstantF(reg, old, 4);
         }
     }
@@ -1512,13 +1527,16 @@ bool Shadows::AfterDraw(const ShaderInfo* vs, bool fixedFunction, const std::fun
         // ground (no gaps on slopes); hidden by the terrain on screen, but the coverage texture has no depth, so
         // those foundations would shade the ground on the building's sunward side. A building's base is its origin;
         // a weapon's origin is the hand holding it (the club hangs below it), so its ground is its unit's blob.
+        // Skinned meshes (ships' parts, sea resources): only what's above the water (waterDrawn).
         float oldPlane[4];
         m_dev->GetClipPlane(0, oldPlane);
         D3DMATRIX world;
+        float bottom = waterDrawn ? waterHeight : -1e30f;
         if (rigid && SUCCEEDED(m_dev->GetTransform(D3DTS_WORLD, &world)))
+            bottom = (std::max)(bottom, (building ? world._43 : m_anchor[2]) - 2.0f);
+        if (bottom > -1e30f)
         {
-            const float ground = building ? world._43 : m_anchor[2];
-            const float plane[4] = {0, 0, 1, -(ground - 2.0f)};  // world z >= ground - 2 (fixed function: world space)
+            const float plane[4] = {0, 0, 1, -bottom};  // world z >= bottom (fixed function: world space)
             m_dev->SetClipPlane(0, plane);
             m_dev->SetRenderState(D3DRS_CLIPPLANEENABLE, D3DCLIPPLANE0);
         }

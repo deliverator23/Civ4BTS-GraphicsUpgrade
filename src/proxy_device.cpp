@@ -1,5 +1,6 @@
 #include "proxy_device.h"
 #include "camera.h"
+#include "matrix.h"
 #include "proxy_d3d9.h"
 #include "overlay.h"
 
@@ -257,9 +258,11 @@ HRESULT ProxyDevice::Present(CONST RECT* pSourceRect, CONST RECT* pDestRect, HWN
     if (m_frame % 1000 == 0)
         Log::Write("frame %u: %u draws, %u primitives, %u render-target switches, %u ghost redraws, %u reflection "
                    "redraws, %u reflective, dynamic water draws, %u shadow casters, %u shadowed ground draws, %u blob "
-                   "shadows skipped, %u painted shadows skipped, %u selection decals moved above the water",
+                   "shadows skipped, %u painted shadows skipped, %u selection decals moved above the water, %u sea "
+                   "resource draws kept for the next frame's reflection and refraction",
                    m_frame, m_frameDraws, m_framePrims, m_frameRtSwitches, m_frameGhosts, m_refl.FrameRedraws(),
-                   m_frameWaterDraws, m_shadows.FrameCasters(), m_shadows.FrameReceivers(), m_frameBlobsSkipped, m_framePaintedSkipped, m_frameDeferred);
+                   m_frameWaterDraws, m_shadows.FrameCasters(), m_shadows.FrameReceivers(), m_frameBlobsSkipped,
+                   m_framePaintedSkipped, m_frameDeferred, m_frameSeaModels);
     if (m_frame % 1000 == 0)
     {
         Log::Write("%s", m_perf.Summary().c_str());
@@ -271,6 +274,10 @@ HRESULT ProxyDevice::Present(CONST RECT* pSourceRect, CONST RECT* pDestRect, HWN
             Log::Write("%s", land.c_str());
     }
     m_frameDraws = m_frameRtSwitches = m_framePrims = m_frameGhosts = m_frameWaterDraws = m_frameBlobsSkipped = m_framePaintedSkipped = m_frameDeferred = 0;
+    m_frameSeaModels = 0;
+    // This frame's sea resources wait for the next frame's water; last frame's, if this frame drew no water, go.
+    ReleaseSeaDraws(m_seaReplay);
+    m_seaReplay.swap(m_seaHeld);
     bool* effects[5] = {&m_refl.enabled, &m_water.enabled, &m_shadows.enabled, &m_light.enabled, &m_aniso};
     if (m_compareStep == 1)
     {
@@ -995,6 +1002,8 @@ HRESULT ProxyDevice::Dispatch(Draw draw)
         else
             fixedFunction = true;
     }
+    if (vs && vs->btsWater && m_frameWaterDraws == 0 && !m_seaReplay.empty() && m_refl.TargetIsBackBuffer())
+        ReplaySeaModels();  // last frame's sea resources, before the first water draw as ships are
     if (!m_deferred.empty() && m_frameWaterDraws > 0 && !(vs && vs->btsWater))
         ReplayDeferred();  // the water is done: the held-back selection decals go on top of it
     // Anisotropic filtering: the draw's linearly filtered textures (stages 0-7) for this draw and its redraws, back to
@@ -1118,6 +1127,7 @@ HRESULT ProxyDevice::Dispatch(Draw draw)
     memcpy(m_shadows.hillGrid, m_terrain.HillGrid(), sizeof(m_shadows.hillGrid));
     m_refl.BeforeDraw(vs);
     m_shadows.waterHeight = m_refl.WaterHeight();
+    m_shadows.waterDrawn = m_refl.HeightFromWater();
     if (m_water.enabled)
     {
         // Refraction: copy the screen at the first ship or water draw of the main scene, i.e. after the terrain (the
@@ -1365,6 +1375,8 @@ void ProxyDevice::ReleaseDeferredBlocks()
 void ProxyDevice::DropDeferred()
 {
     ReleaseDeferredBlocks();
+    ReleaseSeaDraws(m_seaHeld);
+    ReleaseSeaDraws(m_seaReplay);
     if (m_replayState)
     {
         ULONG before = DeviceRefs(m_real);
@@ -1373,6 +1385,235 @@ void ProxyDevice::DropDeferred()
         ULONG after = DeviceRefs(m_real);
         m_deferRefs -= (std::min)(m_deferRefs, before - after);
     }
+}
+
+// Where a skinned model stands: its first bone's origin. Steam's BtS shaders take world-space bones; older builds take
+// the model's own, its placement in SkinWorldViewProj (camera x placement), recovered with this frame's camera.
+static bool ModelOrigin(IDirect3DDevice9* dev, const ShaderInfo& vs, float* out)
+{
+    float rows[12];
+    if (FAILED(dev->GetVertexShaderConstantF(static_cast<UINT>(vs.worldBones), rows, 3)))
+        return false;
+    const float bone[4] = {rows[3], rows[7], rows[11], 1};
+    if (!vs.skinWorldViewProj)
+    {
+        memcpy(out, bone, 3 * sizeof(float));
+        return true;
+    }
+    const float* camera = Camera::Get();
+    float reg[16];
+    double inv[16];
+    if (!camera || FAILED(dev->GetVertexShaderConstantF(static_cast<UINT>(vs.viewProj), reg, 4)) ||
+        !mat::Invert(camera, inv))
+        return false;
+    double p[4] = {};
+    for (int i = 0; i < 4; ++i)
+        for (int j = 0; j < 4; ++j)
+        {
+            double placement = 0;
+            for (int k = 0; k < 4; ++k)
+                placement += inv[i * 4 + k] * reg[k * 4 + j];
+            p[i] += placement * bone[j];
+        }
+    if (std::fabs(p[3]) < 1e-9)
+        return false;
+    for (int i = 0; i < 3; ++i)
+        out[i] = static_cast<float>(p[i] / p[3]);
+    return true;
+}
+
+void ProxyDevice::KeepSeaModel(bool indexed, D3DPRIMITIVETYPE type, INT base, UINT minVertex, UINT numVertices,
+                               UINT start, UINT count)
+{
+    // Only after this frame's (Colonization's) water is in the map.
+    if (!m_water.enabled || !m_water.Ready() || m_frameWaterDraws == 0 || !Camera::Get() || !m_refl.TargetIsBackBuffer())
+        return;
+    // Solid (depth-writing: not the wave rings around fish and whales, which float on the water) and drawn as ships
+    // are: a unit shader, or fixed-function vertex blending with normals. Where it stands: its first bone, or its
+    // first world matrix.
+    DWORD zwrite = FALSE;
+    m_real->GetRenderState(D3DRS_ZWRITEENABLE, &zwrite);
+    if (!zwrite)
+        return;
+    float pos[3];
+    IDirect3DVertexShader9* shader = nullptr;
+    m_real->GetVertexShader(&shader);
+    if (shader)
+    {
+        auto it = m_registry.shaders.find(shader);
+        shader->Release();
+        if (it == m_registry.shaders.end() || it->second.viewProj < 0 || it->second.worldBones < 0 ||
+            !ModelOrigin(m_real, it->second, pos))
+            return;
+    }
+    else
+    {
+        DWORD blend = D3DVBF_DISABLE, fvf = 0;
+        D3DMATRIX world;
+        m_real->GetRenderState(D3DRS_VERTEXBLEND, &blend);
+        m_real->GetFVF(&fvf);
+        if (blend == D3DVBF_DISABLE || !SkinnedLitFvf(fvf) || FAILED(m_real->GetTransform(D3DTS_WORLDMATRIX(0), &world)))
+            return;
+        pos[0] = world._41, pos[1] = world._42, pos[2] = world._43;
+    }
+    // Over the sea: the terrain under it lies below the water (not read there yet: left alone).
+    if (!(m_terrain.GroundAt(pos[0], pos[1]) < m_refl.WaterHeight() - 1.0f))
+        return;
+    // Its buffers must still hold it next frame: not dynamic ones, which the game fills again as it goes.
+    for (UINT s = 0; s < 2; ++s)
+    {
+        IDirect3DVertexBuffer9* vb = nullptr;
+        UINT offset = 0, stride = 0;
+        if (FAILED(m_real->GetStreamSource(s, &vb, &offset, &stride)) || !vb)
+        {
+            if (s == 0)
+                return;
+            continue;
+        }
+        D3DVERTEXBUFFER_DESC d = {};
+        vb->GetDesc(&d);
+        vb->Release();
+        if (d.Usage & D3DUSAGE_DYNAMIC)
+            return;
+    }
+    if (indexed)
+    {
+        IDirect3DIndexBuffer9* ib = nullptr;
+        if (FAILED(m_real->GetIndices(&ib)) || !ib)
+            return;
+        D3DINDEXBUFFER_DESC d = {};
+        ib->GetDesc(&d);
+        ib->Release();
+        if (d.Usage & D3DUSAGE_DYNAMIC)
+            return;
+    }
+    SeaDraw s = {};
+    ULONG before = DeviceRefs(m_real);
+    if (FAILED(m_real->CreateStateBlock(D3DSBT_ALL, &s.draw.state)))
+        return;
+    m_deferRefs += DeviceRefs(m_real) - before;
+    for (int i = 0; i < 4; ++i)
+        m_real->GetTransform(D3DTS_WORLDMATRIX(i), &s.draw.worlds[i]);
+    m_real->GetTransform(D3DTS_VIEW, &s.view);
+    m_real->GetTransform(D3DTS_PROJECTION, &s.projection);
+    memcpy(s.camera, Camera::Get(), sizeof(s.camera));
+    s.draw.indexed = indexed;
+    s.draw.type = type;
+    s.draw.base = base;
+    s.draw.minVertex = minVertex;
+    s.draw.numVertices = numVertices;
+    s.draw.start = start;
+    s.draw.count = count;
+    m_seaHeld.push_back(s);
+    ++m_frameSeaModels;
+    if (m_trace.Active())
+        m_trace.Event(std::string("{\"ev\":\"sea_model_held\",\"path\":\"") + (shader ? "vs" : "ff") + "\"}");
+}
+
+void ProxyDevice::ReplaySeaModels()
+{
+    std::vector<SeaDraw> draws;
+    draws.swap(m_seaReplay);
+    if (!m_replayState)
+    {
+        ULONG before = DeviceRefs(m_real);
+        if (FAILED(m_real->CreateStateBlock(D3DSBT_ALL, &m_replayState)))
+        {
+            ReleaseSeaDraws(draws);
+            return;
+        }
+        m_deferRefs += DeviceRefs(m_real) - before;
+    }
+    m_replayState->Capture();
+    D3DMATRIX worlds[4], view, projection;
+    for (int i = 0; i < 4; ++i)
+        m_real->GetTransform(D3DTS_WORLDMATRIX(i), &worlds[i]);
+    m_real->GetTransform(D3DTS_VIEW, &view);
+    m_real->GetTransform(D3DTS_PROJECTION, &projection);
+    const float* now = Camera::Get();
+    // The refraction's copy of the sea floor first, as at a ship (Dispatch).
+    if (m_water.enabled && !m_water.SnapshotTaken())
+        m_water.SnapshotRefraction();
+    // A unit away from the surface: a model lying on the water (clams) mustn't flicker in and out of either at it.
+    const float margin = 1.0f, h = m_refl.WaterHeight();
+    for (SeaDraw& s : draws)
+    {
+        DeferredDraw& d = s.draw;
+        d.state->Apply();
+        for (int i = 0; i < 4; ++i)
+            m_real->SetTransform(D3DTS_WORLDMATRIX(i), &d.worlds[i]);
+        m_real->SetTransform(D3DTS_VIEW, &s.view);
+        // Through this frame's camera (the view may have moved since): the draw's clip space carried from that
+        // frame's camera to this one's by fix = now x then^-1.
+        float fix[16], inv[16];
+        const bool moved = now && mat::Invert(s.camera, inv);
+        if (moved)
+            mat::Mul(now, inv, fix);
+        D3DMATRIX proj = s.projection;
+        const ShaderInfo* vs = nullptr;
+        IDirect3DVertexShader9* shader = nullptr;
+        m_real->GetVertexShader(&shader);
+        if (shader)
+        {
+            auto it = m_registry.shaders.find(shader);
+            shader->Release();
+            if (it == m_registry.shaders.end())
+                continue;
+            vs = &it->second;
+            if (moved && vs->viewProj >= 0)
+            {
+                const UINT reg = static_cast<UINT>(vs->viewProj);
+                float vp[16];
+                m_real->GetVertexShaderConstantF(reg, vp, 4);
+                mat::Mul(fix, vp, vp);
+                m_real->SetVertexShaderConstantF(reg, vp, 4);
+            }
+        }
+        else if (moved)
+        {
+            // Row vectors (clip = p x VIEW x PROJECTION, the transpose of register form): PROJECTION x fix^T.
+            for (int i = 0; i < 4; ++i)
+                for (int j = 0; j < 4; ++j)
+                    proj.m[i][j] = s.projection.m[i][0] * fix[j * 4 + 0] + s.projection.m[i][1] * fix[j * 4 + 1] +
+                                   s.projection.m[i][2] * fix[j * 4 + 2] + s.projection.m[i][3] * fix[j * 4 + 3];
+        }
+        m_real->SetTransform(D3DTS_PROJECTION, &proj);
+        // In this frame's light, as the game's draw gets it (Dispatch), then into the reflection and the refraction
+        // only: the map itself has it from the game's own draw, after the water.
+        if (m_light.enabled)
+            m_light.Apply(vs, vs ? CurrentPixelShader() : nullptr, vs ? -1 : kLightMech);
+        auto redraw = [&] {
+            if (d.indexed)
+                m_real->DrawIndexedPrimitive(d.type, d.base, d.minVertex, d.numVertices, d.start, d.count);
+            else
+                m_real->DrawPrimitive(d.type, d.start, d.count);
+        };
+        if (m_refl.enabled && m_refl.AfterDraw(vs, !vs, redraw, margin) && m_trace.Active())
+            m_trace.Event(std::string("{\"ev\":\"reflect\",\"path\":\"") + (vs ? "vs" : "ff") + "\",\"sea\":1}");
+        if (m_water.enabled && m_water.DrawSubmerged(vs, h - margin, redraw) && m_trace.Active())
+            m_trace.Event("{\"ev\":\"submerged\",\"sea\":1}");
+        m_light.Restore();
+    }
+    m_replayState->Apply();
+    for (int i = 0; i < 4; ++i)
+        m_real->SetTransform(D3DTS_WORLDMATRIX(i), &worlds[i]);
+    m_real->SetTransform(D3DTS_VIEW, &view);
+    m_real->SetTransform(D3DTS_PROJECTION, &projection);
+    if (m_trace.Active())
+        m_trace.Event("{\"ev\":\"sea_models_replayed\",\"draws\":" + std::to_string(draws.size()) + "}");
+    ReleaseSeaDraws(draws);
+}
+
+void ProxyDevice::ReleaseSeaDraws(std::vector<SeaDraw>& draws)
+{
+    if (draws.empty())
+        return;
+    ULONG before = DeviceRefs(m_real);
+    for (SeaDraw& s : draws)
+        s.draw.state->Release();
+    draws.clear();
+    ULONG after = DeviceRefs(m_real);
+    m_deferRefs -= (std::min)(m_deferRefs, before - after);
 }
 
 const ShaderInfo* ProxyDevice::CurrentPixelShader()
@@ -1398,6 +1639,8 @@ HRESULT ProxyDevice::DrawPrimitive(D3DPRIMITIVETYPE PrimitiveType, UINT StartVer
     }
     if (m_effects && DeferUntilAfterWater(false, PrimitiveType, 0, 0, 0, StartVertex, PrimitiveCount))
         return D3D_OK;
+    if (m_effects)
+        KeepSeaModel(false, PrimitiveType, 0, 0, 0, StartVertex, PrimitiveCount);
     return Dispatch([&] { return m_real->DrawPrimitive(PrimitiveType, StartVertex, PrimitiveCount); });
 }
 
@@ -1416,6 +1659,8 @@ HRESULT ProxyDevice::DrawIndexedPrimitive(D3DPRIMITIVETYPE PrimitiveType, INT Ba
     if (m_effects &&
         DeferUntilAfterWater(true, PrimitiveType, BaseVertexIndex, MinVertexIndex, NumVertices, startIndex, primCount))
         return D3D_OK;
+    if (m_effects)
+        KeepSeaModel(true, PrimitiveType, BaseVertexIndex, MinVertexIndex, NumVertices, startIndex, primCount);
     return Dispatch([&] {
         return m_real->DrawIndexedPrimitive(PrimitiveType, BaseVertexIndex, MinVertexIndex, NumVertices, startIndex,
                                             primCount);

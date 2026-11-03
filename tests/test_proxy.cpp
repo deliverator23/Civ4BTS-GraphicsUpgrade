@@ -522,6 +522,251 @@ static int WaterScene(IDirect3DDevice9* dev, int frames)
     return 0;
 }
 
+// Sea resources check, run with [water] Enabled=1, [reflection] Enabled=1, Underwater* set and a trace of frame 2. A
+// top-down orthographic camera (500 world units = half the screen) looks at BtS-style terrain drawn from a vertex
+// buffer (5x5, 250 apart): sea floor at z -100, but for a strip of land at z 100 along x = 250. Then BtS-style water
+// at z 0, and after it, as BtS draws its sea resources, flat red models from vertex buffers:
+//   S1 unit-style shader (mtxViewProj c60), z 50, at (-100,-100)          -> kept, reflected next frame
+//   S2 unit-style shader, z -20 (under the water), at (100,100)           -> kept, in the next frame's refraction
+//   F  fixed function, vertex-blended with normals, WORLD at (-100,100), z 50 -> kept, reflected next frame
+//   L  unit-style shader, z 150, at (250,-250), over the land             -> not kept
+//   C  unit-style shader, flat at the water's height, at (-300,300), like clams -> kept, but in neither
+// From frame 2 the camera has moved 0.1 to the right (clip x), so the kept models, replayed through it, must be
+// there too. Prints "SEA restored=." (the water draw's shaders, constants, texture and fixed-function camera are
+// back after the replays before it) and " s1=AARRGGBB" (the last frame's back buffer at S1: drawn by the game's own
+// draw, after the water).
+static int SeaScene(IDirect3DDevice9* dev, int frames)
+{
+    std::vector<DWORD> tvsCode = Tokens(g_terrainVS, sizeof(g_terrainVS)), tpsCode = Tokens(g_terrainPS, sizeof(g_terrainPS)),
+                       wvsCode = Tokens(g_btsWaterVS, sizeof(g_btsWaterVS)), wpsCode = Tokens(g_btsWaterPS, sizeof(g_btsWaterPS)),
+                       unitCode = Tokens(g_ghostVS, sizeof(g_ghostVS));
+    IDirect3DVertexShader9 *tvs = nullptr, *wvs = nullptr, *unit = nullptr;
+    IDirect3DPixelShader9 *tps = nullptr, *wps = nullptr;
+    CHECK(dev->CreateVertexShader(tvsCode.data(), &tvs));
+    CHECK(dev->CreatePixelShader(tpsCode.data(), &tps));
+    CHECK(dev->CreateVertexShader(wvsCode.data(), &wvs));
+    CHECK(dev->CreatePixelShader(wpsCode.data(), &wps));
+    CHECK(dev->CreateVertexShader(unitCode.data(), &unit));
+    const D3DVERTEXELEMENT9 terrainElems[] = {
+        {0, 0, D3DDECLTYPE_FLOAT3, D3DDECLMETHOD_DEFAULT, D3DDECLUSAGE_POSITION, 0},
+        {0, 12, D3DDECLTYPE_FLOAT2, D3DDECLMETHOD_DEFAULT, D3DDECLUSAGE_TEXCOORD, 0},
+        {0, 20, D3DDECLTYPE_FLOAT2, D3DDECLMETHOD_DEFAULT, D3DDECLUSAGE_TEXCOORD, 1}, D3DDECL_END()};
+    const D3DVERTEXELEMENT9 waterElems[] = {
+        {0, 0, D3DDECLTYPE_FLOAT3, D3DDECLMETHOD_DEFAULT, D3DDECLUSAGE_POSITION, 0},
+        {0, 12, D3DDECLTYPE_FLOAT2, D3DDECLMETHOD_DEFAULT, D3DDECLUSAGE_TEXCOORD, 1},
+        {0, 20, D3DDECLTYPE_FLOAT2, D3DDECLMETHOD_DEFAULT, D3DDECLUSAGE_TEXCOORD, 2}, D3DDECL_END()};
+    const D3DVERTEXELEMENT9 posElems[] = {{0, 0, D3DDECLTYPE_FLOAT3, D3DDECLMETHOD_DEFAULT, D3DDECLUSAGE_POSITION, 0},
+                                          D3DDECL_END()};
+    IDirect3DVertexDeclaration9 *terrainDecl = nullptr, *waterDecl = nullptr, *posDecl = nullptr;
+    CHECK(dev->CreateVertexDeclaration(terrainElems, &terrainDecl));
+    CHECK(dev->CreateVertexDeclaration(waterElems, &waterDecl));
+    CHECK(dev->CreateVertexDeclaration(posElems, &posDecl));
+    // Terrain textures (base, fog of war, lightmap, detail) and the water's coast and fog textures: 1x1.
+    const DWORD colours[6] = {0xFF666666, 0xFFE6E6E6, 0xFFCCCCCC, 0xFF808080, 0xFFFFFFFF, 0xFFFFFFFF};
+    IDirect3DTexture9* tex[6] = {};
+    for (int i = 0; i < 6; ++i)
+    {
+        CHECK(dev->CreateTexture(1, 1, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &tex[i], nullptr));
+        D3DLOCKED_RECT lr;
+        CHECK(tex[i]->LockRect(0, &lr, nullptr, 0));
+        *static_cast<DWORD*>(lr.pBits) = colours[i];
+        tex[i]->UnlockRect(0);
+    }
+    auto buffer = [&](const void* data, UINT bytes, IDirect3DVertexBuffer9** vb) {
+        void* p = nullptr;
+        if (FAILED(dev->CreateVertexBuffer(bytes, D3DUSAGE_WRITEONLY, 0, D3DPOOL_MANAGED, vb, nullptr)) ||
+            FAILED((*vb)->Lock(0, 0, &p, 0)))
+            return false;
+        memcpy(p, data, bytes);
+        (*vb)->Unlock();
+        return true;
+    };
+    float terrain[25][7];
+    for (int y = 0; y < 5; ++y)
+        for (int x = 0; x < 5; ++x)
+        {
+            const float v[7] = {-500.0f + 250 * x, -500.0f + 250 * y, x == 3 ? 100.0f : -100.0f, x / 4.0f, 1 - y / 4.0f,
+                                x / 4.0f, 1 - y / 4.0f};
+            memcpy(terrain[y * 5 + x], v, sizeof(v));
+        }
+    WORD idx[16 * 6];
+    for (int y = 0, k = 0; y < 4; ++y)
+        for (int x = 0; x < 4; ++x, k += 6)
+        {
+            WORD a = static_cast<WORD>(y * 5 + x), b = a + 1, c = a + 5, d = a + 6;
+            const WORD q[6] = {a, c, d, a, d, b};
+            memcpy(&idx[k], q, sizeof(q));
+        }
+    // S1, S2, L (world positions); F (local, with normals and a blend weight: x, y, z, weight, normal)
+    auto tri = [](float cx, float cy, float z, float* out, int stride) {
+        const float pts[3][2] = {{cx - 40, cy - 30}, {cx, cy + 50}, {cx + 40, cy - 30}};
+        for (int i = 0; i < 3; ++i)
+        {
+            float* v = out + i * stride;
+            v[0] = pts[i][0], v[1] = pts[i][1], v[2] = z;
+            if (stride == 7)
+                v[3] = 1, v[4] = 0, v[5] = 0, v[6] = 1;
+        }
+    };
+    // Each model around its own origin, placed by its bone (unit shader) or WORLD (fixed function), as BtS places them.
+    float models[12][3], ff[3][7];
+    tri(0, 0, 50, &models[0][0], 3);
+    tri(0, 0, -20, &models[3][0], 3);
+    tri(0, 0, 150, &models[6][0], 3);
+    tri(0, 0, 0, &models[9][0], 3);
+    tri(0, 0, 50, &ff[0][0], 7);
+    const float at[4][2] = {{-100, -100}, {100, 100}, {250, -250}, {-300, 300}};  // S1, S2, L, C
+    IDirect3DVertexBuffer9 *terrainVb = nullptr, *modelVb = nullptr, *ffVb = nullptr;
+    IDirect3DIndexBuffer9* terrainIb = nullptr;
+    if (!buffer(terrain, sizeof(terrain), &terrainVb) || !buffer(models, sizeof(models), &modelVb) ||
+        !buffer(ff, sizeof(ff), &ffVb))
+    {
+        printf("FAILED: vertex buffers\n");
+        return 1;
+    }
+    void* p = nullptr;
+    CHECK(dev->CreateIndexBuffer(sizeof(idx), D3DUSAGE_WRITEONLY, D3DFMT_INDEX16, D3DPOOL_MANAGED, &terrainIb, nullptr));
+    CHECK(terrainIb->Lock(0, 0, &p, 0));
+    memcpy(p, idx, sizeof(idx));
+    terrainIb->Unlock();
+
+    // register form: x/500, y/500, depth 0.5 - z/1000; from frame 2, clip x + 0.1
+    const float still[16] = {1 / 500.0f, 0, 0, 0, 0, 1 / 500.0f, 0, 0, 0, 0, -1 / 1000.0f, 0.5f, 0, 0, 0, 1};
+    const float world[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};  // terrain and water (water at z 0)
+    const float zero[16] = {}, scale[4] = {1, 0, 0, 0};
+    const float bones[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
+    const float water[6][7] = {{-500, -500, 0, 0, 1, 0, 1}, {-500, 500, 0, 0, 0, 0, 0}, {500, 500, 0, 1, 0, 1, 0},
+                               {-500, -500, 0, 0, 1, 0, 1}, {500, 500, 0, 1, 0, 1, 0},  {500, -500, 0, 1, 1, 1, 1}};
+    IDirect3DSurface9 *bb = nullptr, *sys = nullptr;
+    CHECK(dev->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &bb));
+    D3DSURFACE_DESC bd;
+    bb->GetDesc(&bd);
+    CHECK(dev->CreateOffscreenPlainSurface(bd.Width, bd.Height, bd.Format, D3DPOOL_SYSTEMMEM, &sys, nullptr));
+    DWORD s1 = 0;
+    int restored = 1;
+    for (int f = 0; f < frames; ++f)
+    {
+        float vp[16];
+        memcpy(vp, still, sizeof(vp));
+        if (f >= 2)
+            vp[3] += 0.1f;
+        D3DMATRIX id = {}, proj, fWorld;
+        id._11 = id._22 = id._33 = id._44 = 1;
+        for (int i = 0; i < 4; ++i)
+            for (int j = 0; j < 4; ++j)
+                proj.m[i][j] = vp[j * 4 + i];  // row-vector form of the register-form camera
+        fWorld = id;
+        fWorld._41 = -100, fWorld._42 = 100;
+
+        CHECK(dev->BeginScene());
+        CHECK(dev->Clear(0, nullptr, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER, 0xFF000000, 1.0f, 0));
+        CHECK(dev->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE));
+        CHECK(dev->SetRenderState(D3DRS_ZENABLE, TRUE));
+        CHECK(dev->SetRenderState(D3DRS_ZWRITEENABLE, TRUE));
+        CHECK(dev->SetRenderState(D3DRS_ZFUNC, D3DCMP_LESSEQUAL));
+        CHECK(dev->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE));
+        CHECK(dev->SetRenderState(D3DRS_LIGHTING, FALSE));
+        // terrain
+        CHECK(dev->SetVertexDeclaration(terrainDecl));
+        CHECK(dev->SetVertexShader(tvs));
+        CHECK(dev->SetPixelShader(tps));
+        CHECK(dev->SetVertexShaderConstantF(0, vp, 4));
+        CHECK(dev->SetVertexShaderConstantF(4, world, 3));
+        CHECK(dev->SetVertexShaderConstantF(7, zero, 4));
+        CHECK(dev->SetVertexShaderConstantF(11, scale, 1));
+        for (DWORD i = 0; i < 4; ++i)
+            CHECK(dev->SetTexture(i, tex[i]));
+        CHECK(dev->SetStreamSource(0, terrainVb, 0, 28));
+        CHECK(dev->SetIndices(terrainIb));
+        CHECK(dev->DrawIndexedPrimitive(D3DPT_TRIANGLELIST, 0, 0, 25, 0, 32));
+        for (DWORD i = 0; i < 4; ++i)
+            CHECK(dev->SetTexture(i, nullptr));
+        // water
+        CHECK(dev->SetVertexDeclaration(waterDecl));
+        CHECK(dev->SetVertexShader(wvs));
+        CHECK(dev->SetPixelShader(wps));
+        CHECK(dev->SetVertexShaderConstantF(0, vp, 4));
+        CHECK(dev->SetVertexShaderConstantF(4, world, 3));
+        CHECK(dev->SetVertexShaderConstantF(7, zero, 2));
+        CHECK(dev->SetTexture(2, tex[4]));
+        CHECK(dev->SetTexture(3, tex[5]));
+        CHECK(dev->SetTransform(D3DTS_PROJECTION, &proj));
+        CHECK(dev->DrawPrimitiveUP(D3DPT_TRIANGLELIST, 2, water, 28));
+        {
+            IDirect3DVertexShader9* nowVs = nullptr;
+            IDirect3DPixelShader9* nowPs = nullptr;
+            IDirect3DBaseTexture9* nowCoast = nullptr;
+            float c0[16];
+            D3DMATRIX nowProj;
+            dev->GetVertexShader(&nowVs);
+            dev->GetPixelShader(&nowPs);
+            dev->GetTexture(2, &nowCoast);
+            dev->GetVertexShaderConstantF(0, c0, 4);
+            dev->GetTransform(D3DTS_PROJECTION, &nowProj);
+            if (nowVs != wvs || nowPs != wps || nowCoast != tex[4] || memcmp(c0, vp, sizeof(c0)) != 0 ||
+                memcmp(&nowProj, &proj, sizeof(proj)) != 0)
+                restored = 0;
+            for (IUnknown* o : {static_cast<IUnknown*>(nowVs), static_cast<IUnknown*>(nowPs), static_cast<IUnknown*>(nowCoast)})
+                if (o)
+                    o->Release();
+        }
+        CHECK(dev->SetTexture(2, nullptr));
+        CHECK(dev->SetTexture(3, nullptr));
+        // the models: flat red
+        CHECK(dev->SetPixelShader(nullptr));
+        CHECK(dev->SetRenderState(D3DRS_TEXTUREFACTOR, 0xFFFF0000));
+        CHECK(dev->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_SELECTARG1));
+        CHECK(dev->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_TFACTOR));
+        CHECK(dev->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG1));
+        CHECK(dev->SetTextureStageState(0, D3DTSS_ALPHAARG1, D3DTA_TFACTOR));
+        CHECK(dev->SetVertexDeclaration(posDecl));
+        CHECK(dev->SetVertexShader(unit));
+        CHECK(dev->SetVertexShaderConstantF(60, vp, 4));
+        CHECK(dev->SetStreamSource(0, modelVb, 0, 12));
+        for (UINT m = 0; m < 4; ++m)
+        {
+            float bone[12];
+            memcpy(bone, bones, sizeof(bone));
+            bone[3] = at[m][0], bone[7] = at[m][1];
+            CHECK(dev->SetVertexShaderConstantF(0, bone, 3));
+            CHECK(dev->DrawPrimitive(D3DPT_TRIANGLELIST, m * 3, 1));
+        }
+        CHECK(dev->SetVertexShader(nullptr));
+        CHECK(dev->SetFVF(D3DFVF_XYZB1 | D3DFVF_NORMAL));
+        CHECK(dev->SetRenderState(D3DRS_VERTEXBLEND, D3DVBF_1WEIGHTS));
+        CHECK(dev->SetTransform(D3DTS_WORLDMATRIX(0), &fWorld));
+        CHECK(dev->SetTransform(D3DTS_WORLDMATRIX(1), &fWorld));
+        CHECK(dev->SetTransform(D3DTS_VIEW, &id));
+        CHECK(dev->SetStreamSource(0, ffVb, 0, 28));
+        CHECK(dev->DrawPrimitive(D3DPT_TRIANGLELIST, 0, 1));
+        CHECK(dev->SetRenderState(D3DRS_VERTEXBLEND, D3DVBF_DISABLE));
+        CHECK(dev->SetStreamSource(0, nullptr, 0, 0));
+        CHECK(dev->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_MODULATE));
+        CHECK(dev->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_TEXTURE));
+        CHECK(dev->EndScene());
+        CHECK(dev->GetRenderTargetData(bb, sys));
+        D3DLOCKED_RECT lr;
+        CHECK(sys->LockRect(&lr, nullptr, D3DLOCK_READONLY));
+        const float sx = -100 / 500.0f + vp[3], sy = -100 / 500.0f;  // S1's centre on the screen
+        s1 = reinterpret_cast<const DWORD*>(static_cast<const BYTE*>(lr.pBits) +
+                                            static_cast<UINT>((1 - sy) / 2 * bd.Height) * lr.Pitch)[static_cast<UINT>((sx + 1) / 2 * bd.Width)];
+        sys->UnlockRect();
+        CHECK(dev->Present(nullptr, nullptr, nullptr, nullptr));
+    }
+    printf("SEA restored=%d s1=%08lx\n", restored, static_cast<unsigned long>(s1));
+    sys->Release();
+    bb->Release();
+    for (IUnknown* o : {static_cast<IUnknown*>(terrainVb), static_cast<IUnknown*>(modelVb), static_cast<IUnknown*>(ffVb),
+                        static_cast<IUnknown*>(terrainIb), static_cast<IUnknown*>(terrainDecl),
+                        static_cast<IUnknown*>(waterDecl), static_cast<IUnknown*>(posDecl), static_cast<IUnknown*>(tvs),
+                        static_cast<IUnknown*>(tps), static_cast<IUnknown*>(wvs), static_cast<IUnknown*>(wps),
+                        static_cast<IUnknown*>(unit)})
+        o->Release();
+    for (IDirect3DTexture9* t : tex)
+        t->Release();
+    return 0;
+}
+
 // Sun shadows check, run with [shadows] Enabled=1, SunDirection=-1,0,-1, WaterHeight=0. A top-down orthographic
 // camera (500 world units = half the 256x256 screen) looks at a BtS-style terrain quad at z = 0 (test_terrain.hlsl,
 // 1x1 textures: base 0.4, detail 0.5, lightmap 0.8, fog of war 0.9, so ~161 everywhere). Then a unit-style triangle
@@ -4252,6 +4497,16 @@ int wmain(int argc, wchar_t** argv)
         ULONG d3dRefs = d3d->Release();
         DestroyWindow(wnd);
         printf("OK: shadow, final refs device %lu, d3d %lu\n", devRefs, d3dRefs);
+        return 0;
+    }
+    if (argc > 2 && wcscmp(argv[2], L"sea") == 0)
+    {
+        if (SeaScene(dev, 4) != 0)
+            return 1;
+        ULONG devRefs = dev->Release();
+        ULONG d3dRefs = d3d->Release();
+        DestroyWindow(wnd);
+        printf("OK: sea, final refs device %lu, d3d %lu\n", devRefs, d3dRefs);
         return 0;
     }
     if (argc > 2 && wcscmp(argv[2], L"reflect") == 0)

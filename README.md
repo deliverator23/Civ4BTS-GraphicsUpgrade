@@ -16,8 +16,8 @@ cast shadows. These apply only while that mod is running. See [For modders](#for
 |---|---|---|
 | **Water** | Flat, animated surface | Ripples that reflect the sky, show the sea floor through the waves, and sparkle in the sun |
 | **Coasts** | Flat water up to the shore | Sunlight shimmering on the shallow sea floor, and a sun glint that follows the sun |
-| **Ship reflections** | None | Ships mirrored in the water |
-| **Under the water** | Hulls show through the semi-transparent sea | They still show through, fading out with depth like real shallows |
+| **Ship reflections** | None | Ships and sea resources (whales, fish, clams...) mirrored in the water |
+| **Under the water** | Hulls show through the semi-transparent sea | They still show through, fading out with depth like real shallows, and so do sea resources' underwater parts |
 | **Unit, ship and tree shadows** | Round blobs under units; nothing for trees | Real shadows cast by the sun, weapons and rigging included |
 | **Hill and peak shadows** | None | Hills and peaks shade the ground behind them |
 | **Ground detail** | Painted on, lit the same whatever the light | Small bumps (sand ripples, cracks, stones) catch the sun and turn with it |
@@ -272,8 +272,11 @@ GraphicsUpgrade sits between the game and Direct3D 9. It changes how BtS's own s
 
 - **Water:** the ships are redrawn into a mirrored reflection. BtS's own water is then drawn with a new water shader,
   reverse engineered from Colonization's. Water on models, such as an oasis' pool, gets the same ripples, sky reflection
-  and sun glint drawn over it.
-- **Shadows:** units, ships, trees and buildings are redrawn from the sun's point of view into a shadow map. Hill
+  and sun glint drawn over it. BtS draws sea resources after the water, too late for its reflection and its view under
+  the surface: each is also kept and drawn into the next frame's, so there they run one frame (a sixtieth of a second)
+  late.
+- **Shadows:** units, ships, trees and buildings are redrawn from the sun's point of view into a shadow map, units and
+  ships only above the water line (the shadow map has no depth, so an underwater part would shade the surface). Hill
   shadows come from the terrain's own heights. The ground is then drawn with BtS's own shading plus both.
 - **Lighting:** BtS's light colours are swapped as each thing is drawn. The terrain's lighting is re-coloured to match,
   and re-lit as the sun moves.

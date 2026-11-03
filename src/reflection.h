@@ -28,8 +28,9 @@ public:
     // the first water draw and reads the water's height from it (WaterHeight).
     void BeforeDraw(const ShaderInfo* vs);
     // Called after a draw. If it was a unit/ship draw to the back buffer before the water, redraws it mirrored.
-    // Returns true if it did.
-    bool AfterDraw(const ShaderInfo* vs, bool fixedFunction, const std::function<void()>& redraw);
+    // Returns true if it did. clipAbove: only what's that far above the water (a model lying on it can't flicker in
+    // and out at the surface).
+    bool AfterDraw(const ShaderInfo* vs, bool fixedFunction, const std::function<void()>& redraw, float clipAbove = 0);
     // Debug overlay: the texture's colour and alpha side by side in the top-right corner. Call before Present.
     void DrawOverlay();
     // Saves the texture as a 32-bit BMP (BGRA, alpha kept). False if there's no texture yet.
@@ -40,6 +41,7 @@ public:
     // Device references held by our objects, so the device wrapper knows when only we keep the device alive.
     ULONG InternalRefs() const { return m_internalRefs; }
     float WaterHeight() const { return m_height; }
+    bool HeightFromWater() const { return m_loggedHeight; }  // read from a water draw, not the INI's start value
     IDirect3DTexture9* Texture() const { return m_tex; }
     // True when render target 0 is where the map is drawn (TargetIsMainView): the back buffer, or a screen-sized
     // texture; not e.g. the HUD unit portrait.
