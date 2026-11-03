@@ -20,7 +20,11 @@
 // (BtS's base texture: 4 tiles across, the engine's texture coordinates running to half a texel inside the square's
 // tile) read inside its tile at every mip (c23): the coordinates clamped a texel of the next coarser mip in from the
 // tile's edges, read with the unclamped coordinates' derivatives, so filtering never takes colour or alpha from the
-// neighbouring tile in the sheet (thin lines along square edges otherwise, where neighbouring tiles differ). And the
+// neighbouring tile in the sheet (thin lines along square edges otherwise, where neighbouring tiles differ). The tile
+// and the clamped position come from the coordinates at the centroid (the part of the pixel the triangle covers): with
+// multisampling, a pixel on a square's edge is shaded at its centre for each square's triangle, and the centre can lie
+// just outside a triangle, so its coordinates run on into the next tile in the sheet (a faint line of that tile's colour
+// and alpha along the square's edge). The derivatives still come from the centre's. And the
 // blend sheet's own normal map too (s8, a terrain's
 // <Path> with _normal before .dds; DetailNormals::ForBlend), read at the sheet's texture coordinates, so with the tile
 // and the turn the engine gave this square. The turn is in the coordinates, so which way the sheet's u and v run on the
@@ -60,19 +64,21 @@ sampler2D DetailNormals : register(s7);   // a normal map for the detail texture
 sampler2D BlendNormals : register(s8);    // the blend sheet's normal map (red along +u, green along -v)
 float4 f4BlendNormal : register(c22);     // x = strength, y = 1: the map is DXT5nm (x in alpha, y in green)
 float4 f4Sheet : register(c23);           // the blend sheet: xy = its size in texels; w = 1: read inside the tile
+float4 f4Debug : register(c24);           // [debug] TerrainDebug 4: w = 1, a flat colour (rgb) with the sheet's alpha
 
-// The sheet's texture coordinates kept inside this pixel's tile: one texel of the next coarser mip than the widest
+// The sheet's texture coordinates kept inside this pixel's tile (at: the coordinates at the centroid, inside the
+// triangle; uv: at the pixel's centre, for the derivatives): one texel of the next coarser mip than the widest
 // footprint reads in from its edges (that covers bilinear, trilinear and anisotropic filtering's reach). The
 // derivatives are per triangle, so they don't jump where squares (tiles) meet.
-float2 SheetCoords(float2 uv)
+float2 SheetCoords(float2 uv, float2 at)
 {
     float tilePx = max(f4Sheet.x * 0.25, 1);
     float2 tiles = float2(4, max(f4Sheet.y / tilePx, 1));
-    float2 t = floor(uv * tiles);
+    float2 t = floor(at * tiles);
     float2 px = uv * f4Sheet.xy;
     float lod = max(0, log2(max(length(ddx(px)), length(ddy(px)))));
     float inset = min(0.5, exp2(ceil(lod)) / tilePx);
-    return lerp(uv, (t + clamp(uv * tiles - t, inset, 1 - inset)) / tiles, f4Sheet.w);
+    return lerp(uv, (t + clamp(at * tiles - t, inset, 1 - inset)) / tiles, f4Sheet.w);
 }
 #endif
 
@@ -85,6 +91,9 @@ struct VSOut
     float2 detail : TEXCOORD3;
     float4 shadow : TEXCOORD4;
     float2 worldXY : TEXCOORD5;
+#ifdef BLENDNORMALS
+    float2 baseAt : TEXCOORD6;  // the base coordinates again, read at the centroid
+#endif
 };
 
 VSOut VSMain(float3 pos : POSITION, float2 uv0 : TEXCOORD0, float2 uv1 : TEXCOORD1)
@@ -97,16 +106,23 @@ VSOut VSMain(float3 pos : POSITION, float2 uv0 : TEXCOORD0, float2 uv1 : TEXCOOR
     o.lightmap = mul(world, mtxLightmap);
     o.detail = uv1 * fDetailTexScaling;
     o.base = uv0;
+#ifdef BLENDNORMALS
+    o.baseAt = uv0;
+#endif
     o.shadow = mul(world, mtxShadow);
     o.worldXY = world.xy;
     return o;
 }
 
 float4 PSMain(float2 base : TEXCOORD0, float2 fow : TEXCOORD1, float2 lightmap : TEXCOORD2, float2 detail : TEXCOORD3,
-              float4 shadow : TEXCOORD4, float2 worldXY : TEXCOORD5) : COLOR
+              float4 shadow : TEXCOORD4, float2 worldXY : TEXCOORD5
+#ifdef BLENDNORMALS
+              , float2 baseAt : TEXCOORD6_centroid
+#endif
+              ) : COLOR
 {
 #ifdef BLENDNORMALS
-    float2 sheetUV = SheetCoords(base);
+    float2 sheetUV = SheetCoords(base, baseAt);
     float4 b = tex2Dgrad(TerrainBase, sheetUV, ddx(base), ddy(base));
 #else
     float4 b = tex2D(TerrainBase, base);
@@ -150,5 +166,9 @@ float4 PSMain(float2 base : TEXCOORD0, float2 fow : TEXCOORD1, float2 lightmap :
     // Objects' shadows and hills' shadows: the darker of the two (no double darkening where they overlap).
     float objects = lerp(1, tex2Dproj(ShadowMap, shadow).r, f4Shadow.z);
     float hills = 1 - f4Shadow.x * f4NormalMap.w * tex2D(HillShadows, worldXY * f4HillGrid.x + f4HillGrid.yz).a;
+#ifdef BLENDNORMALS
+    if (f4Debug.w > 0)
+        return float4(f4Debug.rgb, b.a);
+#endif
     return float4(lit * min(objects, hills), b.a);
 }

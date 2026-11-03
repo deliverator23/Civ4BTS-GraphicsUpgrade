@@ -35,6 +35,12 @@ struct Config
     std::wstring games = L"bts";  // game ids the effects run in ("bts", "col", exe name without .exe, or "*")
     bool dumpShaders = false;   // debug: save every shader the game creates
     bool tracesEnabled = false; // debug: frame traces (hotkey, trigger file, AutoFrame)
+    // Debug, [debug] TerrainDebug: BtS's terrain layers drawn opaque (1), as a flat colour each (2), or as a flat colour
+    // each with its blend sheet's alpha as BtS reads it (3) or as our terrain shader does (4: BlendTileClamp). With 2-4
+    // nothing else in the 3D scene is drawn and the frame is cleared to magenta, so a gap between squares shows
+    // magenta. TerrainDebugKey (with KeyModifiers) steps through them.
+    int terrainDebug = 0;
+    UINT terrainDebugKey = '0';
     int terrainVertsPerPlot = 17;  // debug, experimental: patch BtS's terrain code for this many samples (terrain_patch.h)
     // [terrain tiles], experimental (terrain_sets.h): TilePicker=1 hooks the heightmap tile picks; TileGroups splits
     // each tile list into that many groups, a square using its corner terrains' group. TileGroupN (1..8) lists the

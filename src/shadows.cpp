@@ -907,7 +907,7 @@ HRESULT Shadows::DrawShadowed(IDirect3DVertexShader9* vs, IDirect3DPixelShader9*
     IDirect3DVertexShader9* oldVs = nullptr;
     IDirect3DPixelShader9* oldPs = nullptr;
     IDirect3DBaseTexture9* oldTex = nullptr;
-    float oldVsc[16], oldPsc[4], oldLight[32], oldHillGrid[4], oldDetail[8], oldSheet[8];
+    float oldVsc[16], oldPsc[4], oldLight[32], oldHillGrid[4], oldDetail[8], oldSheet[12];
     IDirect3DBaseTexture9* oldSheetMap = nullptr;
     DWORD oldSamp8[9];
     IDirect3DBaseTexture9 *oldNormals = nullptr, *oldHills = nullptr, *oldDetailMap = nullptr;
@@ -967,9 +967,9 @@ HRESULT Shadows::DrawShadowed(IDirect3DVertexShader9* vs, IDirect3DPixelShader9*
         if (m_sheetPass)
         {
             // The blend sheet's normal map (s8; none: strength 0), filtered and addressed like the sheet (s0); its
-            // strength (c22); the sheet's size and the clamp (c23).
+            // strength (c22); the sheet's size and the clamp (c23); TerrainDebug 4's flat colour (c24).
             m_dev->GetTexture(8, &oldSheetMap);
-            m_dev->GetPixelShaderConstantF(22, oldSheet, 2);
+            m_dev->GetPixelShaderConstantF(22, oldSheet, 3);
             for (int k = 0; k < 9; ++k)
             {
                 DWORD v = 0;
@@ -979,9 +979,10 @@ HRESULT Shadows::DrawShadowed(IDirect3DVertexShader9* vs, IDirect3DPixelShader9*
             }
             m_dev->SetSamplerState(8, D3DSAMP_SRGBTEXTURE, FALSE);
             m_dev->SetTexture(8, m_sheetNormals);
-            const float sheet[8] = {m_sheetNormals ? g_config.blendNormalStrength : 0.0f, m_sheetNm ? 1.0f : 0.0f, 0, 0,
-                                    m_sheet[0], m_sheet[1], m_sheet[2], m_sheet[3]};
-            m_dev->SetPixelShaderConstantF(22, sheet, 2);
+            const float sheet[12] = {m_sheetNormals ? g_config.blendNormalStrength : 0.0f, m_sheetNm ? 1.0f : 0.0f, 0, 0,
+                                     m_sheet[0], m_sheet[1], m_sheet[2], m_sheet[3],
+                                     debugFlat[0], debugFlat[1], debugFlat[2], debugFlat[3]};
+            m_dev->SetPixelShaderConstantF(22, sheet, 3);
         }
     }
     else
@@ -1023,7 +1024,7 @@ HRESULT Shadows::DrawShadowed(IDirect3DVertexShader9* vs, IDirect3DPixelShader9*
         if (m_sheetPass)
         {
             m_dev->SetTexture(8, oldSheetMap);
-            m_dev->SetPixelShaderConstantF(22, oldSheet, 2);
+            m_dev->SetPixelShaderConstantF(22, oldSheet, 3);
             for (int k = 0; k < 9; ++k)
                 m_dev->SetSamplerState(8, kDetailSamplerStates[k], oldSamp8[k]);
             if (oldSheetMap)

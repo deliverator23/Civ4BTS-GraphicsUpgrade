@@ -89,6 +89,9 @@ ProxyDevice::ProxyDevice(IDirect3DDevice9* real, ProxyD3D9* parent)
     m_hideModels = !hidden.empty();
     if (m_hideModels)
         m_hiddenModels.Load(hidden, "[terrain tiles] PlotStamps<n>HideModels");
+    m_terrainDebug = g_config.terrainDebug;
+    if (m_terrainDebug)
+        Log::Write("terrain debug %d from start ([debug] TerrainDebug)", m_terrainDebug);
     if (!m_effects)
         Log::Write("effects off in this game (game id %s not in Games=%ls); passing everything through",
                    Log::GameId().c_str(), g_config.games.c_str());
@@ -222,6 +225,17 @@ HRESULT ProxyDevice::Present(CONST RECT* pSourceRect, CONST RECT* pDestRect, HWN
         m_trace.Event("{\"ev\":\"refraction_saved\",\"file\":\"refraction.bmp\"}");
     if (m_trace.Active() && m_shadows.SaveBmps(m_trace.Dir()))
         m_trace.Event("{\"ev\":\"shadows_saved\"}");
+    // A trace's first frame as it was drawn (before the debug overlays), to tie what's on the screen to its draws.
+    if (m_trace.Active() && m_frameSavedFor != m_trace.Dir())
+    {
+        m_frameSavedFor = m_trace.Dir();
+        IDirect3DSurface9* shot = CopyBackBuffer(m_real);
+        if (shot && SavePng(shot, m_trace.Dir() + L"\\frame.png"))
+            m_trace.Event("{\"ev\":\"frame_saved\",\"file\":\"frame.png\",\"terrain_debug\":" +
+                          std::to_string(m_terrainDebug) + "}");
+        if (shot)
+            shot->Release();
+    }
     if (m_compareStep)
     {
         m_compareShots[m_compareStep - 1] = CopyBackBuffer(m_real);
@@ -380,6 +394,15 @@ HRESULT ProxyDevice::Present(CONST RECT* pSourceRect, CONST RECT* pDestRect, HWN
         EnsureDir(Log::GameDir() + L"\\screenshots");
         m_comparePath = Log::GameDir() + L"\\screenshots\\GraphicsUpgrade_" + name;
         m_compareStep = 1;
+    }
+    if (combo(g_config.terrainDebugKey, m_terrainDebugKeyWasDown))
+    {
+        static const char* const kModes[5] = {"off", "1 (layers opaque)", "2 (a flat colour a layer, on magenta)",
+                                              "3 (a flat colour a layer with its alpha as BtS reads it, on magenta)",
+                                              "4 (a flat colour a layer with its alpha as our shader reads it, on magenta)"};
+        m_terrainDebug = (m_terrainDebug + 1) % 5;
+        m_shadows.debugFlat[3] = 0;
+        Log::Write("terrain debug %s at frame %u", kModes[m_terrainDebug], m_frame);
     }
     if (m_effects && combo(g_config.shadowOverlayKey, m_shadowOverlayKeyWasDown))
     {
@@ -610,7 +633,23 @@ HRESULT ProxyDevice::Clear(DWORD Count, CONST D3DRECT* pRects, DWORD Flags, D3DC
                  Count, Flags, Color, Z, Stencil);
         m_trace.Event(buf);
     }
+    // [debug] TerrainDebug 2, 3: the frame cleared to magenta, so a gap in the terrain shows.
+    if (m_terrainDebug >= 2 && (Flags & D3DCLEAR_TARGET) && DrawingToBackBuffer())
+        Color = 0xFFFF00FF;
     return m_real->Clear(Count, pRects, Flags, Color, Z, Stencil);
+}
+
+bool ProxyDevice::DrawingToBackBuffer()
+{
+    IDirect3DSurface9 *rt = nullptr, *bb = nullptr;
+    m_real->GetRenderTarget(0, &rt);
+    m_real->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &bb);
+    const bool same = rt && rt == bb;
+    if (rt)
+        rt->Release();
+    if (bb)
+        bb->Release();
+    return same;
 }
 
 HRESULT ProxyDevice::StretchRect(IDirect3DSurface9* pSourceSurface, CONST RECT* pSourceRect,
@@ -772,6 +811,138 @@ void ProxyDevice::Ghost(Redraw redraw)
     ++m_frameGhosts;
 }
 
+// [debug] TerrainDebug, for finding what draws a mark on the terrain: 1, BtS's terrain layers drawn as BtS draws them
+// but opaque (no blending, no alpha test), so a lower layer can't show through; 2, each layer a flat colour of its own
+// (by its blend sheet), opaque, through the fixed-function pipeline with the draw's own mtxWorldViewProj; 3, the same
+// colours with each sheet's alpha, blended as BtS blends them. With 2 and 3 the rest of the 3D scene isn't drawn (the
+// interface's pre-transformed draws are) and the frame is cleared to magenta (Clear), so a gap shows magenta. 4, the
+// colours of 2 and 3 with each sheet's alpha as GraphicsUpgrade's own terrain shader reads it (inside the square's
+// tile, BlendTileClamp; needs that shader: the lighting or the shadows on), on magenta as 2 and 3.
+template <class Draw>
+bool ProxyDevice::TerrainDebug(Draw& draw, HRESULT& hr)
+{
+    IDirect3DVertexShader9* shader = nullptr;
+    m_real->GetVertexShader(&shader);
+    const ShaderInfo* vs = nullptr;
+    if (shader)
+    {
+        auto it = m_registry.shaders.find(shader);
+        if (it != m_registry.shaders.end())
+            vs = &it->second;
+        shader->Release();
+    }
+    hr = D3D_OK;
+    m_shadows.debugFlat[3] = 0;
+    if (!vs || !vs->btsTerrain)
+    {
+        DWORD fvf = 0;
+        m_real->GetFVF(&fvf);
+        return m_terrainDebug >= 2 && (shader || (fvf & D3DFVF_POSITION_MASK) != D3DFVF_XYZRHW);
+    }
+    DWORD blend = FALSE, alphaTest = FALSE;
+    m_real->GetRenderState(D3DRS_ALPHABLENDENABLE, &blend);
+    m_real->GetRenderState(D3DRS_ALPHATESTENABLE, &alphaTest);
+    if (m_terrainDebug == 1)
+    {
+        m_real->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE);
+        m_real->SetRenderState(D3DRS_ALPHATESTENABLE, FALSE);
+        hr = draw();
+        m_real->SetRenderState(D3DRS_ALPHABLENDENABLE, blend);
+        m_real->SetRenderState(D3DRS_ALPHATESTENABLE, alphaTest);
+        return true;
+    }
+    // The layer's colour, by its blend sheet (s0), in the order the sheets are first seen; logged once each.
+    IDirect3DBaseTexture9* sheet = nullptr;
+    m_real->GetTexture(0, &sheet);
+    static const D3DCOLOR kColours[12] = {0xFF2060E0, 0xFF20C040, 0xFFE0C020, 0xFF00C0C0, 0xFFE06020, 0xFF8040E0,
+                                          0xFF808080, 0xFFE02060, 0xFF60E0A0, 0xFF206020, 0xFFA0A0FF, 0xFF603010};
+    auto found = m_debugSheets.find(sheet);
+    if (found == m_debugSheets.end())
+    {
+        found = m_debugSheets.emplace(sheet, static_cast<int>(m_debugSheets.size())).first;
+        D3DSURFACE_DESC d = {};
+        if (sheet && sheet->GetType() == D3DRTYPE_TEXTURE)
+            static_cast<IDirect3DTexture9*>(sheet)->GetLevelDesc(0, &d);
+        Log::Write("terrain debug: blend sheet %s (%ux%u) drawn as colour %d (%06x)", Ptr(sheet).c_str(), d.Width,
+                   d.Height, found->second, static_cast<unsigned>(kColours[found->second % 12] & 0xFFFFFF));
+    }
+    if (sheet)
+        sheet->Release();
+    const D3DCOLOR colour = kColours[found->second % 12];
+    if (m_terrainDebug == 4)
+    {
+        m_shadows.debugFlat[0] = ((colour >> 16) & 255) / 255.0f;
+        m_shadows.debugFlat[1] = ((colour >> 8) & 255) / 255.0f;
+        m_shadows.debugFlat[2] = (colour & 255) / 255.0f;
+        m_shadows.debugFlat[3] = 1;
+        return false;  // drawn by our terrain shader (Shadows::DrawReceiver), which sets c24
+    }
+    // mtxWorldViewProj (c0-c3, a column each) as the fixed-function projection, world and view the identity.
+    float c[16];
+    m_real->GetVertexShaderConstantF(0, c, 4);
+    D3DMATRIX proj, identity = {}, oldWorld, oldView, oldProj;
+    for (int i = 0; i < 4; ++i)
+        for (int j = 0; j < 4; ++j)
+            proj.m[i][j] = c[j * 4 + i];
+    identity._11 = identity._22 = identity._33 = identity._44 = 1;
+    m_real->GetTransform(D3DTS_WORLD, &oldWorld);
+    m_real->GetTransform(D3DTS_VIEW, &oldView);
+    m_real->GetTransform(D3DTS_PROJECTION, &oldProj);
+    IDirect3DPixelShader9* ps = nullptr;
+    m_real->GetPixelShader(&ps);
+    const D3DRENDERSTATETYPE states[4] = {D3DRS_LIGHTING, D3DRS_FOGENABLE, D3DRS_TEXTUREFACTOR, D3DRS_SPECULARENABLE};
+    DWORD oldStates[4];
+    for (int i = 0; i < 4; ++i)
+        m_real->GetRenderState(states[i], &oldStates[i]);
+    const D3DTEXTURESTAGESTATETYPE stage0[6] = {D3DTSS_COLOROP, D3DTSS_COLORARG1, D3DTSS_ALPHAOP, D3DTSS_ALPHAARG1,
+                                                D3DTSS_TEXCOORDINDEX, D3DTSS_TEXTURETRANSFORMFLAGS};
+    DWORD old0[6], old1[2];
+    for (int i = 0; i < 6; ++i)
+        m_real->GetTextureStageState(0, stage0[i], &old0[i]);
+    m_real->GetTextureStageState(1, D3DTSS_COLOROP, &old1[0]);
+    m_real->GetTextureStageState(1, D3DTSS_ALPHAOP, &old1[1]);
+
+    m_real->SetVertexShader(nullptr);
+    m_real->SetPixelShader(nullptr);
+    m_real->SetTransform(D3DTS_WORLD, &identity);
+    m_real->SetTransform(D3DTS_VIEW, &identity);
+    m_real->SetTransform(D3DTS_PROJECTION, &proj);
+    m_real->SetRenderState(D3DRS_LIGHTING, FALSE);
+    m_real->SetRenderState(D3DRS_FOGENABLE, FALSE);
+    m_real->SetRenderState(D3DRS_SPECULARENABLE, FALSE);
+    m_real->SetRenderState(D3DRS_TEXTUREFACTOR, colour);
+    m_real->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+    m_real->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_TFACTOR);
+    m_real->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG1);
+    m_real->SetTextureStageState(0, D3DTSS_ALPHAARG1, m_terrainDebug == 3 ? D3DTA_TEXTURE : D3DTA_TFACTOR);
+    m_real->SetTextureStageState(0, D3DTSS_TEXCOORDINDEX, 0);
+    m_real->SetTextureStageState(0, D3DTSS_TEXTURETRANSFORMFLAGS, D3DTTFF_DISABLE);
+    m_real->SetTextureStageState(1, D3DTSS_COLOROP, D3DTOP_DISABLE);
+    m_real->SetTextureStageState(1, D3DTSS_ALPHAOP, D3DTOP_DISABLE);
+    if (m_terrainDebug == 2)
+    {
+        m_real->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE);
+        m_real->SetRenderState(D3DRS_ALPHATESTENABLE, FALSE);
+    }
+    hr = draw();
+    m_real->SetRenderState(D3DRS_ALPHABLENDENABLE, blend);
+    m_real->SetRenderState(D3DRS_ALPHATESTENABLE, alphaTest);
+    m_real->SetTextureStageState(1, D3DTSS_COLOROP, old1[0]);
+    m_real->SetTextureStageState(1, D3DTSS_ALPHAOP, old1[1]);
+    for (int i = 0; i < 6; ++i)
+        m_real->SetTextureStageState(0, stage0[i], old0[i]);
+    for (int i = 0; i < 4; ++i)
+        m_real->SetRenderState(states[i], oldStates[i]);
+    m_real->SetTransform(D3DTS_WORLD, &oldWorld);
+    m_real->SetTransform(D3DTS_VIEW, &oldView);
+    m_real->SetTransform(D3DTS_PROJECTION, &oldProj);
+    m_real->SetPixelShader(ps);
+    if (ps)
+        ps->Release();
+    m_real->SetVertexShader(shader);  // the game's (it holds its own reference)
+    return true;
+}
+
 bool ProxyDevice::HiddenModel()
 {
     IDirect3DBaseTexture9* base = nullptr;
@@ -793,6 +964,12 @@ HRESULT ProxyDevice::Dispatch(Draw draw)
     // [terrain tiles] PlotStamps<n>HideModels: not drawn at all (nor their shadows) while the stamps stand in for them.
     if (m_hideModels && PlotStampsOn() && HiddenModel())
         return D3D_OK;
+    if (m_terrainDebug)
+    {
+        HRESULT hr = D3D_OK;
+        if (TerrainDebug(draw, hr))
+            return hr;
+    }
     // Timing: all of this draw's handling (the game's own plain draw is taken off below).
     struct DrawTimer
     {

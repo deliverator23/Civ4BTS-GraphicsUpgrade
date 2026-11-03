@@ -484,6 +484,9 @@ def main():
     rtraces = os.path.join(rout_dir, 'test_proxy', 'traces')
     bmp_path = os.path.join(rtraces, os.listdir(rtraces)[0], 'reflection.bmp')
     check(os.path.exists(bmp_path), 'reflection.bmp saved with the trace')
+    frame_png = os.path.join(rtraces, os.listdir(rtraces)[0], 'frame.png')
+    check(os.path.exists(frame_png) and open(frame_png, 'rb').read(8) == b'\x89PNG\r\n\x1a\n',
+          "frame.png saved with the trace (the trace's first frame as drawn)")
     if os.path.exists(bmp_path):
         bmp = open(bmp_path, 'rb').read()
         size = struct.unpack_from('<i', bmp, 18)[0]
@@ -1295,6 +1298,24 @@ def main():
           c_on.get('restored') == 1 and c_on['released'],
           f"blend sheets read inside the square's tile: blue {on} at a boundary between tiles ({off} read as BtS does, "
           f"mixing them; one tile alone {lo} or {hi})")
+
+    # [debug] TerrainDebug: 2, each terrain layer a flat colour (the first sheet seen 0x2060E0: blue 224), the rest of the
+    # scene left out (no caster, so no shadow); 1, the layers opaque, drawn as they are; 3, the flat colours with the
+    # sheet's alpha (the harness's opaque: the same 224).
+    d1, _ = shadow_run('terrain_debug1', 1, extra='[debug]\nTerrainDebug=1\n')
+    d2, dlog = shadow_run('terrain_debug2', 1, extra='[debug]\nTerrainDebug=2\n')
+    d3, _ = shadow_run('terrain_debug3', 1, extra='[debug]\nTerrainDebug=3\n')
+    check('terrain debug 2 from start' in dlog and 'drawn as colour 0 (2060e0)' in dlog and d2.get('lit') == 224 and
+          d2.get('shadowed') == 224 and d3.get('lit') == 224 and d2['released'] and d3['released'],
+          f"[debug] TerrainDebug 2 and 3: each terrain layer a flat colour, nothing else drawn (blue {d2.get('lit')} lit, "
+          f"{d2.get('shadowed')} where the shadow was; 3: {d3.get('lit')})")
+    d4, d4log = shadow_run('terrain_debug4', 1, extra='[debug]\nTerrainDebug=4\n', sheet='1')
+    check('terrain: blend sheets read inside each square' in d4log and d4.get('lit') == 224 and d4['released'],
+          f"[debug] TerrainDebug 4: the flat colours through our terrain shader, the sheet read inside its tile (blue "
+          f"{d4.get('lit')})")
+    check(d1.get('lit') == shadow['on'].get('lit') and d1['released'],
+          f"[debug] TerrainDebug 1: the layers drawn opaque, otherwise as they are (blue {d1.get('lit')}, "
+          f"{shadow['on'].get('lit')} without)")
 
     # A terrain blend sheet's own normal map (<Path> with _normal before .dds; Shader Model 3): the harness's base
     # texture (1x1 grey 0x66) is recognised as the mod's blend sheet; the map's texel (64,128,255) tilts the normal 0.5

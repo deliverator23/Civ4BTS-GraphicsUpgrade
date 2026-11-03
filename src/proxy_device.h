@@ -14,6 +14,7 @@
 #include "terrain_normals.h"
 #include "trace.h"
 
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -95,6 +96,9 @@ private:
     // Every draw goes through here: water detection, the game's draw, then the ghost and reflection redraws.
     template <class Draw> HRESULT Dispatch(Draw draw);
     bool HiddenModel();  // the draw's texture is one of PlotStamps<n>HideModels (Dispatch skips it while stamps are on)
+    // [debug] TerrainDebug: true if it took the draw (drew it its own way, or left it out), with the result in hr.
+    template <class Draw> bool TerrainDebug(Draw& draw, HRESULT& hr);
+    bool DrawingToBackBuffer();
     const ShaderInfo* CurrentPixelShader();
     // Selection circles under ships: BtS draws them at water level before the water, so the reflective, dynamic water
     // would show them refracted beneath its surface. Such draws are held back and replayed straight after the water.
@@ -117,6 +121,10 @@ private:
     DetailNormals m_detail;    // the terrain detail textures' normal maps ([textures] DetailNormals)
     TextureList m_hiddenModels;  // [terrain tiles] PlotStamps<n>HideModels
     bool m_hideModels = false, m_hiddenLogged = false;
+    int m_terrainDebug = 0;  // [debug] TerrainDebug, stepped by TerrainDebugKey
+    bool m_terrainDebugKeyWasDown = false;
+    std::unordered_map<const void*, int> m_debugSheets;  // TerrainDebug 2, 3: each blend sheet's colour, in order seen
+    std::wstring m_frameSavedFor;                        // the trace folder the frame image was last saved into
     Perf m_perf;               // timing for the log
     float m_terrainLight[32] = {};  // Lighting::TerrainConstants for the shadows' terrain draws
     bool m_lightKeyWasDown = false;

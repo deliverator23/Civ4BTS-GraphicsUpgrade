@@ -495,6 +495,8 @@ void LoadConfig()
     g_config.games = IniString(ini, L"general", L"Games", L"bts");
     g_config.dumpShaders = IniInt(ini, L"debug", L"DumpShaders", 0) != 0;
     g_config.tracesEnabled = IniInt(ini, L"debug", L"Traces", 0) != 0;
+    g_config.terrainDebug = (std::max)(0, (std::min)(4, IniInt(ini, L"debug", L"TerrainDebug", 0)));
+    g_config.terrainDebugKey = IniKey(ini, L"debug", L"TerrainDebugKey", '0');
     g_config.waterTime = static_cast<float>(_wtof(IniString(ini, L"debug", L"WaterTime", L"-1").c_str()));
     g_config.terrainVertsPerPlot = IniInt(ini, L"debug", L"TerrainVertsPerPlot", 17);
     g_config.tileSetsPatch = IniInt(ini, L"terrain tiles", L"TilePicker", 0) != 0;

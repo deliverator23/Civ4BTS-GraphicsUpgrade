@@ -34,6 +34,9 @@ public:
     // Terrain re-light constants (Lighting::TerrainConstants), or null when GraphicsUpgrade's lighting is off. With these
     // the terrain goes through our shader even when the shadows are off.
     const float* terrainLight = nullptr;  // 8 registers (c11-c18)
+    // [debug] TerrainDebug 4: the terrain drawn as this flat colour (rgb, 0-1) with its blend sheet's alpha as our
+    // shader reads it (inside the tile: BlendTileClamp); w = 1: on (PS c24 of the Shader Model 3 terrain shader).
+    float debugFlat[4] = {};
     // Set each frame from the lighting: the sun's travel direction now, and how dark shadows are now as a fraction
     // of their settings (the light cycle).
     const float* sunDirection = g_config.sunDirection;
