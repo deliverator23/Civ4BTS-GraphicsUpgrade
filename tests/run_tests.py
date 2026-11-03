@@ -2020,6 +2020,11 @@ def main():
     check(t1.get('surf0') == d0['rt'][0], 'draw 1 samples the texture whose surface draw 0 rendered to')
     check(texs.get(d1['tex']['1']['t'], {}).get('type') == 'cube', 'cube texture on stage 1')
     check(d2['vs'] is None and d2['call'] == 'DPUP' and d2['view'][14] == 2.0, 'fixed-function draw with transforms')
+    verts = [e for e in events if e['ev'] == 'verts']
+    check(d1['call'] == 'DIP' and len(verts) == 1 and verts[0]['i'] == d1['i'] and verts[0].get('idx') == [0, 1, 2] and
+          [round(v, 3) for v in verts[0]['pos']] == [-0.8, -0.8, 0.5, 0, 0.8, 0.5, 0.8, -0.8, 0.5] and
+          'stages' not in verts[0],
+          'small indexed draw: its vertex positions and indices recorded (shader draw: no texture stages)')
     vsc = open(os.path.join(tdir, 'consts_vs.bin'), 'rb').read()
     psc = open(os.path.join(tdir, 'consts_ps.bin'), 'rb').read()
     vs_block = meta['vs_registers'] * 16

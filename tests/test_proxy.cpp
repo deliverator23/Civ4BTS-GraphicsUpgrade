@@ -4542,6 +4542,12 @@ int wmain(int argc, wchar_t** argv)
     CHECK(vb->Lock(0, 0, &p, 0));
     memcpy(p, tri, sizeof(tri));
     vb->Unlock();
+    IDirect3DIndexBuffer9* ib = nullptr;  // for the indexed draw, whose vertices and indices the trace records
+    CHECK(dev->CreateIndexBuffer(3 * sizeof(WORD), D3DUSAGE_WRITEONLY, D3DFMT_INDEX16, D3DPOOL_MANAGED, &ib, nullptr));
+    CHECK(ib->Lock(0, 0, &p, 0));
+    const WORD triIndices[3] = {0, 1, 2};
+    memcpy(p, triIndices, sizeof(triIndices));
+    ib->Unlock();
 
     // Managed texture with a known pattern, so its content hash is reproducible.
     IDirect3DTexture9* tex = nullptr;
@@ -4589,7 +4595,8 @@ int wmain(int argc, wchar_t** argv)
         CHECK(dev->StretchRect(rtSurf, nullptr, backbuffer, &dst, D3DTEXF_LINEAR));
         CHECK(dev->SetTexture(0, rtTex));
         CHECK(dev->SetTexture(1, cube));
-        CHECK(dev->DrawPrimitive(D3DPT_TRIANGLELIST, 0, 1));
+        CHECK(dev->SetIndices(ib));
+        CHECK(dev->DrawIndexedPrimitive(D3DPT_TRIANGLELIST, 0, 0, 3, 0, 1));
         CHECK(dev->SetTexture(1, nullptr));
         CHECK(dev->SetVertexShader(nullptr));
         CHECK(dev->SetPixelShader(nullptr));
@@ -4612,6 +4619,8 @@ int wmain(int argc, wchar_t** argv)
     rtTex->Release();
     cube->Release();
     tex->Release();
+    CHECK(dev->SetIndices(nullptr));
+    ib->Release();
     vb->Release();
     decl->Release();
     ps->Release();

@@ -1655,6 +1655,7 @@ HRESULT ProxyDevice::DrawIndexedPrimitive(D3DPRIMITIVETYPE PrimitiveType, INT Ba
                  "\"prim\":\"%s\",\"base\":%d,\"minv\":%u,\"numv\":%u,\"start\":%u,\"count\":%u",
                  PrimName(PrimitiveType), BaseVertexIndex, MinVertexIndex, NumVertices, startIndex, primCount);
         m_trace.Draw(m_real, "DIP", buf);
+        m_trace.Vertices(m_real, PrimitiveType, BaseVertexIndex, MinVertexIndex, NumVertices, startIndex, primCount);
     }
     if (m_effects &&
         DeferUntilAfterWater(true, PrimitiveType, BaseVertexIndex, MinVertexIndex, NumVertices, startIndex, primCount))

@@ -79,6 +79,12 @@ public:
 
     void Event(const std::string& json);  // one JSON object without the trailing newline
     void Draw(IDirect3DDevice9* dev, const char* call, const std::string& args);
+    // After Draw, for an indexed draw of at most kMaxVerts vertices from a readable (not D3DPOOL_DEFAULT) vertex
+    // buffer: a "verts" event with stream 0's positions (and the first texture coordinates, by the FVF), the indices,
+    // and for fixed-function draws each enabled texture stage's set-up and texture matrix.
+    static const UINT kMaxVerts = 512;
+    void Vertices(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, INT base, UINT minVertex, UINT numVertices, UINT start,
+                  UINT count);
 
     std::string SurfaceRef(IDirect3DSurface9* surface);
     std::string TextureRef(IDirect3DBaseTexture9* texture);

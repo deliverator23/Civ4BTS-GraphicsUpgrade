@@ -338,6 +338,103 @@ int Trace::ConstantBlock(std::vector<uint8_t>& store, std::unordered_map<uint64_
     return id;
 }
 
+void Trace::Vertices(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, INT base, UINT minVertex, UINT numVertices,
+                     UINT start, UINT count)
+{
+    if (!m_active || numVertices == 0 || numVertices > kMaxVerts)
+        return;
+    IDirect3DVertexBuffer9* vb = nullptr;
+    UINT offset = 0, stride = 0;
+    if (FAILED(dev->GetStreamSource(0, &vb, &offset, &stride)) || !vb)
+        return;
+    D3DVERTEXBUFFER_DESC vd = {};
+    vb->GetDesc(&vd);
+    const UINT first = offset + (base + minVertex) * stride, bytes = numVertices * stride;
+    void* data = nullptr;
+    if (vd.Pool == D3DPOOL_DEFAULT || stride < 12 || first + bytes > vd.Size ||
+        FAILED(vb->Lock(first, bytes, &data, D3DLOCK_READONLY)))
+    {
+        vb->Release();
+        return;
+    }
+    // Positions, and the first texture coordinates where the FVF says where they are (after position, normal,
+    // point size, diffuse and specular).
+    DWORD fvf = 0;
+    dev->GetFVF(&fvf);
+    UINT uvAt = 0;
+    if ((fvf & D3DFVF_POSITION_MASK) == D3DFVF_XYZ && (fvf & D3DFVF_TEXCOUNT_MASK))
+        uvAt = 12 + ((fvf & D3DFVF_NORMAL) ? 12 : 0) + ((fvf & D3DFVF_PSIZE) ? 4 : 0) + ((fvf & D3DFVF_DIFFUSE) ? 4 : 0) +
+               ((fvf & D3DFVF_SPECULAR) ? 4 : 0);
+    std::string j = "{\"ev\":\"verts\",\"i\":" + std::to_string(m_draws - 1) + ",\"first\":" +
+                    std::to_string(minVertex) + ",\"pos\":[";
+    std::string uv = "[";
+    for (UINT v = 0; v < numVertices; ++v)
+    {
+        const float* p = reinterpret_cast<const float*>(static_cast<const uint8_t*>(data) + v * stride);
+        j += (v ? "," : "") + Num(p[0]) + "," + Num(p[1]) + "," + Num(p[2]);
+        if (uvAt && uvAt + 8 <= stride)
+        {
+            const float* t = reinterpret_cast<const float*>(static_cast<const uint8_t*>(data) + v * stride + uvAt);
+            uv += (v ? "," : "") + Num(t[0]) + "," + Num(t[1]);
+        }
+    }
+    vb->Unlock();
+    vb->Release();
+    j += "]";
+    if (uvAt)
+        j += ",\"uv\":" + uv + "]";
+    // Indices (as stored: add base for the vertex buffer's own numbering).
+    const UINT indices = type == D3DPT_TRIANGLELIST ? count * 3 : type == D3DPT_TRIANGLESTRIP ? count + 2 : 0;
+    IDirect3DIndexBuffer9* ib = nullptr;
+    if (indices && indices <= 4 * kMaxVerts && SUCCEEDED(dev->GetIndices(&ib)) && ib)
+    {
+        D3DINDEXBUFFER_DESC id = {};
+        ib->GetDesc(&id);
+        const UINT size = id.Format == D3DFMT_INDEX32 ? 4 : 2;
+        void* idx = nullptr;
+        if (id.Pool != D3DPOOL_DEFAULT && (start + indices) * size <= id.Size &&
+            SUCCEEDED(ib->Lock(start * size, indices * size, &idx, D3DLOCK_READONLY)))
+        {
+            j += ",\"idx\":[";
+            for (UINT k = 0; k < indices; ++k)
+                j += (k ? "," : "") + std::to_string(size == 4 ? static_cast<const uint32_t*>(idx)[k]
+                                                               : static_cast<const uint16_t*>(idx)[k]);
+            j += "]";
+            ib->Unlock();
+        }
+        ib->Release();
+    }
+    // Fixed function: each enabled stage's ops, arguments, coordinate source and texture matrix.
+    IDirect3DVertexShader9* vs = nullptr;
+    dev->GetVertexShader(&vs);
+    if (vs)
+        vs->Release();
+    else
+    {
+        j += ",\"stages\":[";
+        for (DWORD s = 0; s < 8; ++s)
+        {
+            DWORD v[9] = {};
+            const D3DTEXTURESTAGESTATETYPE types[9] = {D3DTSS_COLOROP,   D3DTSS_COLORARG1,     D3DTSS_COLORARG2,
+                                                       D3DTSS_ALPHAOP,   D3DTSS_ALPHAARG1,     D3DTSS_ALPHAARG2,
+                                                       D3DTSS_TEXCOORDINDEX, D3DTSS_TEXTURETRANSFORMFLAGS,
+                                                       D3DTSS_RESULTARG};
+            for (int k = 0; k < 9; ++k)
+                dev->GetTextureStageState(s, types[k], &v[k]);
+            if (v[0] == D3DTOP_DISABLE)
+                break;
+            D3DMATRIX m = {};
+            dev->GetTransform(static_cast<D3DTRANSFORMSTATETYPE>(D3DTS_TEXTURE0 + s), &m);
+            char buf[160];
+            snprintf(buf, sizeof(buf), "%s{\"cop\":%lu,\"c1\":%lu,\"c2\":%lu,\"aop\":%lu,\"a1\":%lu,\"a2\":%lu,\"tci\":%lu,"
+                     "\"ttff\":%lu,\"res\":%lu,\"mat\":", s ? "," : "", v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8]);
+            j += buf + Floats(&m._11, 16) + "}";
+        }
+        j += "]";
+    }
+    Event(j + "}");
+}
+
 void Trace::Draw(IDirect3DDevice9* dev, const char* call, const std::string& args)
 {
     if (!m_active)
