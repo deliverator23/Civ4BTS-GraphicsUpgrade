@@ -110,11 +110,12 @@ float MixWeight(float2 world, float2 at)
 // runs on across the edge. Where stamps overlap they mix by their alphas, the same in any order: along a square's edge
 // only the two corners on it count (a stamp's alpha is 0 at its own edge), so both squares draw the same there. A stamp
 // is square on the map, turned as the heights are; row 0 is north. Where a corner has a stamp with no painting, the
-// layer's blend stays, under the paintings.
+// layer's blend stays, under the paintings. A painting has its own light and grain: where it shows, the terrain's detail
+// texture (added to the colour, and bumping the normal) gives way to a neutral grey, but for f4StampToPlot.w of it.
 sampler2D StampPlots : register(s10);    // r x 255: the plot's atlas cell + 1, 0 no stamp, 255 a stamp with no painting
 sampler2D StampColours : register(s11);  // the paintings, a cell each
 float4 f4Stamp : register(c28);        // xy = the atlas's cells across and down, z = 1: the grid sheet, w = 1: paint
-float4 f4StampToPlot : register(c29);  // as f4MixToPlot
+float4 f4StampToPlot : register(c29);  // as f4MixToPlot; w = how much of the detail texture shows on a painting
 float4 f4StampSize : register(c30);    // as f4MixSize
 
 // Corner plot i's painting added in: j, the plot on the map (off it, s10's border says no stamp); p, plot coordinates;
@@ -136,9 +137,10 @@ void StampCorner(float2 i, float2 j, float2 p, float2 dx, float2 dy, inout float
 }
 
 // What's left of the blend (b) with this square's paintings on it; world, as MixWeight; dpx, dpy: the plot coordinates'
-// derivatives.
-float4 StampColour(float4 b, float2 world, float2 at, float2 dpx, float2 dpy)
+// derivatives; shown: how much of a painting shows here.
+float4 StampColour(float4 b, float2 world, float2 at, float2 dpx, float2 dpy, out float shown)
 {
+    shown = 0;
     float2 p = world * f4StampToPlot.x + f4StampToPlot.yz;
     float2 i0 = floor(at * f4StampToPlot.x + f4StampToPlot.yz);
     float2 dx = dpx * float2(0.5, -0.5) / f4Stamp.xy, dy = dpy * float2(0.5, -0.5) / f4Stamp.xy;
@@ -153,6 +155,7 @@ float4 StampColour(float4 b, float2 world, float2 at, float2 dpx, float2 dpy)
     if (painted < 0.5)
         return b;
     float alpha = 1 - rest;
+    shown = alpha;
     float3 colour = sum.rgb / max(sum.a, 1e-4);
     if (f4Stamp.z > 0)
     {
@@ -231,8 +234,9 @@ float4 PSMain(float2 base : TEXCOORD0, float2 fow : TEXCOORD1, float2 lightmap :
         b.a *= MixWeight(worldXY, worldAt);
     float2 stampP = worldXY * f4StampToPlot.x;
     float2 stampDx = ddx(stampP), stampDy = ddy(stampP);
+    float painted = 0;
     if (f4Stamp.w > 0)
-        b = StampColour(b, worldXY, worldAt, stampDx, stampDy);
+        b = StampColour(b, worldXY, worldAt, stampDx, stampDy, painted);
 #else
     float4 b = tex2D(TerrainBase, base);
 #endif
@@ -250,6 +254,11 @@ float4 PSMain(float2 base : TEXCOORD0, float2 fow : TEXCOORD1, float2 lightmap :
     float2 made = float2(h - dot(tex2D(TerrainDetail, detail + float2(f4DetailNormal.z, 0)).rgb, kLuma),
                          dot(tex2D(TerrainDetail, detail + float2(0, f4DetailNormal.w)).rgb, kLuma) - h);
     float2 slope = f4DetailNormal.x * (tex2D(DetailNormals, detail).rg * 2 - 1) + f4DetailNormal.y * made;
+#ifdef BLENDNORMALS
+    float detailShown = 1 - painted * (1 - f4StampToPlot.w);
+    d = lerp(0.5, d, detailShown);
+    slope *= detailShown;
+#endif
     float3 flat = lerp(float3(0, 0, 1), n, known);
     float2 worldSlope = slope.x * f4DetailAxes.xy - slope.y * f4DetailAxes.zw;
 #ifdef BLENDNORMALS

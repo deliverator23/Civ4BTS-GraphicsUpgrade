@@ -536,6 +536,8 @@ void LoadConfig()
         p.hasHeight = !height.empty();
         p.height = p.hasHeight ? static_cast<float>(_wtof(height.c_str())) : 1.0f;
         p.textures = IniInt(ini, L"terrain tiles", (n + L"Textures").c_str(), 0) != 0;
+        p.textureDetail = (std::max)(0.0f, (std::min)(1.0f, static_cast<float>(_wtof(
+            IniString(ini, L"terrain tiles", (n + L"TextureDetail").c_str(), L"0").c_str()))));
     }
     g_config.plotStampsTest = IniString(ini, L"debug", L"PlotStampsTest", L"");
     g_config.tileSets = (std::max)(1, (std::min)(8, IniInt(ini, L"terrain tiles", L"TileGroups", 1)));

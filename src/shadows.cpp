@@ -380,7 +380,7 @@ bool Shadows::StampFor(IDirect3DBaseTexture9* sheet)
     }
     const float stamp[12] = {static_cast<float>(m_stampCells[0]), static_cast<float>(m_stampCells[1]),
                              it->second == 2 ? 1.0f : 0.0f, 1,
-                             map.toPlot[0], map.toPlot[1], map.toPlot[2], 0,
+                             map.toPlot[0], map.toPlot[1], map.toPlot[2], map.detail,
                              static_cast<float>(map.width), static_cast<float>(map.height), map.wrapX ? 1.0f : 0.0f,
                              map.wrapY ? 1.0f : 0.0f};
     memcpy(m_stamp, stamp, sizeof(m_stamp));

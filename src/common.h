@@ -71,12 +71,15 @@ struct Config
     // level (not set: pieces.xml's fHeightScale in world units, over the landscape's fZScale). A plot is in the first N
     // listing its terrain. PlotStampsNTextures=1: the terrain shader paints each piece's <piece>_colour.dds on the layer
     // of those terrains, which needs a blend sheet (and grid sheet) of their own (plot_stamps.h).
+    // PlotStampsNTextureDetail: how much of the terrain's detail texture and its bumps shows on a painting (0 none, 1 all;
+    // one value for all the paintings: the first set's that has them).
     struct PlotStampSet
     {
         std::wstring terrains, folder, features, hideModels;
         bool hasHeight = false;
         float height = 1.0f;
         bool textures = false;
+        float textureDetail = 0;
     };
     PlotStampSet plotStamps[8];
     // [debug] PlotStampsTest=<folder>;x;y (the test harness; there's no map there): a 16 x 16 map with one stamp at plot
@@ -297,6 +300,7 @@ struct PlotStampsMap
     bool wrapX = false, wrapY = false, allLayers = false;
     unsigned version = 0;
     float toPlot[3] = {};
+    float detail = 0;  // PlotStamps<n>TextureDetail
 };
 bool PlotStampsCells(PlotStampsMap& out);
 struct PlotStampsSheet

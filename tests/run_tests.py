@@ -1375,8 +1375,9 @@ def main():
     with open(os.path.join(stamp_dir, 'a.dds'), 'wb') as f:
         f.write(dds_a8r8g8b8(64, lambda u, v: (0x60, 0x60, 0x60, 255) if u > 0.5 and v > 0.5 else (0x20, 0x20, 0x20, 0)))
 
-    def stamp_at(x, y):
-        v, slog = shadow_run(f'stamp_{x}_{y}', 0, 'slope', turned + f'[debug]\nPlotStampsTest={stamp_dir};{x};{y}\n', sheet='L')
+    def stamp_at(x, y, detail=1, ramp=False):
+        v, slog = shadow_run(f'stamp_{x}_{y}', 0, 'slope', turned + f'[debug]\nPlotStampsTest={stamp_dir};{x};{y}\n'
+                             f'[terrain tiles]\nPlotStamps1TextureDetail={detail}\n', sheet='L', ramp=ramp)
         return v, slog
 
     s_se, s_log = stamp_at(8, 8)   # the point is south-east of this plot: in the painting's opaque quarter
@@ -1407,6 +1408,26 @@ def main():
     s_dxt, _ = stamp_at(8, 8)
     check(abs(s_dxt.get('lit', 0) - hi) <= 5 and s_dxt['released'],
           f"a DXT5 painting the same (blue {s_dxt.get('lit')}; a sheet of nearly that grey {hi})")
+    # Six paintings: an atlas of 4 x 2 cells. The plot has the sixth (column 1, row 1), the only one of that grey.
+    stamp_dir = os.path.join(TEST, 'stamp_cells')
+    os.makedirs(stamp_dir, exist_ok=True)
+    for name, grey in zip('abcdef', (0x20, 0x20, 0x20, 0x20, 0x20, 0x60)):
+        with open(os.path.join(stamp_dir, name + '.dds'), 'wb') as f:
+            f.write(dds_a8r8g8b8(64, lambda u, v, g=grey: (g, g, g, 255)))
+    s_six, s6log = stamp_at(8, 8)
+    check('paintings: 6 in a 256x128 atlas' in s6log and abs(s_six.get('lit', 0) - hi) <= 2,
+          f"each plot its own painting: the sixth of six read from its place in the atlas (blue {s_six.get('lit')}; "
+          f"its grey {hi}, the others {lo})")
+    # The detail texture on a painting: all of it at 1, none at 0 (the harness's detail ramp brightens along u, so at the
+    # lit point it changes the colour unless it's left out, when the painting's own grey shows).
+    d_all, _ = stamp_at(8, 8, 1, True)
+    d_none, _ = stamp_at(8, 8, 0, True)
+    d_half, _ = stamp_at(8, 8, 0.5, True)
+    d_flat, _ = stamp_at(8, 8, 0, False)
+    check(abs(d_none.get('lit', 0) - d_flat.get('lit', 1)) <= 1 and abs(d_all.get('lit', 0) - d_none.get('lit', 0)) > 8 and
+          min(d_all.get('lit', 0), d_none.get('lit', 0)) < d_half.get('lit', 0) < max(d_all.get('lit', 0), d_none.get('lit', 0)),
+          f"PlotStamps<n>TextureDetail: the terrain's detail texture left off a painting at 0 (blue {d_none.get('lit')}, "
+          f"whatever the detail: {d_flat.get('lit')}), all of it at 1 ({d_all.get('lit')}), between ({d_half.get('lit')})")
 
     # A terrain blend sheet's own normal map (<Path> with _normal before .dds; Shader Model 3): the harness's base
     # texture (1x1 grey 0x66) is recognised as the mod's blend sheet; the map's texel (64,128,255) tilts the normal 0.5

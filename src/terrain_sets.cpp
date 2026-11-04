@@ -554,6 +554,7 @@ struct StampPaintings
     int width = 0, height = 0;
     bool wrapX = false, wrapY = false, allLayers = false;
     float toPlot[3] = {};
+    float detail = 0;                       // the first painted set's TextureDetail
     unsigned version = 0;
     bool testTried = false;
 } g_paintings;
@@ -680,7 +681,11 @@ void ReadPaintings(PlotStampRun& run, const Config::PlotStampSet& cfg, const std
         ++read;
     }
     if (read)
+    {
+        if (g_paintings.sheets.empty())
+            g_paintings.detail = cfg.textureDetail;
         g_paintings.sheets.insert(g_paintings.sheets.end(), sheets.begin(), sheets.end());
+    }
     Log::Write("terrain tiles: %s: %d of %u paintings, %dx%d %s", set, read, static_cast<unsigned>(run.pieces.size()),
                g_paintings.first.size, g_paintings.first.size, g_paintings.first.dxt5 ? "DXT5" : "A8R8G8B8");
 }
@@ -1725,24 +1730,32 @@ std::vector<MixedCoastSheet> MixedCoastSheets()
 
 bool PlotStampsCells(PlotStampsMap& out)
 {
-    // [debug] PlotStampsTest=<folder>;x;y: a 16 x 16 map with a stamp at plot x, y, painted with <folder>\a.dds.
+    // [debug] PlotStampsTest=<folder>;x;y: a 16 x 16 map with a stamp at plot x, y, painted with the last of <folder>\a.dds,
+    // b.dds... (each its own cell of the atlas).
     if (!g_config.plotStampsTest.empty() && !g_paintings.testTried)
     {
         g_paintings.testTried = true;
         std::wstring folder = g_config.plotStampsTest;
         const size_t b = folder.rfind(L';'), a = b == std::wstring::npos ? b : folder.rfind(L';', b - 1);
-        std::vector<uint8_t> dds;
-        PlotStamps::ColourFile colour;
         std::string why = "can't be read";
-        if (a != std::wstring::npos && ReadFileBytes(folder.substr(0, a) + L"\\a.dds", dds) &&
-            PlotStamps::ParseColourDds(dds, colour, why))
+        for (wchar_t name = L'a'; a != std::wstring::npos && name <= L'h'; ++name)
         {
-            PaintingsMap(16, 16, false, false);
-            g_paintings.cells[_wtoi(folder.c_str() + b + 1) * 16 + _wtoi(folder.c_str() + a + 1)] = 1;
+            std::vector<uint8_t> dds;
+            PlotStamps::ColourFile colour;
+            if (!ReadFileBytes(folder.substr(0, a) + L"\\" + name + L".dds", dds) ||
+                !PlotStamps::ParseColourDds(dds, colour, why))
+                break;
             g_paintings.first.size = colour.size;
             g_paintings.first.dxt5 = colour.dxt5;
             g_paintings.dds.push_back(std::move(dds));
+        }
+        if (!g_paintings.dds.empty())
+        {
+            PaintingsMap(16, 16, false, false);
+            g_paintings.cells[_wtoi(folder.c_str() + b + 1) * 16 + _wtoi(folder.c_str() + a + 1)] =
+                static_cast<uint8_t>(g_paintings.dds.size());
             g_paintings.allLayers = true;
+            g_paintings.detail = g_config.plotStamps[0].textureDetail;
         }
         else
             Log::Write("terrain tiles: PlotStampsTest: %s", why.c_str());
@@ -1757,6 +1770,7 @@ bool PlotStampsCells(PlotStampsMap& out)
     out.allLayers = g_paintings.allLayers;
     out.version = g_paintings.version;
     memcpy(out.toPlot, g_paintings.toPlot, sizeof(out.toPlot));
+    out.detail = g_paintings.detail;
     return true;
 }
 
