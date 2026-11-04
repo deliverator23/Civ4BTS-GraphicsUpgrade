@@ -74,6 +74,7 @@ struct Config
     // PlotStampsNTextureDetail: how much of the terrain's detail texture and its bumps shows on a painting (0 none, 1 all;
     // a value a layer). PlotStampsNOnFeatures=<feature types>, in place of Terrains: every plot with one of those features
     // gets a stamp, whatever its terrain; paintings go over the peak overlay's layer, which such a plot needs.
+    // PlotStampsNTextureMultiply=1: a painting is multiplied by the light rather than added to it, so black stays black.
     struct PlotStampSet
     {
         std::wstring terrains, folder, features, hideModels, onFeatures;
@@ -81,6 +82,7 @@ struct Config
         float height = 1.0f;
         bool textures = false;
         float textureDetail = 0;
+        bool textureMultiply = false;
     };
     PlotStampSet plotStamps[8];
     // [debug] PlotStampsTest=<folder>;x;y[;layer] (the test harness; there's no map there): a 16 x 16 map with one stamp
@@ -297,8 +299,9 @@ std::vector<MixedCoastSheet> MixedCoastSheets();
 // the layer it's painted on, PlotStampsSheet::layer), the map's size and wrap, a version that changes with the data, and
 // world xy -> plot coordinates (x = scale, yz = offset; plot centres at whole numbers). The paintings' DDS files, one a
 // cell, and the blend and grid sheets of the layers they're painted on (paths under Assets, or a full path), each with
-// its layer number, whether paintings go over the layer's own blend (else they replace it where any shows), and how much
-// detail texture shows on them. allLayers: [debug] PlotStampsTest, every terrain draw, as over and detail say.
+// its layer number, whether paintings go over the layer's own blend (else they replace it where any shows), whether
+// they're multiplied by the light, and how much detail texture shows on them. allLayers: [debug] PlotStampsTest, every
+// terrain draw, as over, multiply and detail say.
 struct PlotStampsMap
 {
     const uint8_t* cells = nullptr;
@@ -307,7 +310,7 @@ struct PlotStampsMap
     unsigned version = 0;
     float toPlot[3] = {};
     float detail = 0;
-    bool over = false;
+    bool over = false, multiply = false;
 };
 bool PlotStampsCells(PlotStampsMap& out);
 struct PlotStampsSheet
@@ -315,7 +318,7 @@ struct PlotStampsSheet
     std::wstring path;
     bool grid = false;
     int layer = 0;
-    bool over = false;
+    bool over = false, multiply = false;
     float detail = 0;
 };
 const std::vector<std::vector<uint8_t>>& PlotStampsPaintings();

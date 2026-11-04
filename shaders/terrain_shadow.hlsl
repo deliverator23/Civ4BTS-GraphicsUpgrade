@@ -121,7 +121,7 @@ sampler2D StampColours : register(s11);  // the paintings, a cell each
 float4 f4Stamp : register(c28);        // xy = the atlas's cells across and down, z = 1: the grid sheet, w = 1: paint
 float4 f4StampToPlot : register(c29);  // as f4MixToPlot; w = how much of the detail texture shows on a painting
 float4 f4StampSize : register(c30);    // as f4MixSize
-float4 f4StampLayer : register(c31);   // x = this layer's number, y = 1: paint over its blend
+float4 f4StampLayer : register(c31);   // x = this layer's number, y = 1: paint over its blend, z = 1: multiply by the light
 
 // Corner plot i's painting added in: j, the plot on the map (off it, s10's border says no stamp); p, plot coordinates;
 // the derivatives of the atlas's coordinates.
@@ -290,6 +290,10 @@ float4 PSMain(float2 base : TEXCOORD0, float2 fow : TEXCOORD1, float2 lightmap :
     amount = max(0, amount + dot(bumped, f4LightNew.xyz) - dot(flat, f4LightNew.xyz));
     lm = lerp(lm, saturate(0.5 * (f4Ambient.rgb + f4Sun.rgb * amount)), f4Relight.x);
     float3 colour = b.rgb + d + lm - 1;
+#ifdef BLENDNORMALS
+    // The sum can't go much below lm - 0.5 at a colour of 0: multiplied by the light, black stays black in any light.
+    colour = lerp(colour, b.rgb * lm * 2, painted * f4StampLayer.z);
+#endif
     // BtS's output is clamped to 1 before blending; clamp first so bright ground darkens by the same fraction.
     float3 lit = saturate(tex2D(TerrainFOWar, fow).rgb * colour);
     // Objects' shadows and hills' shadows: the darker of the two (no double darkening where they overlap).

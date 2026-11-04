@@ -198,7 +198,7 @@ private:
     struct StampSheet
     {
         TextureList match;
-        bool grid = false, over = false;
+        bool grid = false, over = false, multiply = false;
         int layer = 0;
         float detail = 0;
     };

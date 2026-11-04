@@ -321,6 +321,7 @@ bool Shadows::StampAtlas()
         m_stampSheets[k].match.Load(sheets[k].path, "[terrain tiles] PlotStamps<n>Textures' sheets");
         m_stampSheets[k].grid = sheets[k].grid;
         m_stampSheets[k].over = sheets[k].over;
+        m_stampSheets[k].multiply = sheets[k].multiply;
         m_stampSheets[k].layer = sheets[k].layer;
         m_stampSheets[k].detail = sheets[k].detail;
     }
@@ -391,7 +392,8 @@ bool Shadows::StampFor(IDirect3DBaseTexture9* sheet)
                              map.toPlot[0], map.toPlot[1], map.toPlot[2], s ? s->detail : map.detail,
                              static_cast<float>(map.width), static_cast<float>(map.height), map.wrapX ? 1.0f : 0.0f,
                              map.wrapY ? 1.0f : 0.0f,
-                             s ? static_cast<float>(s->layer) : 1.0f, (s ? s->over : map.over) ? 1.0f : 0.0f, 0, 0};
+                             s ? static_cast<float>(s->layer) : 1.0f, (s ? s->over : map.over) ? 1.0f : 0.0f,
+                             (s ? s->multiply : map.multiply) ? 1.0f : 0.0f, 0};
     memcpy(m_stamp, stamp, sizeof(m_stamp));
     return true;
 }

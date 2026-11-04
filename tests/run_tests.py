@@ -1377,10 +1377,11 @@ def main():
     with open(os.path.join(stamp_dir, 'a.dds'), 'wb') as f:
         f.write(dds_a8r8g8b8(64, lambda u, v: (0x60, 0x60, 0x60, 255) if u > 0.5 and v > 0.5 else (0x20, 0x20, 0x20, 0)))
 
-    def stamp_at(x, y, detail=1, ramp=False, over=False, layer=''):
+    def stamp_at(x, y, detail=1, ramp=False, over=False, layer='', multiply=0):
         v, slog = shadow_run(f'stamp_{x}_{y}', 0, 'slope', turned + f'[debug]\nPlotStampsTest={stamp_dir};{x};{y}{layer}\n'
                              f'[terrain tiles]\nPlotStamps1TextureDetail={detail}\n' +
-                             ('PlotStamps1OnFeatures=FEATURE_TEST\n' if over else ''), sheet='L', ramp=ramp)
+                             ('PlotStamps1OnFeatures=FEATURE_TEST\n' if over else '') +
+                             f'PlotStamps1TextureMultiply={multiply}\n', sheet='L', ramp=ramp)
         return v, slog
 
     s_se, s_log = stamp_at(8, 8)   # the point is south-east of this plot: in the painting's opaque quarter
@@ -1441,9 +1442,20 @@ def main():
         f.write(dds_a8r8g8b8(64, lambda u, v: (0x60, 0x60, 0x60, 128)))
     stamp_dir, keep_dir = half_dir, stamp_dir
     o_half, _ = stamp_at(8, 8, over=True)
+    # PlotStamps<n>TextureMultiply: a black painting added to the light comes out grey; multiplied by it, black
+    with open(os.path.join(half_dir, 'a.dds'), 'wb') as f:
+        f.write(dds_a8r8g8b8(64, lambda u, v: (0, 0, 0, 255)))
+    k_added, _ = stamp_at(8, 8, detail=0, over=True)
+    k_mult, _ = stamp_at(8, 8, detail=0, over=True, multiply=1)
+    with open(os.path.join(half_dir, 'a.dds'), 'wb') as f:
+        f.write(dds_a8r8g8b8(64, lambda u, v: (0x60, 0x60, 0x60, 255)))
+    g_mult, _ = stamp_at(8, 8, detail=0, over=True, multiply=1)
     stamp_dir = keep_dir
     check(abs(o_half.get('lit', 0) - (lo + hi) / 2) <= 4,
           f"a part-see-through painting mixes with the layer under it (blue {o_half.get('lit')}; {lo} to {hi})")
+    check(k_mult.get('lit', 99) <= 2 and k_added.get('lit', 0) > 30 and g_mult.get('lit', 0) > 30 and k_mult['released'],
+          f"PlotStamps<n>TextureMultiply: a black painting stays black (blue {k_mult.get('lit')}; added to the light "
+          f"{k_added.get('lit')}), and a colour still takes the light ({g_mult.get('lit')})")
     check('paintings: 6 in a 256x128 atlas' in s6log and abs(s_six.get('lit', 0) - hi) <= 2,
           f"each plot its own painting: the sixth of six read from its place in the atlas (blue {s_six.get('lit')}; "
           f"its grey {hi}, the others {lo})")

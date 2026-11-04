@@ -558,7 +558,7 @@ struct StampPaintings
     bool wrapX = false, wrapY = false, allLayers = false;
     float toPlot[3] = {};
     float detail = 0;                       // [debug] PlotStampsTest: its layer's
-    bool over = false;
+    bool over = false, multiply = false;
     unsigned version = 0;
     bool testTried = false;
 } g_paintings;
@@ -661,9 +661,11 @@ void ReadPaintings(PlotStampRun& run, const Config::PlotStampSet& cfg, const std
                 return;
             }
         }
-        sheets.push_back({std::wstring(base, base + strlen(base)), false, run.layer, over, cfg.textureDetail});
+        sheets.push_back({std::wstring(base, base + strlen(base)), false, run.layer, over, cfg.textureMultiply,
+                          cfg.textureDetail});
         if (grid && *grid)
-            sheets.push_back({std::wstring(grid, grid + strlen(grid)), true, run.layer, over, cfg.textureDetail});
+            sheets.push_back({std::wstring(grid, grid + strlen(grid)), true, run.layer, over, cfg.textureMultiply,
+                              cfg.textureDetail});
     }
     int read = 0;
     for (size_t k = 0; k < run.pieces.size(); ++k)
@@ -1807,6 +1809,7 @@ bool PlotStampsCells(PlotStampsMap& out)
         {
             PaintingsMap(16, 16, false, false);
             g_paintings.over = !g_config.plotStamps[0].onFeatures.empty();
+            g_paintings.multiply = g_config.plotStamps[0].textureMultiply;
             uint8_t* at = &g_paintings.cells[(_wtoi(parts[2].c_str()) * 16 + _wtoi(parts[1].c_str())) * 2];
             at[0] = static_cast<uint8_t>(g_paintings.dds.size());
             at[1] = static_cast<uint8_t>(parts.size() > 3 ? _wtoi(parts[3].c_str()) : 1);
@@ -1828,6 +1831,7 @@ bool PlotStampsCells(PlotStampsMap& out)
     memcpy(out.toPlot, g_paintings.toPlot, sizeof(out.toPlot));
     out.detail = g_paintings.detail;
     out.over = g_paintings.over;
+    out.multiply = g_paintings.multiply;
     return true;
 }
 
