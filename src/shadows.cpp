@@ -3,6 +3,7 @@
 #include "detail_normals.h"
 #include "matrix.h"
 #include "overlay.h"
+#include "plot_stamps.h"
 
 #include <algorithm>
 #include <cmath>
@@ -167,7 +168,7 @@ void Shadows::ReleaseAll()
     ReleaseDefault();
     IUnknown* objects[] = {m_terrainVs, m_terrainPs,   m_blurPs, m_riverFloodVs, m_riverFloodPs,
                            m_riverVs,   m_riverPs,     m_waterVs, m_waterPs, m_riverFlow,
-                           m_terrainSheetVs, m_terrainSheetPs, m_mixTex};
+                           m_terrainSheetVs, m_terrainSheetPs, m_mixTex, m_stampAtlas, m_stampPlots};
     for (IUnknown* o : objects)
         if (o)
             o->Release();
@@ -180,6 +181,11 @@ void Shadows::ReleaseAll()
     m_mixSheets.clear();
     m_mixSheetsLoaded = false;
     m_mixSheetOf.clear();
+    m_stampAtlas = m_stampPlots = nullptr;
+    m_stampVersion = 0;
+    m_stampSheets.clear();
+    m_stampLoaded = false;
+    m_stampSheetOf.clear();
     m_riverFlowTried = false;
     m_terrainVs = m_riverFloodVs = m_riverVs = m_waterVs = nullptr;
     m_terrainPs = m_blurPs = m_riverFloodPs = m_riverPs = m_waterPs = nullptr;
@@ -268,6 +274,116 @@ bool Shadows::MixFor(IDirect3DBaseTexture9* sheet)
                            static_cast<float>(map.width), static_cast<float>(map.height), map.wrapX ? 1.0f : 0.0f,
                            map.wrapY ? 1.0f : 0.0f};
     memcpy(m_mix, mix, sizeof(m_mix));
+    return true;
+}
+
+bool Shadows::StampAtlas()
+{
+    if (m_stampLoaded)
+        return m_stampAtlas != nullptr;
+    m_stampLoaded = true;
+    const std::vector<std::vector<uint8_t>>& paintings = PlotStampsPaintings();
+    std::vector<PlotStamps::ColourFile> files(paintings.size());
+    std::string why;
+    for (size_t k = 0; k < paintings.size(); ++k)
+        if (!PlotStamps::ParseColourDds(paintings[k], files[k], why))
+            return false;
+    if (files.empty())
+        return false;
+    const PlotStamps::AtlasLayout a = PlotStamps::LayoutAtlas(static_cast<int>(files.size()), files[0].size);
+    const ULONG before = DeviceRefs(m_dev);
+    if (FAILED(m_dev->CreateTexture(a.Width(), a.Height(), a.levels, 0, files[0].dxt5 ? D3DFMT_DXT5 : D3DFMT_A8R8G8B8,
+                                    D3DPOOL_MANAGED, &m_stampAtlas, nullptr)))
+    {
+        m_stampAtlas = nullptr;
+        Log::Write("terrain tiles: the plot stamps' %dx%d atlas can't be made; the layers keep their blends", a.Width(),
+                   a.Height());
+        return false;
+    }
+    m_internalRefs += DeviceRefs(m_dev) - before;
+    for (int level = 0; level < a.levels; ++level)
+    {
+        D3DLOCKED_RECT lr;
+        if (FAILED(m_stampAtlas->LockRect(level, &lr, nullptr, 0)))
+            continue;
+        memset(lr.pBits, 0, static_cast<size_t>(lr.Pitch) * (files[0].dxt5 ? (a.Height() >> level) / 4 : a.Height() >> level));
+        for (size_t k = 0; k < files.size(); ++k)
+            PlotStamps::CopyCell(files[k], a, static_cast<int>(k), level, static_cast<uint8_t*>(lr.pBits), lr.Pitch);
+        m_stampAtlas->UnlockRect(level);
+    }
+    m_stampCells[0] = a.cols;
+    m_stampCells[1] = a.rows;
+    const std::vector<PlotStampsSheet> sheets = PlotStampsSheets();
+    m_stampSheets.resize(sheets.size());
+    for (size_t k = 0; k < sheets.size(); ++k)
+    {
+        m_stampSheets[k].match.Load(sheets[k].path, "[terrain tiles] PlotStamps<n>Textures' sheets");
+        m_stampSheets[k].grid = sheets[k].grid;
+    }
+    Log::Write("terrain tiles: plot stamps' paintings: %u in a %dx%d atlas, %d levels", static_cast<unsigned>(files.size()),
+               a.Width(), a.Height(), a.levels);
+    return true;
+}
+
+bool Shadows::StampFor(IDirect3DBaseTexture9* sheet)
+{
+    memset(m_stamp, 0, sizeof(m_stamp));
+    PlotStampsMap map;
+    if (!sheet || !PlotStampsCells(map) || !StampAtlas())
+        return false;
+    auto it = m_stampSheetOf.find(sheet);
+    if (it == m_stampSheetOf.end())
+    {
+        int kind = map.allLayers ? 1 : 0;
+        for (size_t k = 0; k < m_stampSheets.size() && !kind; ++k)
+            if (m_stampSheets[k].match.Contains(sheet))
+                kind = m_stampSheets[k].grid ? 2 : 1;
+        it = m_stampSheetOf.emplace(sheet, kind).first;
+    }
+    if (!it->second)
+        return false;
+    if (m_stampPlots && (m_stampSize[0] != map.width || m_stampSize[1] != map.height))
+    {
+        const ULONG before = DeviceRefs(m_dev);
+        m_stampPlots->Release();
+        m_stampPlots = nullptr;
+        const ULONG after = DeviceRefs(m_dev);
+        m_internalRefs -= (before > after && m_internalRefs >= before - after) ? before - after : 0;
+    }
+    if (!m_stampPlots)
+    {
+        const ULONG before = DeviceRefs(m_dev);
+        if (FAILED(m_dev->CreateTexture(map.width, map.height, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &m_stampPlots,
+                                        nullptr)))
+        {
+            m_stampPlots = nullptr;
+            return false;
+        }
+        m_internalRefs += DeviceRefs(m_dev) - before;
+        m_stampSize[0] = map.width;
+        m_stampSize[1] = map.height;
+        m_stampVersion = map.version - 1;
+    }
+    if (m_stampVersion != map.version)
+    {
+        D3DLOCKED_RECT lr;
+        if (FAILED(m_stampPlots->LockRect(0, &lr, nullptr, 0)))
+            return false;
+        for (int y = 0; y < map.height; ++y)
+        {
+            uint32_t* row = reinterpret_cast<uint32_t*>(static_cast<uint8_t*>(lr.pBits) + y * lr.Pitch);
+            for (int x = 0; x < map.width; ++x)
+                row[x] = 0xFF000000u | (static_cast<uint32_t>(map.cells[static_cast<size_t>(y) * map.width + x]) << 16);
+        }
+        m_stampPlots->UnlockRect(0);
+        m_stampVersion = map.version;
+    }
+    const float stamp[12] = {static_cast<float>(m_stampCells[0]), static_cast<float>(m_stampCells[1]),
+                             it->second == 2 ? 1.0f : 0.0f, 1,
+                             map.toPlot[0], map.toPlot[1], map.toPlot[2], 0,
+                             static_cast<float>(map.width), static_cast<float>(map.height), map.wrapX ? 1.0f : 0.0f,
+                             map.wrapY ? 1.0f : 0.0f};
+    memcpy(m_stamp, stamp, sizeof(m_stamp));
     return true;
 }
 
@@ -719,9 +835,11 @@ bool Shadows::DrawReceiver(const ShaderInfo& vs, const ShaderInfo* ps, const std
             m_sheet[3] = 1;
         }
         MixFor(sheet);
+        StampFor(sheet);
         if (sheet)
             sheet->Release();
-        if ((map || m_sheet[3] > 0 || m_mix[3] > 0) && !m_terrainSheetTried)
+        const bool sheetShader = map || m_sheet[3] > 0 || m_mix[3] > 0 || m_stamp[3] > 0;
+        if (sheetShader && !m_terrainSheetTried)
         {
             m_terrainSheetTried = true;
             const ULONG before = DeviceRefs(m_dev);
@@ -733,7 +851,7 @@ bool Shadows::DrawReceiver(const ShaderInfo& vs, const ShaderInfo* ps, const std
                            "BtS reads them, without their normal maps");
             m_internalRefs += DeviceRefs(m_dev) - before;
         }
-        if ((map || m_sheet[3] > 0 || m_mix[3] > 0) && m_terrainSheetVs && m_terrainSheetPs)
+        if (sheetShader && m_terrainSheetVs && m_terrainSheetPs)
         {
             m_sheetNormals = map;
             m_sheetPass = true;
@@ -947,6 +1065,9 @@ const D3DSAMPLERSTATETYPE kMixSamplerStates[6] = {D3DSAMP_ADDRESSU,  D3DSAMP_ADD
                                                   D3DSAMP_MINFILTER, D3DSAMP_MIPFILTER, D3DSAMP_SRGBTEXTURE};
 const DWORD kMixSamplerValues[6] = {D3DTADDRESS_CLAMP, D3DTADDRESS_CLAMP, D3DTEXF_POINT, D3DTEXF_POINT, D3DTEXF_NONE,
                                     FALSE};
+// The stamps' atlas (s11): clamped, filtered as the blend sheet (s0) is.
+const D3DSAMPLERSTATETYPE kAtlasSamplerStates[5] = {D3DSAMP_MAGFILTER, D3DSAMP_MINFILTER, D3DSAMP_MIPFILTER,
+                                                    D3DSAMP_MAXANISOTROPY, D3DSAMP_MIPMAPLODBIAS};
 
 // Shadow texture sampler: bilinear, no mips, and outside the area BORDER = no shadow.
 void SetShadowSampler(IDirect3DDevice9* dev, DWORD stage)
@@ -999,9 +1120,9 @@ HRESULT Shadows::DrawShadowed(IDirect3DVertexShader9* vs, IDirect3DPixelShader9*
     IDirect3DVertexShader9* oldVs = nullptr;
     IDirect3DPixelShader9* oldPs = nullptr;
     IDirect3DBaseTexture9* oldTex = nullptr;
-    float oldVsc[16], oldPsc[4], oldLight[32], oldHillGrid[4], oldDetail[8], oldSheet[24];
-    IDirect3DBaseTexture9 *oldSheetMap = nullptr, *oldMixMap = nullptr;
-    DWORD oldSamp8[9], oldSamp9[6];
+    float oldVsc[16], oldPsc[4], oldLight[32], oldHillGrid[4], oldDetail[8], oldSheet[36];
+    IDirect3DBaseTexture9 *oldSheetMap = nullptr, *oldMixMap = nullptr, *oldStampPlots = nullptr, *oldStampAtlas = nullptr;
+    DWORD oldSamp8[9], oldSamp9[6], oldSamp10[6], oldSamp11[5], oldSamp11Address[3], oldBorder9 = 0, oldBorder10 = 0;
     IDirect3DBaseTexture9 *oldNormals = nullptr, *oldHills = nullptr, *oldDetailMap = nullptr;
     DWORD oldSamp5[8], oldSamp6[8], oldSamp7[9];
     DWORD oldSamp[8];
@@ -1060,16 +1181,45 @@ HRESULT Shadows::DrawShadowed(IDirect3DVertexShader9* vs, IDirect3DPixelShader9*
         {
             // The blend sheet's normal map (s8; none: strength 0), filtered and addressed like the sheet (s0); its
             // strength (c22); the sheet's size and the clamp (c23); TerrainDebug 4's flat colour (c24); MixedCoastBlend's
-            // layer, plot mapping and map size (c25-c27) and the plots (s9, point sampled, clamped).
+            // layer, plot mapping and map size (c25-c27) and the plots (s9, point sampled, clamped); the plot stamps'
+            // paintings: the atlas's cells, plot mapping and map size (c28-c30), each plot's cell (s10, as s9) and the
+            // atlas (s11).
             m_dev->GetTexture(8, &oldSheetMap);
             m_dev->GetTexture(9, &oldMixMap);
-            m_dev->GetPixelShaderConstantF(22, oldSheet, 6);
+            m_dev->GetTexture(10, &oldStampPlots);
+            m_dev->GetTexture(11, &oldStampAtlas);
+            m_dev->GetPixelShaderConstantF(22, oldSheet, 9);
             for (int k = 0; k < 6; ++k)
             {
                 m_dev->GetSamplerState(9, kMixSamplerStates[k], &oldSamp9[k]);
                 m_dev->SetSamplerState(9, kMixSamplerStates[k], kMixSamplerValues[k]);
+                m_dev->GetSamplerState(10, kMixSamplerStates[k], &oldSamp10[k]);
+                m_dev->SetSamplerState(10, kMixSamplerStates[k], kMixSamplerValues[k]);
             }
+            for (int k = 0; k < 5; ++k)
+            {
+                DWORD v = 0;
+                m_dev->GetSamplerState(11, kAtlasSamplerStates[k], &oldSamp11[k]);
+                m_dev->GetSamplerState(0, kAtlasSamplerStates[k], &v);
+                m_dev->SetSamplerState(11, kAtlasSamplerStates[k], v);
+            }
+            m_dev->GetSamplerState(9, D3DSAMP_BORDERCOLOR, &oldBorder9);
+            m_dev->GetSamplerState(10, D3DSAMP_BORDERCOLOR, &oldBorder10);
+            m_dev->SetSamplerState(9, D3DSAMP_ADDRESSU, D3DTADDRESS_BORDER);  // off the map: water
+            m_dev->SetSamplerState(9, D3DSAMP_ADDRESSV, D3DTADDRESS_BORDER);
+            m_dev->SetSamplerState(9, D3DSAMP_BORDERCOLOR, 0x0000FF00);
+            m_dev->SetSamplerState(10, D3DSAMP_ADDRESSU, D3DTADDRESS_BORDER);  // off the map: no stamp
+            m_dev->SetSamplerState(10, D3DSAMP_ADDRESSV, D3DTADDRESS_BORDER);
+            m_dev->SetSamplerState(10, D3DSAMP_BORDERCOLOR, 0);
+            m_dev->GetSamplerState(11, D3DSAMP_ADDRESSU, &oldSamp11Address[0]);
+            m_dev->GetSamplerState(11, D3DSAMP_ADDRESSV, &oldSamp11Address[1]);
+            m_dev->GetSamplerState(11, D3DSAMP_SRGBTEXTURE, &oldSamp11Address[2]);
+            m_dev->SetSamplerState(11, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
+            m_dev->SetSamplerState(11, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
+            m_dev->SetSamplerState(11, D3DSAMP_SRGBTEXTURE, FALSE);
             m_dev->SetTexture(9, m_mix[3] > 0 ? m_mixTex : nullptr);
+            m_dev->SetTexture(10, m_stamp[3] > 0 ? m_stampPlots : nullptr);
+            m_dev->SetTexture(11, m_stamp[3] > 0 ? m_stampAtlas : nullptr);
             for (int k = 0; k < 9; ++k)
             {
                 DWORD v = 0;
@@ -1084,6 +1234,7 @@ HRESULT Shadows::DrawShadowed(IDirect3DVertexShader9* vs, IDirect3DPixelShader9*
                                      debugFlat[0], debugFlat[1], debugFlat[2], debugFlat[3]};
             m_dev->SetPixelShaderConstantF(22, sheet, 3);
             m_dev->SetPixelShaderConstantF(25, m_mix, 3);
+            m_dev->SetPixelShaderConstantF(28, m_stamp, 3);
         }
     }
     else
@@ -1126,11 +1277,27 @@ HRESULT Shadows::DrawShadowed(IDirect3DVertexShader9* vs, IDirect3DPixelShader9*
         {
             m_dev->SetTexture(8, oldSheetMap);
             m_dev->SetTexture(9, oldMixMap);
-            m_dev->SetPixelShaderConstantF(22, oldSheet, 6);
+            m_dev->SetTexture(10, oldStampPlots);
+            m_dev->SetTexture(11, oldStampAtlas);
+            m_dev->SetPixelShaderConstantF(22, oldSheet, 9);
             for (int k = 0; k < 6; ++k)
+            {
                 m_dev->SetSamplerState(9, kMixSamplerStates[k], oldSamp9[k]);
+                m_dev->SetSamplerState(10, kMixSamplerStates[k], oldSamp10[k]);
+            }
+            m_dev->SetSamplerState(9, D3DSAMP_BORDERCOLOR, oldBorder9);
+            m_dev->SetSamplerState(10, D3DSAMP_BORDERCOLOR, oldBorder10);
+            for (int k = 0; k < 5; ++k)
+                m_dev->SetSamplerState(11, kAtlasSamplerStates[k], oldSamp11[k]);
+            m_dev->SetSamplerState(11, D3DSAMP_ADDRESSU, oldSamp11Address[0]);
+            m_dev->SetSamplerState(11, D3DSAMP_ADDRESSV, oldSamp11Address[1]);
+            m_dev->SetSamplerState(11, D3DSAMP_SRGBTEXTURE, oldSamp11Address[2]);
             if (oldMixMap)
                 oldMixMap->Release();
+            if (oldStampPlots)
+                oldStampPlots->Release();
+            if (oldStampAtlas)
+                oldStampAtlas->Release();
             for (int k = 0; k < 9; ++k)
                 m_dev->SetSamplerState(8, kDetailSamplerStates[k], oldSamp8[k]);
             if (oldSheetMap)

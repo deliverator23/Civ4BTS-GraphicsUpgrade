@@ -17,6 +17,13 @@
 //   other. The engine re-stamps only those four when a plot changes, and each is worked out from the plots as they are
 //   then, so there is nothing to keep up to date.
 //
+// - Colours ([terrain tiles] PlotStampsNTextures): each piece can have a painting beside it (<piece>_colour.dds: square,
+//   power of two, full mips, DXT5 or A8R8G8B8; the same two plots as the heightmap, row 0 north; straight alpha, 0 well
+//   inside its edge). The terrain shader draws them on the stamped terrain's own layer (terrain_shadow.hlsl, StampColour),
+//   so the lightmap, shadows and fog of war apply: it can't choose among separate textures per pixel, so the paintings
+//   are copied into the cells of one atlas here, and which cell a plot has goes to it per plot, from the same pick as the
+//   heights.
+//
 // Pure logic here (no Windows calls), so the test harness can run it; terrain_sets.cpp has the hook.
 #pragma once
 
@@ -24,10 +31,102 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstring>
+#include <string>
 #include <vector>
 
 namespace PlotStamps
 {
+// A painting's DDS file, as the atlas needs it; false, with why, if it won't do.
+struct ColourFile
+{
+    int size = 0;       // texels across
+    bool dxt5 = false;  // else A8R8G8B8
+    const uint8_t* levels = nullptr;  // the top level; the others follow it
+};
+const int kMinCell = 4;  // the atlas's coarsest level has cells this size (a DXT block)
+
+inline int LevelsFor(int size)  // from size down to kMinCell
+{
+    int n = 1;
+    while (size > kMinCell)
+        size /= 2, ++n;
+    return n;
+}
+
+inline size_t LevelBytes(int size, bool dxt5)
+{
+    return dxt5 ? static_cast<size_t>((size + 3) / 4) * ((size + 3) / 4) * 16 : static_cast<size_t>(size) * size * 4;
+}
+
+inline bool ParseColourDds(const std::vector<uint8_t>& d, ColourFile& out, std::string& why)
+{
+    auto u32 = [&](size_t at) {
+        uint32_t v = 0;
+        memcpy(&v, d.data() + at, 4);
+        return v;
+    };
+    if (d.size() < 128 || memcmp(d.data(), "DDS ", 4) != 0)
+        return why = "not a DDS file", false;
+    const int h = static_cast<int>(u32(12)), w = static_cast<int>(u32(16)), mips = static_cast<int>((std::max)(u32(28), 1u));
+    if (w != h || w < 16 || w > 2048 || (w & (w - 1)))
+        return why = std::to_string(w) + "x" + std::to_string(h) + ", not square, a power of two, 16 to 2048", false;
+    const uint32_t flags = u32(80), four = u32(84), bits = u32(88), rmask = u32(92), gmask = u32(96), bmask = u32(100),
+                   amask = u32(104);
+    const bool dxt5 = (flags & 4) && four == 0x35545844u;
+    const bool argb = !(flags & 4) && (flags & 0x40) && bits == 32 && rmask == 0xff0000 && gmask == 0xff00 &&
+                      bmask == 0xff && amask == 0xff000000u;
+    if (!dxt5 && !argb)
+        return why = "not DXT5 or A8R8G8B8", false;
+    if (mips < LevelsFor(w))
+        return why = std::to_string(mips) + " mip levels, needs " + std::to_string(LevelsFor(w)), false;
+    size_t need = 128;
+    for (int size = w, k = 0; k < LevelsFor(w); ++k, size /= 2)
+        need += LevelBytes(size, dxt5);
+    if (need > d.size())
+        return why = "cut off", false;
+    out.size = w;
+    out.dxt5 = dxt5;
+    out.levels = d.data() + 128;
+    return true;
+}
+
+// The atlas: whole cells, powers of two across and down.
+struct AtlasLayout
+{
+    int cols = 0, rows = 0, cell = 0, levels = 0;
+    int Width() const { return cols * cell; }
+    int Height() const { return rows * cell; }
+};
+inline AtlasLayout LayoutAtlas(int cells, int cellSize)
+{
+    AtlasLayout a;
+    a.cell = cellSize;
+    a.levels = LevelsFor(cellSize);
+    a.cols = 1;
+    while (a.cols * a.cols < cells)
+        a.cols *= 2;
+    a.rows = 1;
+    while (a.rows * a.cols < cells)
+        a.rows *= 2;
+    return a;
+}
+
+// Level `level` of a painting into its cell `cell` of the atlas's same level (`dest`, `pitch` bytes a row of texels, or
+// of blocks in DXT5).
+inline void CopyCell(const ColourFile& f, const AtlasLayout& a, int cell, int level, uint8_t* dest, int pitch)
+{
+    const uint8_t* from = f.levels;
+    for (int k = 0, size = f.size; k < level; ++k, size /= 2)
+        from += LevelBytes(size, f.dxt5);
+    const int size = f.size >> level;
+    const int perRow = f.dxt5 ? size / 4 : size, unit = f.dxt5 ? 16 : 4;
+    const int col = cell % a.cols, row = cell / a.cols;
+    for (int r = 0; r < perRow; ++r)
+        memcpy(dest + static_cast<size_t>(row * perRow + r) * pitch + static_cast<size_t>(col) * perRow * unit,
+               from + static_cast<size_t>(r) * perRow * unit, static_cast<size_t>(perRow) * unit);
+}
+
 // The piece a plot takes: the one at its feature's place in `features` (the INI's PlotStampsNFeatures as feature
 // types; more features than pieces wrap round), else one picked by a hash of the plot (x, y wrapped onto the map).
 inline int Pick(int feature, const std::vector<int>& features, int pieces, int x, int y)

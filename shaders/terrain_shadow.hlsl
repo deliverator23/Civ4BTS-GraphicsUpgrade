@@ -74,13 +74,11 @@ float4 f4Mix : register(c25);        // x = this layer's terrain + 1, y = its ra
 float4 f4MixToPlot : register(c26);  // world xy -> plot coordinates (plot centres at whole numbers): x = scale, yz = offset
 float4 f4MixSize : register(c27);    // the map: xy = its size in plots, zw = 1 where it wraps
 
-// Plot i's data (wrapped onto the map); off the map, water (as the heightmap counts it).
+// Plot i's data (wrapped onto the map); off the map, s9's border: water, as the heightmap counts it.
 float4 MixPlot(float2 i)
 {
     float2 s = f4MixSize.xy;
     float2 j = lerp(i, i - s * floor(i / s), f4MixSize.zw);
-    if (j.x < 0 || j.y < 0 || j.x > s.x - 1 || j.y > s.y - 1)
-        return float4(0, 1, 0, 0);
     return tex2Dlod(MixPlots, float4((j + 0.5) / s, 0, 0));
 }
 
@@ -104,6 +102,69 @@ float MixWeight(float2 world, float2 at)
     if (dot(own, 1) == 0 || dot(lower, 1) == 0)
         return 1;  // not at this square's land corners (an overlay), or the lowest paired terrain: drawn whole
     return dot(bw, own) / max(dot(bw, own + lower), 1e-5);
+}
+
+// [terrain tiles] PlotStamps<n>Textures: this layer (the stamped terrain's own) paints each plot's stamp, so the lightmap,
+// shadows and fog of war below apply. A stamp reaches its plot and one plot round it, so a square shows those of its
+// four corner plots; the part of a stamp in the next square is that square's corner's, read at the same place, so it
+// runs on across the edge. Where stamps overlap they mix by their alphas, the same in any order: along a square's edge
+// only the two corners on it count (a stamp's alpha is 0 at its own edge), so both squares draw the same there. A stamp
+// is square on the map, turned as the heights are; row 0 is north. Where a corner has a stamp with no painting, the
+// layer's blend stays, under the paintings.
+sampler2D StampPlots : register(s10);    // r x 255: the plot's atlas cell + 1, 0 no stamp, 255 a stamp with no painting
+sampler2D StampColours : register(s11);  // the paintings, a cell each
+float4 f4Stamp : register(c28);        // xy = the atlas's cells across and down, z = 1: the grid sheet, w = 1: paint
+float4 f4StampToPlot : register(c29);  // as f4MixToPlot
+float4 f4StampSize : register(c30);    // as f4MixSize
+
+// Corner plot i's painting added in: j, the plot on the map (off it, s10's border says no stamp); p, plot coordinates;
+// the derivatives of the atlas's coordinates.
+void StampCorner(float2 i, float2 j, float2 p, float2 dx, float2 dy, inout float4 sum, inout float rest,
+                 inout float painted, inout float plain)
+{
+    float v = floor(tex2Dlod(StampPlots, float4((j + 0.5) / f4StampSize.xy, 0, 0)).r * 255 + 0.5);
+    if (v > 254.5)
+        plain = 1;
+    if (v < 0.5 || v > 254.5)
+        return;
+    float row = floor((v - 1) / f4Stamp.x);
+    float2 local = saturate(float2(p.x - i.x + 1, i.y + 1 - p.y) * 0.5);
+    float4 s = tex2Dgrad(StampColours, (float2(v - 1 - row * f4Stamp.x, row) + local) / f4Stamp.xy, dx, dy);
+    sum += float4(s.rgb * s.a, s.a);
+    rest *= 1 - s.a;
+    painted = 1;
+}
+
+// What's left of the blend (b) with this square's paintings on it; world, as MixWeight; dpx, dpy: the plot coordinates'
+// derivatives.
+float4 StampColour(float4 b, float2 world, float2 at, float2 dpx, float2 dpy)
+{
+    float2 p = world * f4StampToPlot.x + f4StampToPlot.yz;
+    float2 i0 = floor(at * f4StampToPlot.x + f4StampToPlot.yz);
+    float2 dx = dpx * float2(0.5, -0.5) / f4Stamp.xy, dy = dpy * float2(0.5, -0.5) / f4Stamp.xy;
+    float2 i1 = i0 + 1, s = f4StampSize.xy;
+    float2 j0 = lerp(i0, i0 - s * floor(i0 / s), f4StampSize.zw), j1 = lerp(i1, i1 - s * floor(i1 / s), f4StampSize.zw);
+    float4 sum = 0;
+    float rest = 1, painted = 0, plain = 0;
+    StampCorner(i0, j0, p, dx, dy, sum, rest, painted, plain);
+    StampCorner(float2(i1.x, i0.y), float2(j1.x, j0.y), p, dx, dy, sum, rest, painted, plain);
+    StampCorner(float2(i0.x, i1.y), float2(j0.x, j1.y), p, dx, dy, sum, rest, painted, plain);
+    StampCorner(i1, j1, p, dx, dy, sum, rest, painted, plain);
+    if (painted < 0.5)
+        return b;
+    float alpha = 1 - rest;
+    float3 colour = sum.rgb / max(sum.a, 1e-4);
+    if (f4Stamp.z > 0)
+    {
+        // The grid sheet draws its lines into the tile, across the middle of the square (BtS's plot borders): the same
+        // on the painting, which replaces the tile. As thin as the sheet's, and as faint when far off.
+        float2 g = abs(frac(p) - 0.5);
+        float fw = max(abs(dpx.x) + abs(dpy.x) + abs(dpx.y) + abs(dpy.y), 1e-5);
+        colour += 0.08 * saturate((0.008 + 0.5 * fw - min(g.x, g.y)) / fw) * min(1, 0.016 / fw);
+    }
+    if (plain > 0.5)
+        return float4(lerp(b.rgb, colour, alpha), max(b.a, alpha));
+    return float4(colour, alpha);
 }
 
 // The sheet's texture coordinates kept inside this pixel's tile (at: the coordinates at the centroid, inside the
@@ -168,6 +229,10 @@ float4 PSMain(float2 base : TEXCOORD0, float2 fow : TEXCOORD1, float2 lightmap :
     float4 b = tex2Dgrad(TerrainBase, sheetUV, ddx(base), ddy(base));
     if (f4Mix.w > 0)
         b.a *= MixWeight(worldXY, worldAt);
+    float2 stampP = worldXY * f4StampToPlot.x;
+    float2 stampDx = ddx(stampP), stampDy = ddy(stampP);
+    if (f4Stamp.w > 0)
+        b = StampColour(b, worldXY, worldAt, stampDx, stampDy);
 #else
     float4 b = tex2D(TerrainBase, base);
 #endif

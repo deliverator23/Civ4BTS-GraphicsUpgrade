@@ -461,6 +461,12 @@ def main():
           'the four squares round the plot each get their part of the stamp (sampled where the engine lays each '
           'height, 64 and 16 per plot), its full height in grid units')
     check(ps.get('combine') == 1, 'stamps on neighbouring plots combine by max')
+    mc = re.search(r'^PLOTSTAMPS colourfiles=(\d) colourrefused=(\d) atlas=(\d) cells=(\d) (.*)$', pout, re.M)
+    check(mc and mc.group(1) == '1' and mc.group(2) == '1',
+          f"a stamp's painting read: DXT5 or A8R8G8B8, square, a power of two, mips to 4 texels; others refused "
+          f"{mc.group(5) if mc else ''}")
+    check(mc and mc.group(3) == '1' and mc.group(4) == '1',
+          'the paintings laid out in an atlas of whole cells, each level copied to its cell')
     check(ps.get('clip') == 1, "added onto the engine's heights (with a jigsaw piece's under it), clamped at 255; "
           'the samples clipped there counted (the headroom the stamps lack)')
 
@@ -1346,6 +1352,61 @@ def main():
     check(d1.get('lit') == shadow['on'].get('lit') and d1['released'],
           f"[debug] TerrainDebug 1: the layers drawn opaque, otherwise as they are (blue {d1.get('lit')}, "
           f"{shadow['on'].get('lit')} without)")
+
+    # [terrain tiles] PlotStamps<n>Textures, through the real shader ([debug] PlotStampsTest: a 16 x 16 map, plots 180 across,
+    # plot centres at 180 x (i - 7.5), one stamp, every terrain draw its layer). The painting: only its south-east
+    # quarter shows, grey 0x60, over the 0x20 sheet. The lit point (200, 0) is in the square of plots (8..9, 7..8).
+    def dds_a8r8g8b8(size, texel):
+        """Full mips down to 4 texels; texel(u, v) in 0..1, v down, gives (b, g, r, a)."""
+        levels = []
+        s = size
+        while s >= 4:
+            levels.append(bytes(c for y in range(s) for x in range(s) for c in texel((x + 0.5) / s, (y + 0.5) / s)))
+            s //= 2
+        header = bytearray(128)
+        header[:4] = b'DDS '
+        struct.pack_into('<IIII', header, 4, 124, 0x1007, size, size)
+        struct.pack_into('<I', header, 28, len(levels))
+        struct.pack_into('<IIIIIIII', header, 76, 32, 0x41, 0, 32, 0xff0000, 0xff00, 0xff, 0xff000000)
+        return bytes(header) + b''.join(levels)
+
+    stamp_dir = os.path.join(TEST, 'stamp_painting')
+    os.makedirs(stamp_dir, exist_ok=True)
+    with open(os.path.join(stamp_dir, 'a.dds'), 'wb') as f:
+        f.write(dds_a8r8g8b8(64, lambda u, v: (0x60, 0x60, 0x60, 255) if u > 0.5 and v > 0.5 else (0x20, 0x20, 0x20, 0)))
+
+    def stamp_at(x, y):
+        v, slog = shadow_run(f'stamp_{x}_{y}', 0, 'slope', turned + f'[debug]\nPlotStampsTest={stamp_dir};{x};{y}\n', sheet='L')
+        return v, slog
+
+    s_se, s_log = stamp_at(8, 8)   # the point is south-east of this plot: in the painting's opaque quarter
+    s_n, _ = stamp_at(8, 7)        # north-east of this one
+    s_w, _ = stamp_at(9, 8)        # south-west of this one
+    s_far, _ = stamp_at(1, 1)      # not at the square's corners
+    check('plot stamps\' paintings: 1 in a 64x64 atlas, 5 levels' in s_log and s_se.get('restored') == 1 and
+          s_se['released'], 'the paintings made into an atlas, the game\'s state restored after, nothing left behind')
+    check(abs(s_se.get('lit', 0) - hi) <= 2,
+          f"a painted stamp replaces the layer's colour where it shows, lit as the layer (blue {s_se.get('lit')}; a sheet "
+          f"of that grey {hi})")
+    check(abs(s_n.get('lit', 0) - hi) > 10 and abs(s_w.get('lit', 0) - hi) > 10,
+          f"its north is north and its east east: the quarters that don't show don't (blue {s_n.get('lit')}, "
+          f"{s_w.get('lit')}; shown {hi})")
+    check(abs(s_far.get('lit', 0) - lo) <= 2,
+          f"a stamp elsewhere leaves the square's blend alone (blue {s_far.get('lit')}; {lo} without)")
+    # The same as DXT5, what the art uses: blocks of one opaque colour, 0x63 blue.
+    block = struct.pack('<BB6xHHI', 255, 255, 0x630C, 0x630C, 0)
+    dxt5 = bytearray(128)
+    dxt5[:4] = b'DDS '
+    struct.pack_into('<IIII', dxt5, 4, 124, 0x1007, 64, 64)
+    struct.pack_into('<I', dxt5, 28, 5)
+    struct.pack_into('<II4s', dxt5, 76, 32, 4, b'DXT5')
+    for s in (64, 32, 16, 8, 4):
+        dxt5 += block * ((s // 4) ** 2)
+    with open(os.path.join(stamp_dir, 'a.dds'), 'wb') as f:
+        f.write(bytes(dxt5))
+    s_dxt, _ = stamp_at(8, 8)
+    check(abs(s_dxt.get('lit', 0) - hi) <= 5 and s_dxt['released'],
+          f"a DXT5 painting the same (blue {s_dxt.get('lit')}; a sheet of nearly that grey {hi})")
 
     # A terrain blend sheet's own normal map (<Path> with _normal before .dds; Shader Model 3): the harness's base
     # texture (1x1 grey 0x66) is recognised as the mod's blend sheet; the map's texel (64,128,255) tilts the normal 0.5

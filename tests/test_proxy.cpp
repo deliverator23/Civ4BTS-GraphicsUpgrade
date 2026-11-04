@@ -4221,6 +4221,54 @@ static int PlotStampsTest(const wchar_t* folder)
                        pf.plots.size() != 1 ? "not a one-plot layout" : pwhy.c_str());
         }
     }
+    // Paintings: DDS files read (DXT5 or A8R8G8B8, square, a power of two, mips down to 4 texels), others refused; the
+    // atlas's layout; each cell's level copied to its place.
+    auto dds = [](int w, int h, bool dxt5, int mips, uint8_t fill) {
+        std::vector<uint8_t> d(128, 0);
+        auto put = [&](size_t at, uint32_t v) { memcpy(d.data() + at, &v, 4); };
+        memcpy(d.data(), "DDS ", 4);
+        put(12, h);
+        put(16, w);
+        put(28, mips);
+        put(80, dxt5 ? 4 : 0x41);
+        if (dxt5)
+            put(84, 0x35545844u);
+        else
+        {
+            put(88, 32);
+            put(92, 0xff0000);
+            put(96, 0xff00);
+            put(100, 0xff);
+            put(104, 0xff000000u);
+        }
+        for (int k = 0, s = w; k < mips; ++k, s /= 2)
+            d.resize(d.size() + LevelBytes(s, dxt5), static_cast<uint8_t>(fill + k));
+        return d;
+    };
+    const auto cellA = dds(16, 16, true, 3, 10), cellB = dds(16, 16, true, 3, 20), plainFile = dds(16, 16, false, 3, 30);
+    ColourFile fa, fb, fp, junk;
+    std::string w1, w2, w3, w4;
+    const bool parsed = ParseColourDds(cellA, fa, why) && ParseColourDds(cellB, fb, why) &&
+                        ParseColourDds(plainFile, fp, why) && fa.size == 16 && fa.dxt5 && !fp.dxt5;
+    auto notSquare = dds(16, 8, true, 2, 0), notPower = dds(24, 24, true, 3, 0), fewMips = dds(16, 16, true, 2, 0);
+    auto otherFormat = cellA;
+    otherFormat[84] = '1';
+    fewMips.resize(fewMips.size());
+    const bool refused = !ParseColourDds(notSquare, junk, w1) && !ParseColourDds(notPower, junk, w2) &&
+                         !ParseColourDds(fewMips, junk, w3) && !ParseColourDds(otherFormat, junk, w4);
+    const AtlasLayout atlas1 = LayoutAtlas(1, 512), atlas5 = LayoutAtlas(5, 512), atlas4 = LayoutAtlas(4, 256);
+    const bool layout = atlas1.cols == 1 && atlas1.rows == 1 && atlas1.levels == 8 && atlas5.cols == 4 &&
+                        atlas5.rows == 2 && atlas5.Width() == 2048 && atlas5.Height() == 1024 && atlas4.cols == 2 &&
+                        atlas4.rows == 2;
+    // cell 1 of a 2 x 1 atlas of DXT5 16s: its top level 4 x 4 blocks at block column 4; its next, 2 x 2 at column 2
+    const AtlasLayout atlas2 = LayoutAtlas(2, 16);
+    std::vector<uint8_t> level0(16 * 4 * 16, 0), level1(16 * 2 * 8, 0);
+    CopyCell(fb, atlas2, 1, 0, level0.data(), 16 * 8);
+    CopyCell(fb, atlas2, 1, 1, level1.data(), 16 * 4);
+    const bool copied = atlas2.levels == 3 && level0[3 * (16 * 8) + 7 * 16] == 20 && level0[3 * (16 * 8) + 3 * 16] == 0 &&
+                        level1[1 * (16 * 4) + 3 * 16] == 21 && level1[1 * (16 * 4) + 1 * 16] == 0;
+    printf("PLOTSTAMPS colourfiles=%d colourrefused=%d atlas=%d cells=%d (%s | %s | %s | %s)\n", parsed, refused, layout,
+           copied, w1.c_str(), w2.c_str(), w3.c_str(), w4.c_str());
     printf("PLOTSTAMPS pick=%d orient=%d exact=%d reached=%d squares=%d peak=%d combine=%d clip=%d\n", pick, orient,
            exact, reached, inSquares, peak, combine, clip);
     return 0;

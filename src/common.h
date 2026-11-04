@@ -69,14 +69,19 @@ struct Config
     // listed picks the Nth piece (no listed feature on the plot: picked by plot). PlotStampsNHideModels: textures
     // (TextureList entries) whose models aren't drawn while the stamps are on. PlotStampsNHeight: grid units a height
     // level (not set: pieces.xml's fHeightScale in world units, over the landscape's fZScale). A plot is in the first N
-    // listing its terrain.
+    // listing its terrain. PlotStampsNTextures=1: the terrain shader paints each piece's <piece>_colour.dds on the layer
+    // of those terrains, which needs a blend sheet (and grid sheet) of their own (plot_stamps.h).
     struct PlotStampSet
     {
         std::wstring terrains, folder, features, hideModels;
         bool hasHeight = false;
         float height = 1.0f;
+        bool textures = false;
     };
     PlotStampSet plotStamps[8];
+    // [debug] PlotStampsTest=<folder>;x;y (the test harness; there's no map there): a 16 x 16 map with one stamp at plot
+    // x, y, <folder>\a.dds its painting, and every terrain draw its layer.
+    std::wstring plotStampsTest;
     int tileSets = 1;
     std::wstring tileSetTerrains[8];
     // Coast art per class (one land corner, two side by side, two diagonal, three): cells of the water's transition
@@ -280,6 +285,27 @@ struct MixedCoastSheet
     int terrain = 0, rank = 0;
 };
 std::vector<MixedCoastSheet> MixedCoastSheets();
+// [terrain tiles] PlotStamps<n>Textures (terrain_sets.cpp): which painting each plot has, for the terrain shader (false
+// when none): a byte a plot (0: no stamp; 255: a stamp with no painting; else the atlas cell + 1), the map's size and wrap,
+// a version that changes with the data, and world xy -> plot coordinates (x = scale, yz = offset; plot centres at whole
+// numbers). The paintings' DDS files, one a cell, and the blend and grid sheets of the layers they're painted on (paths
+// under Assets, or a full path). allLayers: [debug] PlotStampsTest, every terrain draw.
+struct PlotStampsMap
+{
+    const uint8_t* cells = nullptr;
+    int width = 0, height = 0;
+    bool wrapX = false, wrapY = false, allLayers = false;
+    unsigned version = 0;
+    float toPlot[3] = {};
+};
+bool PlotStampsCells(PlotStampsMap& out);
+struct PlotStampsSheet
+{
+    std::wstring path;
+    bool grid = false;
+};
+const std::vector<std::vector<uint8_t>>& PlotStampsPaintings();
+std::vector<PlotStampsSheet> PlotStampsSheets();
 // The Baked* light the INI leaves out, from the SunLight.nif the game uses (the running mod's first); logs it. Once.
 void LoadBakedTerrainLight();
 // Folder the proxy DLL was loaded from (the game folder), without a trailing backslash.
