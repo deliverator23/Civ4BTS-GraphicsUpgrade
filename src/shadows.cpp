@@ -408,6 +408,7 @@ void Shadows::NewFrame()
     m_frameSetup = false;
     m_frameFailed = false;
     m_haveAnchor = false;
+    m_landLightCount = 0;
     m_fowTexture = nullptr;
     m_frameCasters = m_frameReceivers = 0;
 }
@@ -754,19 +755,45 @@ bool Shadows::TreeGround(const ShaderInfo& vs, const float* world, float& ground
     return true;
 }
 
+bool Shadows::SolidMesh(DWORD fvf)
+{
+    if ((fvf & D3DFVF_POSITION_MASK) != D3DFVF_XYZ || !(fvf & D3DFVF_NORMAL))
+        return false;
+    DWORD zwrite = FALSE;
+    m_dev->GetRenderState(D3DRS_ZWRITEENABLE, &zwrite);
+    return zwrite != FALSE;
+}
+
 bool Shadows::RigidUnitPart(DWORD fvf)
 {
     // Weapons, shields, catapult parts...: fixed-function, not skinned, lit (normals), writing depth, and placed
     // where the last blob shadow was (within a third of a plot, from the ground to well above head height).
-    if (!m_haveAnchor || (fvf & D3DFVF_POSITION_MASK) != D3DFVF_XYZ || !(fvf & D3DFVF_NORMAL))
-        return false;
-    DWORD zwrite = FALSE;
-    m_dev->GetRenderState(D3DRS_ZWRITEENABLE, &zwrite);
     D3DMATRIX world;
-    if (!zwrite || FAILED(m_dev->GetTransform(D3DTS_WORLD, &world)))
+    if (!m_haveAnchor || !SolidMesh(fvf) || FAILED(m_dev->GetTransform(D3DTS_WORLD, &world)))
         return false;
     float dz = world._43 - m_anchor[2];
     return std::hypot(world._41 - m_anchor[0], world._42 - m_anchor[1]) < 60.0f && dz > -30.0f && dz < 150.0f;
+}
+
+bool Shadows::UnitPart(DWORD fvf, const float* light)
+{
+    if (!light)
+        return RigidUnitPart(fvf);
+    bool land = false;
+    for (int i = 0; i < m_landLightCount && !land; ++i)
+        land = memcmp(m_landLights[i], light, sizeof(m_landLights[i])) == 0;
+    if (!m_haveAnchor)
+    {
+        if (!land && m_landLightCount < 4 && SolidMesh(fvf))
+            memcpy(m_landLights[m_landLightCount++], light, sizeof(m_landLights[0]));
+        return false;
+    }
+    if (!RigidUnitPart(fvf))
+        return false;
+    if (land)
+        return !m_unitsLitApart;
+    m_unitsLitApart = m_unitsLitApart || m_landLightCount > 0;
+    return true;
 }
 
 bool Shadows::MaybeReceiver(const ShaderInfo& vs)

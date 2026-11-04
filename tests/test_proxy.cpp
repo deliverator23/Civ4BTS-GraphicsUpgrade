@@ -1697,7 +1697,11 @@ static int ShadowScene(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS& pp, int fra
 // (the unit in the lower-left corner, the Civilopedia's models); pixel is its centre. With screen: the same into a
 // texture the size of the back buffer, as BtS draws the map behind the Civilopedia.
 // With blob (and tex): a 1x1 grey 128 texture, as a unit's blob shadow, is drawn just before the model.
-static int LightScene(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS& pp, bool ff, bool rt, bool screen, bool tex, bool blob)
+// With parts (and blob): the model is also drawn before the blob, as the land is, and after the blob comes, for "weapon",
+// a mesh under a light of its own (diffuse 0.4), as a unit's rigid part, in place of the model; for "land" that mesh, then
+// the model on top; for "same" the model alone, as a unit's part in a game whose units share the land's light.
+static int LightScene(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS& pp, bool ff, bool rt, bool screen, bool tex, bool blob,
+                      const wchar_t* parts)
 {
     rt = rt || screen;
     std::vector<DWORD> code = Tokens(g_litVS, sizeof(g_litVS));
@@ -1797,6 +1801,11 @@ static int LightScene(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS& pp, bool ff,
             CHECK(dev->LightEnable(11, TRUE));
             CHECK(dev->SetMaterial(&material));
             CHECK(dev->SetRenderState(D3DRS_AMBIENT, 0x00102030));
+            if (parts)
+            {
+                CHECK(dev->SetRenderState(D3DRS_LIGHTING, TRUE));
+                CHECK(dev->DrawPrimitiveUP(D3DPT_TRIANGLELIST, 1, triUv, 32));
+            }
             if (blob)
             {
                 CHECK(dev->SetTexture(0, blobTexture));
@@ -1805,10 +1814,21 @@ static int LightScene(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS& pp, bool ff,
                 CHECK(dev->SetTexture(0, grey));
             }
             CHECK(dev->SetRenderState(D3DRS_LIGHTING, TRUE));
-            if (tex)
+            if (parts && wcscmp(parts, L"same") != 0)
+            {
+                D3DLIGHT9 unitLight = sun;
+                unitLight.Diffuse.r = unitLight.Diffuse.g = unitLight.Diffuse.b = 0.4f;
+                CHECK(dev->SetLight(11, &unitLight));
                 CHECK(dev->DrawPrimitiveUP(D3DPT_TRIANGLELIST, 1, triUv, 32));
-            else
-                CHECK(dev->DrawPrimitiveUP(D3DPT_TRIANGLELIST, 1, tri, 24));
+                CHECK(dev->SetLight(11, &sun));
+            }
+            if (!parts || wcscmp(parts, L"weapon") != 0)
+            {
+                if (tex)
+                    CHECK(dev->DrawPrimitiveUP(D3DPT_TRIANGLELIST, 1, triUv, 32));
+                else
+                    CHECK(dev->DrawPrimitiveUP(D3DPT_TRIANGLELIST, 1, tri, 24));
+            }
             CHECK(dev->SetRenderState(D3DRS_LIGHTING, FALSE));
             D3DLIGHT9 after = {};
             DWORD ambient = 0;
@@ -4724,8 +4744,9 @@ int wmain(int argc, wchar_t** argv)
     }
     if (argc > 2 && wcscmp(argv[2], L"light") == 0)
     {
-        // test_proxy <dll> light [ff [tex [blob]]] [rt | screen]
+        // test_proxy <dll> light [ff [tex [blob [weapon | land | same]]]] [rt | screen]
         bool ff = false, rt = false, screen = false, tex = false, blob = false;
+        const wchar_t* parts = nullptr;
         for (int a = 3; a < argc; ++a)
         {
             ff = ff || wcscmp(argv[a], L"ff") == 0;
@@ -4733,8 +4754,10 @@ int wmain(int argc, wchar_t** argv)
             blob = blob || wcscmp(argv[a], L"blob") == 0;
             rt = rt || wcscmp(argv[a], L"rt") == 0;
             screen = screen || wcscmp(argv[a], L"screen") == 0;
+            if (wcscmp(argv[a], L"weapon") == 0 || wcscmp(argv[a], L"land") == 0 || wcscmp(argv[a], L"same") == 0)
+                parts = argv[a];
         }
-        if (LightScene(dev, pp, ff, rt, screen, tex, blob) != 0)
+        if (LightScene(dev, pp, ff, rt, screen, tex, blob, parts) != 0)
             return 1;
         ULONG devRefs = dev->Release();
         ULONG d3dRefs = d3d->Release();

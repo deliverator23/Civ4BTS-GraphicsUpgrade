@@ -865,11 +865,11 @@ def main():
 
     print('lighting:')
 
-    def light_run(label, ini, ff=False, mod_ini=None, rt=False, files=None, blob=False):
+    def light_run(label, ini, ff=False, mod_ini=None, rt=False, files=None, blob=False, parts=None):
         """mod_ini: a mod's GraphicsUpgrade.ini (a GraphicsUpgrade folder in Mods\\TestMod, run with mod=...); rt: drawn
         into a render-target texture, like the interface's 3D views ('screen': one the size of the screen, like the map
         behind the Civilopedia); files: {path under the run's folder (the game folder): bytes}; blob: a unit's blob
-        shadow (grey 128) just before the model."""
+        shadow (grey 128) just before the model; parts: 'weapon', 'land' or 'same' (LightScene, test_proxy.cpp)."""
         ldir = os.path.join(TEST, 'light_' + label)
         if os.path.isdir(ldir):
             shutil.rmtree(ldir)
@@ -891,7 +891,7 @@ def main():
                 f.write(content)
         res = run([os.path.join(TEST, 'test_proxy.exe'), os.path.join(ldir, 'd3d9.dll'), 'light'] +
                   (['ff'] + (['tex'] if ff == 'tex' else []) if ff else []) + (['blob'] if blob else []) +
-                  ([rt if isinstance(rt, str) else 'rt'] if rt else []) + extra)
+                  ([parts] if parts else []) + ([rt if isinstance(rt, str) else 'rt'] if rt else []) + extra)
         m = re.search(r'LIGHT pixel=([0-9a-f]{8}) restored=(\d)', res)
         rgb = tuple(int(m.group(1)[i:i + 2], 16) for i in (2, 4, 6)) if m else None
         return rgb, bool(m) and m.group(2) == '1' and 'final refs device 0, d3d 0' in res
@@ -1137,6 +1137,17 @@ def main():
                         files={**listed, 'Assets/Art/blob.dds': unit_blob})
     check(near(rgb, (133, 115, 98)) and ok, f'GroundLitTextures: a model beside a unit is lit the same -> {rgb}, '
           f'expected (133, 115, 98); light, ambient, material and stages restored')
+    # At a blob: a weapon under a light of its own keeps the Unit light (the game's: sun 0.4, emissive 0.1, ambient
+    # 16,32,48; no Unit colours set); a mesh under the land's light keeps the Building group's range (98,90,81); with
+    # units under the land's own light the colours can't tell them apart, so a mesh there stays the unit's (sun 0.5).
+    at_blob = hot + 'BuildingLightRange=2\n[shadows]\nEnabled=1\nBlobShadowTexture=Art\\blob.dds\n'
+    for label, parts, expect, what in (
+            ('ff_part_weapon', 'weapon', (36, 40, 44), "a weapon under the unit's light keeps the Unit light"),
+            ('ff_part_land', 'land', (98, 90, 81), 'a land model next to a blob keeps the Building light'),
+            ('ff_part_same', 'same', (42, 46, 50), "units sharing the land's light: a mesh at a blob stays the unit's")):
+        rgb, ok = light_run(label, at_blob, ff='tex', blob=True, parts=parts, files={'Assets/Art/blob.dds': unit_blob})
+        check(near(rgb, expect) and ok, f'{what} -> {rgb}, expected {expect}; light, ambient, material and stages '
+              f'restored')
     light_run('ff_range_bad', hot + 'BuildingLightRange=3\n', ff='tex')
     rlog = open(os.path.join(TEST, 'light_ff_range_bad', 'out', 'test_proxy', 'session.log'), encoding='latin-1').read()
     check("BuildingLightRange=3 isn't 1..2; using 2" in rlog, 'BuildingLightRange outside 1..2 warned about and capped')

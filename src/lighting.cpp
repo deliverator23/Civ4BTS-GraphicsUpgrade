@@ -597,6 +597,26 @@ void Lighting::ApplyFixedFunction(int g)
     }
 }
 
+bool Lighting::GameLight(float* colours)
+{
+    DWORD lighting = FALSE;
+    m_dev->GetRenderState(D3DRS_LIGHTING, &lighting);
+    if (!lighting)
+        return false;
+    for (DWORD i : m_slots)
+    {
+        BOOL on = FALSE;
+        D3DLIGHT9 l;
+        if (FAILED(m_dev->GetLightEnable(i, &on)) || !on || FAILED(m_dev->GetLight(i, &l)) ||
+            l.Type != D3DLIGHT_DIRECTIONAL)
+            continue;
+        const float rgb[6] = {l.Diffuse.r, l.Diffuse.g, l.Diffuse.b, l.Ambient.r, l.Ambient.g, l.Ambient.b};
+        memcpy(colours, rgb, sizeof(rgb));
+        return true;
+    }
+    return false;
+}
+
 bool Lighting::GroundLit()
 {
     if (g_config.groundLitTextures.empty())

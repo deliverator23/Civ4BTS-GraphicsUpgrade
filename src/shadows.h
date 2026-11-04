@@ -102,8 +102,12 @@ public:
         for (auto& s : m_stampSheets)
             s.match.Forget(texture);
     }
-    // A fixed-function mesh at the last blob shadow: part of that unit (weapons, shields)?
-    bool UnitPart(DWORD fvf) { return RigidUnitPart(fvf); }
+    // A fixed-function mesh at the last blob shadow: part of that unit (weapons, shields)? light: the game's colours on
+    // it (Lighting::GameLight), or null. BtS draws the land before the units, under lights of its own in games whose
+    // units have their own. So the lights of the solid meshes before a frame's first blob are remembered, and a mesh at
+    // a blob under one of them is land, once a part under another light has shown that units are lit apart. (Where the
+    // units share the land's light the colours say nothing, and every mesh at a blob stays a unit's.)
+    bool UnitPart(DWORD fvf, const float* light);
     // Could this vertex shader be a shadow receiver (terrain or river)? A cheap test before DrawReceiver.
     static bool MaybeReceiver(const ShaderInfo& vs);
     // Draw a BtS terrain or river draw with shadows, through our copies of its shaders. False if it doesn't apply
@@ -143,6 +147,7 @@ private:
     bool EnsureShaders();
     bool TargetIsBackBuffer();  // where the map is drawn (TargetIsMainView)
     void SetupFrame(const float* mainViewProj);
+    bool SolidMesh(DWORD fvf);      // an unskinned fixed-function mesh's shape: positions, normals, writing depth
     bool RigidUnitPart(DWORD fvf);  // an unskinned fixed-function mesh of the unit whose blob was just drawn
     // World z of the ground under the tree patch being drawn (world: its World matrix); false if not known yet.
     bool TreeGround(const ShaderInfo& vs, const float* world, float& ground);
@@ -228,6 +233,9 @@ private:
     bool m_frameFailed = false;  // the view doesn't meet the ground this frame
     bool m_haveAnchor = false;   // m_anchor = position of the last blob shadow drawn this frame
     float m_anchor[3] = {};
+    float m_landLights[4][6] = {};  // diffuse, ambient of the lights on this frame's meshes before its first blob
+    int m_landLightCount = 0;
+    bool m_unitsLitApart = false;  // a unit's part has been seen under a light the land hasn't
     const void* m_fowTexture = nullptr;  // this frame's fog-of-war texture, from the terrain draw (compared only)
     float m_lightVP[16] = {};    // this frame's sun camera (register form)
     float m_curShadowTex[16] = {};   // world -> shadow texture for this frame's coverage

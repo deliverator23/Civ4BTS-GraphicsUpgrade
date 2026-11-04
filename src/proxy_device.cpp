@@ -1054,12 +1054,18 @@ HRESULT ProxyDevice::Dispatch(Draw draw)
     const bool mainView = mainViewScope.Main();
     if (m_light.enabled && fixedFunction && mainView)
     {
-        // Ships' fixed-function parts are vertex-blended; units' rigid parts sit at their blob shadow; the rest of
-        // the lit fixed-function meshes are buildings and improvements.
+        // Ships' fixed-function parts are vertex-blended; units' rigid parts sit at their blob shadow, not under the
+        // land's light; the rest of the lit fixed-function meshes are buildings and improvements.
         DWORD blend = D3DVBF_DISABLE, fvf = 0;
         m_real->GetRenderState(D3DRS_VERTEXBLEND, &blend);
         m_real->GetFVF(&fvf);
-        int group = blend != D3DVBF_DISABLE ? kLightMech : m_shadows.UnitPart(fvf) ? kLightUnit : kLightBuilding;
+        int group = kLightMech;
+        if (blend == D3DVBF_DISABLE)
+        {
+            float light[6];
+            const bool lit = m_light.GameLight(light);
+            group = m_shadows.UnitPart(fvf, lit ? light : nullptr) ? kLightUnit : kLightBuilding;
+        }
         m_light.Apply(nullptr, nullptr, group);
     }
     if (vs && vs->btsTerrain && mainView)

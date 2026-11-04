@@ -54,6 +54,9 @@ public:
         if (std::find(m_slots.begin(), m_slots.end(), index) == m_slots.end())
             m_slots.push_back(index);
     }
+    // The game's colours on a lit fixed-function draw, before Apply changes them: the first enabled directional light's
+    // diffuse (3 floats) and ambient (3). False: lighting off, or no such light.
+    bool GameLight(float* colours);
     // Once per frame: where the light cycle is now (LightCycleOn).
     void NewFrame();
     const float* CycleSun() const { return m_cycleSun; }
