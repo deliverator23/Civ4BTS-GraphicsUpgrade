@@ -211,6 +211,17 @@ are left as they are. The interface and the Civilopedia are never changed. Entri
 LitEffectTextures=Art\Effects\Sandstorm_P; Art\Effects\Dust\dust_cloud.dds
 ```
 
+**Rock that sits in the ground.** The game adds the light to the terrain's colours but multiplies a model's colours by
+it. Under a strongly coloured light such as a red sunset, the same light takes far more colour from the ground than from
+a model standing on it, so rocks can look out of place. `[lighting] GroundLitTextures` lists textures whose models add
+the light as the ground does. Entries work as in `NoShadowTextures`. It applies to models whose first texture stage is
+the plain texture times the light:
+
+```ini
+[lighting]
+GroundLitTextures=Art\Terrain\Features\Rocks\rock_base.dds
+```
+
 **Buildings and resources under a bright light.** BtS lights buildings, improvements and resources in a way that
 stops at the colour of their textures. When the sun and the ambient add up to more than that, as they do in BtS's own
 light and in bright day–night cycles, whatever faces the sky shows its texture's colour whatever the time of day,

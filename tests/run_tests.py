@@ -853,10 +853,11 @@ def main():
 
     print('lighting:')
 
-    def light_run(label, ini, ff=False, mod_ini=None, rt=False, files=None):
+    def light_run(label, ini, ff=False, mod_ini=None, rt=False, files=None, blob=False):
         """mod_ini: a mod's GraphicsUpgrade.ini (a GraphicsUpgrade folder in Mods\\TestMod, run with mod=...); rt: drawn
         into a render-target texture, like the interface's 3D views ('screen': one the size of the screen, like the map
-        behind the Civilopedia); files: {path under the run's folder (the game folder): bytes}."""
+        behind the Civilopedia); files: {path under the run's folder (the game folder): bytes}; blob: a unit's blob
+        shadow (grey 128) just before the model."""
         ldir = os.path.join(TEST, 'light_' + label)
         if os.path.isdir(ldir):
             shutil.rmtree(ldir)
@@ -877,7 +878,7 @@ def main():
             with open(os.path.join(ldir, rel), 'wb') as f:
                 f.write(content)
         res = run([os.path.join(TEST, 'test_proxy.exe'), os.path.join(ldir, 'd3d9.dll'), 'light'] +
-                  (['ff'] + (['tex'] if ff == 'tex' else []) if ff else []) +
+                  (['ff'] + (['tex'] if ff == 'tex' else []) if ff else []) + (['blob'] if blob else []) +
                   ([rt if isinstance(rt, str) else 'rt'] if rt else []) + extra)
         m = re.search(r'LIGHT pixel=([0-9a-f]{8}) restored=(\d)', res)
         rgb = tuple(int(m.group(1)[i:i + 2], 16) for i in (2, 4, 6)) if m else None
@@ -1105,6 +1106,25 @@ def main():
         rgb, ok = light_run(label, ini, ff='tex')
         check(near(rgb, expect) and ok, f'{what} -> {rgb}, expected {expect}; light, ambient, material, texture '
               f'factor and stages restored')
+    # GroundLitTextures: everything at half strength as at range 2 (0.77, 0.70, 0.635), added to the grey texture (64) less
+    # 0.5 rather than doubled and multiplied by it.
+    grey_dds = (struct.pack('<4sIIIIIII44x', b'DDS ', 124, 0x100F, 1, 1, 4, 0, 1) +
+                struct.pack('<II4sIIIII', 32, 0x41, b'\0\0\0\0', 32, 0xFF0000, 0xFF00, 0xFF, 0xFF000000) +
+                struct.pack('<IIIII', 0x1000, 0, 0, 0, 0) + struct.pack('<I', 0xFF404040))
+    listed = {'Assets/Art/rock.dds': grey_dds}
+    rgb, ok = light_run('ff_ground', hot + 'GroundLitTextures=Art\\rock.dds\n', ff='tex', files=listed)
+    check(near(rgb, (133, 115, 98)) and ok, f'GroundLitTextures: the light added to the texture, as on the ground -> {rgb}, '
+          f'expected (133, 115, 98); light, ambient, material and stages restored')
+    rgb, ok = light_run('ff_ground_other', hot + 'BuildingLightRange=2\nGroundLitTextures=Art\\other.dds\n', ff='tex',
+                        files={'Assets/Art/other.dds': grey_dds[:-4] + struct.pack('<I', 0xFF505050)})
+    check(near(rgb, (98, 90, 81)) and ok, f'a model with another texture is lit as before -> {rgb}, expected (98, 90, 81)')
+    # Just after a unit's blob, a model counts as that unit's part; listed, it keeps the Building light and the sum.
+    unit_blob = grey_dds[:-4] + struct.pack('<I', 0xFF808080)
+    rgb, ok = light_run('ff_ground_unit', hot + 'GroundLitTextures=Art\\rock.dds\n[shadows]\nEnabled=1\n'
+                        'BlobShadowTexture=Art\\blob.dds\n', ff='tex', blob=True,
+                        files={**listed, 'Assets/Art/blob.dds': unit_blob})
+    check(near(rgb, (133, 115, 98)) and ok, f'GroundLitTextures: a model beside a unit is lit the same -> {rgb}, '
+          f'expected (133, 115, 98); light, ambient, material and stages restored')
     light_run('ff_range_bad', hot + 'BuildingLightRange=3\n', ff='tex')
     rlog = open(os.path.join(TEST, 'light_ff_range_bad', 'out', 'test_proxy', 'session.log'), encoding='latin-1').read()
     check("BuildingLightRange=3 isn't 1..2; using 2" in rlog, 'BuildingLightRange outside 1..2 warned about and capped')

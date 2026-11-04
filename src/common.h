@@ -236,6 +236,9 @@ struct Config
     // does (Lighting::DrawEffect). litEffectsAll: the INI says "*", every such draw.
     std::wstring litEffectTextures;
     bool litEffectsAll = false;
+    // [lighting] GroundLitTextures: fixed-function models with one of these on stage 0 add the light to their texture
+    // as the terrain does, rather than multiplying by it (Lighting::Headroom). TextureList entries.
+    std::wstring groundLitTextures;
     // How bright the lights can make buildings, improvements and resources (the Building group's fixed-function
     // draws), in multiples of their textures' colours: 1 = BtS's (Direct3D's lighting stops at 1), up to 2 = as the
     // ground (BtS bakes the terrain's light at half strength and doubles it). When sun and ambient add up past 1,

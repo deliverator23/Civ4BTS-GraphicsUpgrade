@@ -19,6 +19,7 @@ Lighting::Lighting(IDirect3DDevice9* device) : m_dev(device)
         Log::Write("settings: [lighting] LitEffectTextures: * (every blended, unlit effect takes the light)");
     else
         m_effectTextures.Load(g_config.litEffectTextures, "[lighting] LitEffectTextures");
+    m_groundLitTextures.Load(g_config.groundLitTextures, "[lighting] GroundLitTextures");
     if (g_config.buildingLightRange > 1.001f)
         Log::Write("settings: [lighting] BuildingLightRange: buildings, improvements and resources lit up to %.2f "
                    "times their textures' colours", g_config.buildingLightRange);
@@ -324,6 +325,7 @@ void Lighting::ReleaseAll()
     m_treeVs = nullptr;
     m_internalRefs = 0;
     m_effectTextures.Clear();
+    m_groundLitTextures.Clear();
 }
 
 bool Lighting::UnlitEffect()
@@ -551,9 +553,16 @@ void Lighting::ApplyFixedFunction(int g)
     m_dev->GetRenderState(D3DRS_LIGHTING, &lighting);
     if (!lighting)
         return;
+    const bool ground = GroundLit();
+    if (ground)
+        g = kLightBuilding;  // part of the land, so a unit's blob just drawn beside it doesn't change its light
     const bool colours = SunSet(g) || AmbientSet(g);
-    const float range = g == kLightBuilding ? g_config.buildingLightRange : 1.0f;
-    const bool headroom = range > 1.001f && Headroom(range);
+    float range = g == kLightBuilding ? g_config.buildingLightRange : 1.0f;
+    bool headroom = ground && Headroom(2.0f, true);
+    if (headroom)
+        range = 2.0f;
+    else
+        headroom = range > 1.001f && Headroom(range, false);
     if (!colours && !headroom)
         return;
     const float scale = headroom ? 1.0f / range : 1.0f;
@@ -588,7 +597,19 @@ void Lighting::ApplyFixedFunction(int g)
     }
 }
 
-bool Lighting::Headroom(float range)
+bool Lighting::GroundLit()
+{
+    if (g_config.groundLitTextures.empty())
+        return false;
+    IDirect3DBaseTexture9* base = nullptr;
+    if (FAILED(m_dev->GetTexture(0, &base)) || !base)
+        return false;
+    const bool listed = m_groundLitTextures.Contains(base);
+    base->Release();
+    return listed;
+}
+
+bool Lighting::Headroom(float range, bool ground)
 {
     IDirect3DPixelShader9* ps = nullptr;
     m_dev->GetPixelShader(&ps);
@@ -659,7 +680,19 @@ bool Lighting::Headroom(float range)
             return false;
         readsLit = readsLit || r0 || r1 || r2;
     }
-    if (!readsLit || stage >= m_maxStages)
+    if (ground)
+    {
+        DWORD op = 0, a1 = 0, a2 = 0;
+        m_dev->GetTextureStageState(0, D3DTSS_COLOROP, &op);
+        m_dev->GetTextureStageState(0, D3DTSS_COLORARG1, &a1);
+        m_dev->GetTextureStageState(0, D3DTSS_COLORARG2, &a2);
+        const bool plain = op == D3DTOP_MODULATE && ((a1 == D3DTA_TEXTURE && a2 == D3DTA_DIFFUSE) ||
+                                                     (a1 == D3DTA_DIFFUSE && a2 == D3DTA_TEXTURE));
+        if (!plain)
+            return false;
+        stage = 0;
+    }
+    else if (!readsLit || stage >= m_maxStages)
         return false;
 
     SavedHeadroom& h = m_headroom;
@@ -682,22 +715,27 @@ bool Lighting::Headroom(float range)
     h.material = m;
     h.on = true;
 
-    // current x 2 x (range / 2). Alpha as it is.
-    const DWORD f = static_cast<DWORD>((std::min)(255.0f, range * 127.5f + 0.5f));
-    m_dev->SetRenderState(D3DRS_TEXTUREFACTOR, D3DCOLOR_ARGB(255, f, f, f));
-    m_dev->SetTexture(stage, nullptr);
-    m_dev->SetTextureStageState(stage, D3DTSS_COLOROP, D3DTOP_MODULATE2X);
-    m_dev->SetTextureStageState(stage, D3DTSS_COLORARG1, D3DTA_TFACTOR);
-    m_dev->SetTextureStageState(stage, D3DTSS_COLORARG2, D3DTA_CURRENT);
-    m_dev->SetTextureStageState(stage, D3DTSS_ALPHAOP, D3DTOP_SELECTARG1);
-    m_dev->SetTextureStageState(stage, D3DTSS_ALPHAARG1, D3DTA_CURRENT);
-    m_dev->SetTextureStageState(stage, D3DTSS_ALPHAARG2, D3DTA_CURRENT);
-    m_dev->SetTextureStageState(stage, D3DTSS_RESULTARG, D3DTA_CURRENT);
-    m_dev->SetTextureStageState(stage, D3DTSS_TEXTURETRANSFORMFLAGS, D3DTTFF_DISABLE);
-    if (stage + 1 < 8)
+    if (ground)
+        m_dev->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_ADDSIGNED);
+    else
     {
-        m_dev->SetTextureStageState(stage + 1, D3DTSS_COLOROP, D3DTOP_DISABLE);
-        m_dev->SetTextureStageState(stage + 1, D3DTSS_ALPHAOP, D3DTOP_DISABLE);
+        // current x 2 x (range / 2). Alpha as it is.
+        const DWORD f = static_cast<DWORD>((std::min)(255.0f, range * 127.5f + 0.5f));
+        m_dev->SetRenderState(D3DRS_TEXTUREFACTOR, D3DCOLOR_ARGB(255, f, f, f));
+        m_dev->SetTexture(stage, nullptr);
+        m_dev->SetTextureStageState(stage, D3DTSS_COLOROP, D3DTOP_MODULATE2X);
+        m_dev->SetTextureStageState(stage, D3DTSS_COLORARG1, D3DTA_TFACTOR);
+        m_dev->SetTextureStageState(stage, D3DTSS_COLORARG2, D3DTA_CURRENT);
+        m_dev->SetTextureStageState(stage, D3DTSS_ALPHAOP, D3DTOP_SELECTARG1);
+        m_dev->SetTextureStageState(stage, D3DTSS_ALPHAARG1, D3DTA_CURRENT);
+        m_dev->SetTextureStageState(stage, D3DTSS_ALPHAARG2, D3DTA_CURRENT);
+        m_dev->SetTextureStageState(stage, D3DTSS_RESULTARG, D3DTA_CURRENT);
+        m_dev->SetTextureStageState(stage, D3DTSS_TEXTURETRANSFORMFLAGS, D3DTTFF_DISABLE);
+        if (stage + 1 < 8)
+        {
+            m_dev->SetTextureStageState(stage + 1, D3DTSS_COLOROP, D3DTOP_DISABLE);
+            m_dev->SetTextureStageState(stage + 1, D3DTSS_ALPHAOP, D3DTOP_DISABLE);
+        }
     }
     // The rest of the light Direct3D adds before the stages: the material's emissive and the global ambient.
     const float scale = 1.0f / range;
@@ -708,7 +746,12 @@ bool Lighting::Headroom(float range)
         return static_cast<DWORD>(((h.ambient >> shift) & 0xFF) * scale + 0.5f) << shift;
     };
     m_dev->SetRenderState(D3DRS_AMBIENT, (h.ambient & 0xFF000000) | channel(16) | channel(8) | channel(0));
-    if (!m_loggedHeadroom)
+    if (ground && !m_loggedGroundLit)
+    {
+        m_loggedGroundLit = true;
+        Log::Write("lighting: first model lit as the ground is ([lighting] GroundLitTextures)");
+    }
+    if (!ground && !m_loggedHeadroom)
     {
         m_loggedHeadroom = true;
         Log::Write("lighting: first building lit with BuildingLightRange %.2f (texture stage %u)", range, stage);

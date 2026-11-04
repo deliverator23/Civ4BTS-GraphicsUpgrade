@@ -95,7 +95,11 @@ public:
     // into the map (the caller's MainViewScope). False if it doesn't apply (the caller then draws it as usual).
     bool DrawEffect(const std::function<HRESULT()>& draw, HRESULT& hr);
     // A texture was just created at this address (see Shadows::ForgetTexture).
-    void ForgetTexture(const void* texture) { m_effectTextures.Forget(texture); }
+    void ForgetTexture(const void* texture)
+    {
+        m_effectTextures.Forget(texture);
+        m_groundLitTextures.Forget(texture);
+    }
     ULONG InternalRefs() const { return m_internalRefs; }
 
     // A group's sun / ambient colour: the cycle's for groups without their own *Sun / *Ambient key while it runs,
@@ -116,11 +120,16 @@ private:
     bool EnsureTreeShader();
     void ApplyFixedFunction(int group);
     bool UnlitEffect();  // DrawEffect's tests of the draw's state
+    // Stage 0 holds one of GroundLitTextures.
+    bool GroundLit();
     // BuildingLightRange: the stage multiplying the draw by range after its own (the first unused), the material's
     // emissive and D3DRS_AMBIENT at 1 / range, the game's values kept for RestoreHeadroom. False (nothing changed) if
     // it doesn't apply: a pixel shader, the lights adding nothing (an unlit effect: DrawEffect's), an emissive colour
     // from the vertices (it can't be scaled down), no stage reading the lit colour, or no stage free.
-    bool Headroom(float range);
+    // ground (range 2): instead of that stage, stage 0's texture x light becomes texture + light - 0.5, the terrain's
+    // colour + light with the light at half strength, so a coloured light takes as much off a dark texture as off the
+    // ground around it. False unless stage 0 is texture x lit colour.
+    bool Headroom(float range, bool ground);
     void RestoreHeadroom();
 
     struct Saved
@@ -150,7 +159,7 @@ private:
         IDirect3DBaseTexture9* texture;
         D3DMATERIAL9 material;
     } m_headroom = {};
-    bool m_loggedHeadroom = false;
+    bool m_loggedHeadroom = false, m_loggedGroundLit = false;
     std::vector<DWORD> m_slots;  // light slots the game has enabled
     bool m_cycleActive = false;
     float m_cycleSun[3] = {}, m_cycleAmbient[3] = {}, m_cycleDir[3] = {};
@@ -169,6 +178,7 @@ private:
     double m_cyclePos = 0;   // where the cycle is, 0 .. step count
     std::unordered_set<const void*> m_checked;
     TextureList m_effectTextures;  // LitEffectTextures
+    TextureList m_groundLitTextures;  // GroundLitTextures
     DWORD m_maxStages = 0;         // texture stages the device can blend (0 = not asked yet)
     bool m_loggedEffect = false;
     void TerrainLight() const;  // m_terrainBase and the flags below, for the light now

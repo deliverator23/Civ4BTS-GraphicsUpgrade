@@ -1696,7 +1696,8 @@ static int ShadowScene(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS& pp, int fra
 // With rt: drawn into a 64x64 render-target texture instead of the back buffer, as BtS draws the interface's 3D views
 // (the unit in the lower-left corner, the Civilopedia's models); pixel is its centre. With screen: the same into a
 // texture the size of the back buffer, as BtS draws the map behind the Civilopedia.
-static int LightScene(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS& pp, bool ff, bool rt, bool screen, bool tex)
+// With blob (and tex): a 1x1 grey 128 texture, as a unit's blob shadow, is drawn just before the model.
+static int LightScene(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS& pp, bool ff, bool rt, bool screen, bool tex, bool blob)
 {
     rt = rt || screen;
     std::vector<DWORD> code = Tokens(g_litVS, sizeof(g_litVS));
@@ -1739,6 +1740,15 @@ static int LightScene(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS& pp, bool ff,
         CHECK(grey->LockRect(0, &glr, nullptr, 0));
         *static_cast<DWORD*>(glr.pBits) = 0xFF404040;
         grey->UnlockRect(0);
+    }
+    IDirect3DTexture9* blobTexture = nullptr;
+    if (blob)
+    {
+        CHECK(dev->CreateTexture(1, 1, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &blobTexture, nullptr));
+        D3DLOCKED_RECT blr;
+        CHECK(blobTexture->LockRect(0, &blr, nullptr, 0));
+        *static_cast<DWORD*>(blr.pBits) = 0xFF808080;
+        blobTexture->UnlockRect(0);
     }
     DWORD pixel = 0;
     int restored = 1;
@@ -1787,6 +1797,13 @@ static int LightScene(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS& pp, bool ff,
             CHECK(dev->LightEnable(11, TRUE));
             CHECK(dev->SetMaterial(&material));
             CHECK(dev->SetRenderState(D3DRS_AMBIENT, 0x00102030));
+            if (blob)
+            {
+                CHECK(dev->SetTexture(0, blobTexture));
+                CHECK(dev->SetRenderState(D3DRS_LIGHTING, FALSE));
+                CHECK(dev->DrawPrimitiveUP(D3DPT_TRIANGLELIST, 1, triUv, 32));
+                CHECK(dev->SetTexture(0, grey));
+            }
             CHECK(dev->SetRenderState(D3DRS_LIGHTING, TRUE));
             if (tex)
                 CHECK(dev->DrawPrimitiveUP(D3DPT_TRIANGLELIST, 1, triUv, 32));
@@ -1841,6 +1858,8 @@ static int LightScene(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS& pp, bool ff,
     CHECK(dev->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_TEXTURE));
     if (grey)
         grey->Release();
+    if (blobTexture)
+        blobTexture->Release();
     if (viewSurf)
         viewSurf->Release();
     if (view)
@@ -4577,16 +4596,17 @@ int wmain(int argc, wchar_t** argv)
     }
     if (argc > 2 && wcscmp(argv[2], L"light") == 0)
     {
-        // test_proxy <dll> light [ff [tex]] [rt | screen]
-        bool ff = false, rt = false, screen = false, tex = false;
+        // test_proxy <dll> light [ff [tex [blob]]] [rt | screen]
+        bool ff = false, rt = false, screen = false, tex = false, blob = false;
         for (int a = 3; a < argc; ++a)
         {
             ff = ff || wcscmp(argv[a], L"ff") == 0;
             tex = tex || wcscmp(argv[a], L"tex") == 0;
+            blob = blob || wcscmp(argv[a], L"blob") == 0;
             rt = rt || wcscmp(argv[a], L"rt") == 0;
             screen = screen || wcscmp(argv[a], L"screen") == 0;
         }
-        if (LightScene(dev, pp, ff, rt, screen, tex) != 0)
+        if (LightScene(dev, pp, ff, rt, screen, tex, blob) != 0)
             return 1;
         ULONG devRefs = dev->Release();
         ULONG d3dRefs = d3d->Release();

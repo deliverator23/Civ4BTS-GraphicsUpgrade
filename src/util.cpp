@@ -784,6 +784,7 @@ void LoadConfig()
     g_config.moonGlintSet = rgb(L"MoonGlint", g_config.moonGlint);
     // LitEffectTextures: TextureList entries, or "*" for every blended, unlit effect.
     g_config.litEffectTextures = IniString(ini, L"lighting", L"LitEffectTextures", L"");
+    g_config.groundLitTextures = IniString(ini, L"lighting", L"GroundLitTextures", L"");
     std::wstring allEffects = g_config.litEffectTextures;
     allEffects.erase(0, allEffects.find_first_not_of(L" \t"));
     allEffects.erase(allEffects.find_last_not_of(L" \t") + 1);
