@@ -84,9 +84,8 @@ public:
     // because such water also casts no shadow.
     bool WaterSurface();
     // A blended fixed-function draw of one of BtS's painted shadows (building_shadow.dds, *_shadow.dds,
-    // eu_an_shadow.dds, 32dropshadow.dds, caveshadow.dds...): its texture is black wherever it shows, the shadow's shape
-    // in the alpha, and like every world decal it samples the fog of war. Hidden while buildings cast real shadows, and
-    // never a caster itself.
+    // eu_an_shadow.dds, 32dropshadow.dds...): its texture is black, the shadow's shape in the alpha, and like every
+    // world decal it samples the fog of war. Hidden while buildings cast real shadows, and never a caster itself.
     bool PaintedShadow();
     // A texture was just created at this address: drop what was cached about an earlier texture there (BtS frees and
     // creates textures as the view moves, and addresses get reused).

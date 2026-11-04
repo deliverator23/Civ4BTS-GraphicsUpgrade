@@ -961,8 +961,7 @@ static int ShadowScene(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS& pp, int fra
                uiDecal = wcscmp(overlay, L"overlay") == 0, decal = fowDecal || uiDecal, treeShadow = wcscmp(overlay, L"treeshadow") == 0,
                tree = wcscmp(overlay, L"tree") == 0 || treeShadow,
                buildingWater = wcscmp(overlay, L"buildingwater") == 0,
-               building = wcscmp(overlay, L"building") == 0 || wcscmp(overlay, L"buildingbright") == 0 || buildingWater,
-               ridge = wcscmp(overlay, L"ridge") == 0,
+               building = wcscmp(overlay, L"building") == 0 || buildingWater, ridge = wcscmp(overlay, L"ridge") == 0,
                vanish = wcscmp(overlay, L"vanish") == 0, waterOverlay = wcscmp(overlay, L"water") == 0,
                sunk = wcscmp(overlay, L"sunk") == 0, ground50 = wcscmp(overlay, L"ground50") == 0,
                shallow = wcscmp(overlay, L"shallow") == 0,
@@ -1620,19 +1619,7 @@ static int ShadowScene(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS& pp, int fra
             for (int attempt = 0; attempt < 32 && !overlayTex[2]; ++attempt)
             {
                 IDirect3DTexture9* t = nullptr;
-                if (wcscmp(overlay, L"buildingbright") == 0)
-                {
-                    // Like caveshadow.dds: one DXT3 block, the top row see-through and white, the rest black (alpha 8
-                    // of 15). Colours 0 = white, 1 = black.
-                    const BYTE block[16] = {0x00, 0x00, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88,
-                                            0xFF, 0xFF, 0x00, 0x00, 0x00, 0x55, 0x55, 0x55};
-                    D3DLOCKED_RECT locked;
-                    CHECK(dev->CreateTexture(4, 4, 1, 0, D3DFMT_DXT3, D3DPOOL_MANAGED, &t, nullptr));
-                    CHECK(t->LockRect(0, &locked, nullptr, 0));
-                    memcpy(locked.pBits, block, sizeof(block));
-                    CHECK(t->UnlockRect(0));
-                }
-                else if (!solid(0x80000000, &t))
+                if (!solid(0x80000000, &t))
                     return 1;
                 if (t == decoy || attempt == 31)
                     overlayTex[2] = t;
