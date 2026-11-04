@@ -596,8 +596,58 @@ bool Shadows::BlobShadow()
 
 namespace
 {
-// Black texture: every colour in the top level at most 64 of 255 (BtS's painted shadows: <= 8, the courthouse's 49;
-// roads, resources and the oil seep: 246-255). DXT: the two colour endpoints of every block; A8R8G8B8: every texel.
+// The brightest colour channel of the DXT block's texels that show (alpha above 0), or -1 if none does.
+int BrightestShown(const BYTE* block, D3DFORMAT format)
+{
+    const bool dxt1 = format == D3DFMT_DXT1, dxt5 = format == D3DFMT_DXT5;
+    const BYTE* colour = dxt1 ? block : block + 8;
+    const WORD c0 = *reinterpret_cast<const WORD*>(colour), c1 = *reinterpret_cast<const WORD*>(colour + 2);
+    const DWORD indices = *reinterpret_cast<const DWORD*>(colour + 4);
+    int palette[4][3];
+    for (int k = 0; k < 2; ++k)
+    {
+        const WORD c = k ? c1 : c0;  // RGB 565
+        palette[k][0] = ((c >> 11) & 31) * 255 / 31;
+        palette[k][1] = ((c >> 5) & 63) * 255 / 63;
+        palette[k][2] = (c & 31) * 255 / 31;
+    }
+    const bool fourColours = !dxt1 || c0 > c1;
+    for (int k = 0; k < 3; ++k)
+    {
+        palette[2][k] = fourColours ? (2 * palette[0][k] + palette[1][k]) / 3 : (palette[0][k] + palette[1][k]) / 2;
+        palette[3][k] = fourColours ? (palette[0][k] + 2 * palette[1][k]) / 3 : 0;
+    }
+    BYTE alphas[8] = {};
+    uint64_t alphaBits = 0;  // DXT3: 4 bits a texel; DXT5: 3 bits a texel, an index into alphas
+    if (dxt5)
+    {
+        alphas[0] = block[0];
+        alphas[1] = block[1];
+        for (int k = 1; k < 7; ++k)
+            alphas[k + 1] = static_cast<BYTE>(alphas[0] > alphas[1] ? ((7 - k) * alphas[0] + k * alphas[1]) / 7
+                                              : k < 5               ? ((5 - k) * alphas[0] + k * alphas[1]) / 5
+                                              : k == 5              ? 0
+                                                                    : 255);
+        memcpy(&alphaBits, block + 2, 6);
+    }
+    else if (!dxt1)
+        memcpy(&alphaBits, block, 8);
+    int brightest = -1;
+    for (int t = 0; t < 16; ++t)
+    {
+        const int index = (indices >> (2 * t)) & 3;
+        const bool shown = dxt1  ? fourColours || index != 3
+                           : dxt5 ? alphas[(alphaBits >> (3 * t)) & 7] != 0
+                                  : ((alphaBits >> (4 * t)) & 15) != 0;
+        if (shown)
+            brightest = (std::max)(brightest, (std::max)(palette[index][0], (std::max)(palette[index][1], palette[index][2])));
+    }
+    return brightest;
+}
+
+// Black texture: every colour that shows in the top level at most 64 of 255, and some does (BtS's painted shadows: <= 8,
+// the courthouse's 49; roads, resources and the oil seep: 246-255). See-through texels can be any colour:
+// caveshadow.dds's are white in places.
 bool BlackTexture(IDirect3DTexture9* tex)
 {
     D3DSURFACE_DESC d = {};
@@ -611,34 +661,31 @@ bool BlackTexture(IDirect3DTexture9* tex)
     if (FAILED(tex->LockRect(0, &lr, nullptr, D3DLOCK_READONLY)))
         return false;
     const int kMax = 64;
-    bool black = true;
+    int brightest = -1;
     if (argb)
     {
-        for (UINT y = 0; y < d.Height && black; ++y)
+        for (UINT y = 0; y < d.Height && brightest <= kMax; ++y)
         {
             const DWORD* row = reinterpret_cast<const DWORD*>(static_cast<const BYTE*>(lr.pBits) + y * lr.Pitch);
-            for (UINT x = 0; x < d.Width && black; ++x)
-                black = ((row[x] >> 16) & 0xFF) <= kMax && ((row[x] >> 8) & 0xFF) <= kMax && (row[x] & 0xFF) <= kMax;
+            for (UINT x = 0; x < d.Width && brightest <= kMax; ++x)
+                if (row[x] >> 24)
+                    brightest = (std::max)(brightest, static_cast<int>((std::max)({(row[x] >> 16) & 0xFF,
+                                                                                    (row[x] >> 8) & 0xFF, row[x] & 0xFF})));
         }
     }
     else
     {
-        const UINT blockBytes = dxt1 ? 8 : 16, colourAt = dxt1 ? 0 : 8;
+        const UINT blockBytes = dxt1 ? 8 : 16;
         const UINT bw = (std::max)(1u, d.Width / 4), bh = (std::max)(1u, d.Height / 4);
-        for (UINT by = 0; by < bh && black; ++by)
+        for (UINT by = 0; by < bh && brightest <= kMax; ++by)
         {
             const BYTE* row = static_cast<const BYTE*>(lr.pBits) + by * lr.Pitch;
-            for (UINT bx = 0; bx < bw && black; ++bx)
-                for (int k = 0; k < 2 && black; ++k)
-                {
-                    WORD c = *reinterpret_cast<const WORD*>(row + bx * blockBytes + colourAt + k * 2);  // RGB 565
-                    int r = ((c >> 11) & 31) * 255 / 31, g = ((c >> 5) & 63) * 255 / 63, b = (c & 31) * 255 / 31;
-                    black = r <= kMax && g <= kMax && b <= kMax;
-                }
+            for (UINT bx = 0; bx < bw && brightest <= kMax; ++bx)
+                brightest = (std::max)(brightest, BrightestShown(row + bx * blockBytes, d.Format));
         }
     }
     tex->UnlockRect(0);
-    return black;
+    return brightest >= 0 && brightest <= kMax;
 }
 }
 

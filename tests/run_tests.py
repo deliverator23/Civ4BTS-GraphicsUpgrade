@@ -1584,6 +1584,12 @@ def main():
           f"BtS's painted building shadows (black decal textures) hidden while buildings cast real shadows "
           f"({b_on.get('painted')}), drawn otherwise ({b_off.get('painted')}); "
           f"{'at the address of an earlier non-shadow texture' if b_on.get('reused') == 1 else 'texture address not reused this run'}")
+    # caveshadow.dds: black where it shows, its see-through texels white in places.
+    c_on, _ = shadow_run('brightedge', 1, 'buildingbright', '', buildings=1)
+    c_off, _ = shadow_run('brightedge_off', 1, 'buildingbright', '', buildings=0)
+    check(c_on.get('painted') == c_on.get('lit') and abs(c_off.get('painted', 0) - c_off.get('lit', 0) * 7 / 15) <= 3,
+          f"a painted shadow with bright see-through texels is hidden too ({c_on.get('painted')} of {c_on.get('lit')}), "
+          f"drawn while buildings cast none ({c_off.get('painted')} of {c_off.get('lit')})")
     check(abs(b_on.get('footing', 0) - b_on.get('lit', 0)) <= 2,
           f"a building's below-ground foundations don't shade the ground on its sunward side ({b_on.get('footing')})")
     check(abs(b_on.get('ui', 0) - b_on.get('lit', 0) // 2) <= 2,
