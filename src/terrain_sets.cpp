@@ -542,19 +542,23 @@ struct PlotStampRun
     std::vector<int> features;          // PlotStampsNFeatures as feature types, in order (-1: no such feature)
     float units = 0;                    // grid units a pixel value
     std::vector<int> cells;             // by piece: its painting's atlas cell + 1, 255 for none; empty: no paintings
+    int layer = 0;                      // the number of the layer its paintings go on: its own, or kPeakLayer
 };
+const int kPeakLayer = 9;                // PlotStamps<n>OnFeatures: their paintings all go on the peak overlay's draw
 std::vector<PlotStampRun> g_plotStamps;  // the sets that run
+std::vector<int> g_plotStampOnFeature;   // by FeatureTypes: the set (in g_plotStamps) its plots are in, or -1
 // [terrain tiles] PlotStamps<n>Textures: the paintings, the sheets of the layers they go on, and each plot's cell.
 struct StampPaintings
 {
     std::vector<std::vector<uint8_t>> dds;  // a file a cell
     std::vector<PlotStampsSheet> sheets;
     PlotStamps::ColourFile first;           // they all have its size and format
-    std::vector<uint8_t> cells;             // by plot: as PlotStampsCells
+    std::vector<uint8_t> cells;             // two bytes a plot: as PlotStampsCells
     int width = 0, height = 0;
     bool wrapX = false, wrapY = false, allLayers = false;
     float toPlot[3] = {};
-    float detail = 0;                       // the first painted set's TextureDetail
+    float detail = 0;                       // [debug] PlotStampsTest: its layer's
+    bool over = false;
     unsigned version = 0;
     bool testTried = false;
 } g_paintings;
@@ -566,7 +570,7 @@ std::vector<float> g_stampTile;
 bool AnyPlotStamps()
 {
     for (const auto& p : g_config.plotStamps)
-        if (!p.terrains.empty())
+        if (!p.terrains.empty() || !p.onFeatures.empty())
             return true;
     return false;
 }
@@ -605,7 +609,8 @@ std::vector<std::string> InfoNames(GameDll::MemberInt count, GameDll::MemberArg 
 
 // A set's paintings (PlotStamps<n>Textures), into the atlas's next cells; the pieces without one stay with the Mesa's
 // blend. The layer must have a blend sheet of its own: that's how a draw is known to be its layer (Shadows::StampFor).
-void ReadPaintings(PlotStampRun& run, const Config::PlotStampSet& cfg, const std::vector<int>& terrains)
+// layerTerrains: the terrains whose layers they go on (the peak overlay's for a set by feature).
+void ReadPaintings(PlotStampRun& run, const Config::PlotStampSet& cfg, const std::vector<int>& layerTerrains, bool over)
 {
     const char* set = run.name.c_str();
     run.cells.assign(run.pieces.size(), 255);
@@ -627,7 +632,12 @@ void ReadPaintings(PlotStampRun& run, const Config::PlotStampSet& cfg, const std
     };
     std::vector<PlotStampsSheet> sheets;
     const int count = g_dll.numTerrains(gc, nullptr);
-    for (int t : terrains)
+    if (layerTerrains.empty())
+    {
+        Log::Write("terrain tiles: %s: no paintings: this game has no TERRAIN_PEAK layer to put them on", set);
+        return;
+    }
+    for (int t : layerTerrains)
     {
         void* art = artOf(t);
         const char* base = art ? g_dll.baseTexture(art, nullptr) : nullptr;
@@ -641,7 +651,8 @@ void ReadPaintings(PlotStampRun& run, const Config::PlotStampSet& cfg, const std
         {
             void* otherArt = other == t ? nullptr : artOf(other);
             const char* otherBase = otherArt ? g_dll.baseTexture(otherArt, nullptr) : nullptr;
-            if (otherBase && same(base, otherBase) && std::find(terrains.begin(), terrains.end(), other) == terrains.end())
+            if (otherBase && same(base, otherBase) &&
+                std::find(layerTerrains.begin(), layerTerrains.end(), other) == layerTerrains.end())
             {
                 Log::Write("terrain tiles: %s: no paintings: %s shares its blend sheet %s with %s, so its layer can't be "
                            "told from that one's; it needs a sheet of its own", set,
@@ -650,9 +661,9 @@ void ReadPaintings(PlotStampRun& run, const Config::PlotStampSet& cfg, const std
                 return;
             }
         }
-        sheets.push_back({std::wstring(base, base + strlen(base)), false});
+        sheets.push_back({std::wstring(base, base + strlen(base)), false, run.layer, over, cfg.textureDetail});
         if (grid && *grid)
-            sheets.push_back({std::wstring(grid, grid + strlen(grid)), true});
+            sheets.push_back({std::wstring(grid, grid + strlen(grid)), true, run.layer, over, cfg.textureDetail});
     }
     int read = 0;
     for (size_t k = 0; k < run.pieces.size(); ++k)
@@ -681,11 +692,7 @@ void ReadPaintings(PlotStampRun& run, const Config::PlotStampSet& cfg, const std
         ++read;
     }
     if (read)
-    {
-        if (g_paintings.sheets.empty())
-            g_paintings.detail = cfg.textureDetail;
         g_paintings.sheets.insert(g_paintings.sheets.end(), sheets.begin(), sheets.end());
-    }
     Log::Write("terrain tiles: %s: %d of %u paintings, %dx%d %s", set, read, static_cast<unsigned>(run.pieces.size()),
                g_paintings.first.size, g_paintings.first.size, g_paintings.first.dxt5 ? "DXT5" : "A8R8G8B8");
 }
@@ -699,7 +706,7 @@ void PaintingsMap(int width, int height, bool wrapX, bool wrapY)
     g_paintings.height = height;
     g_paintings.wrapX = wrapX;
     g_paintings.wrapY = wrapY;
-    g_paintings.cells.assign(static_cast<size_t>(width) * height, 0);
+    g_paintings.cells.assign(static_cast<size_t>(width) * height * 2, 0);
     const float plot = g_dll.defineFloat ? g_dll.defineFloat(g_dll.getInstance(), nullptr, "PLOT_SIZE") : 180.0f;
     g_paintings.toPlot[0] = 1.0f / plot;
     g_paintings.toPlot[1] = width * 0.5f - 0.5f;  // plot centres evenly spaced round the middle of the map
@@ -738,10 +745,11 @@ bool PlotStampsReady()
         return it == names.end() ? -1 : static_cast<int>(it - names.begin());
     };
     g_plotStampOf.assign(terrainNames.size(), -1);
+    g_plotStampOnFeature.assign(featureNames.size(), -1);
     for (int s = 0; s < 8; ++s)
     {
         const Config::PlotStampSet& cfg = g_config.plotStamps[s];
-        if (cfg.terrains.empty())
+        if (cfg.terrains.empty() && cfg.onFeatures.empty())
             continue;
         PlotStampRun run;
         run.name = "PlotStamps" + std::to_string(s + 1);
@@ -761,11 +769,27 @@ bool PlotStampsReady()
                 listed += (listed.empty() ? "" : ", ") + name;
             }
         }
-        if (terrains.empty())
+        std::vector<int> onFeatures;
+        for (const std::string& name : ListNames(cfg.onFeatures))
         {
-            Log::Write("terrain tiles: %s off: no terrain of %ls to stamp", set, cfg.terrains.c_str());
+            const int f = find(featureNames, name);
+            if (f < 0)
+                Log::Write("terrain tiles: %s: no feature %s", set, name.c_str());
+            else if (g_plotStampOnFeature[f] >= 0 || std::find(onFeatures.begin(), onFeatures.end(), f) != onFeatures.end())
+                Log::Write("terrain tiles: %s: %s is already in an earlier PlotStamps<n>OnFeatures", set, name.c_str());
+            else
+            {
+                onFeatures.push_back(f);
+                listed += (listed.empty() ? "" : ", ") + name;
+            }
+        }
+        if (terrains.empty() && onFeatures.empty())
+        {
+            Log::Write("terrain tiles: %s off: no terrain or feature of %ls%ls to stamp", set, cfg.terrains.c_str(),
+                       cfg.onFeatures.c_str());
             continue;
         }
+        run.layer = onFeatures.empty() ? s + 1 : kPeakLayer;
         if (cfg.folder.empty())
         {
             Log::Write("terrain tiles: %s off: no %sFolder set", set, set);
@@ -823,7 +847,17 @@ bool PlotStampsReady()
             run.features.push_back(f);
         }
         if (cfg.textures)
-            ReadPaintings(run, cfg, terrains);
+        {
+            std::vector<int> layerTerrains = terrains;
+            if (!onFeatures.empty())
+            {
+                const int peak = find(terrainNames, "TERRAIN_PEAK");
+                layerTerrains.clear();
+                if (peak >= 0)
+                    layerTerrains.push_back(peak);
+            }
+            ReadPaintings(run, cfg, layerTerrains, !onFeatures.empty());
+        }
         // Grid units a level: the INI's, else pieces.xml's world units over the grid's.
         const float level = cfg.hasHeight ? cfg.height : xml.heightScale / zScale;
         run.units = level / Jigsaw::kValuePerLevel;
@@ -840,6 +874,8 @@ bool PlotStampsReady()
                    features.empty() ? "none, by plot" : features.c_str(), level, scale, highest * run.units);
         for (int t : terrains)
             g_plotStampOf[t] = static_cast<int>(g_plotStamps.size());
+        for (int f : onFeatures)
+            g_plotStampOnFeature[f] = static_cast<int>(g_plotStamps.size());
         g_plotStamps.push_back(std::move(run));
     }
     return !g_plotStamps.empty();
@@ -866,24 +902,25 @@ int PlotStampsAt(int x, int y, PlotStamps::Stamp out[4])
             px = ((px % width) + width) % width;
         if (wrapY && height > 0)
             py = ((py % height) + height) % height;
-        const int t = g_dll.terrainType(plot, nullptr);
-        const int s = t >= 0 && t < static_cast<int>(g_plotStampOf.size()) ? g_plotStampOf[t] : -1;
-        uint8_t cell = 0;
+        const int feature = g_dll.featureType(plot, nullptr);
+        const int s = PlotStamps::SetFor(feature, g_dll.terrainType(plot, nullptr), g_plotStampOnFeature, g_plotStampOf);
+        uint8_t cell = 0, layer = 0;
         if (s >= 0)
         {
             const PlotStampRun& run = g_plotStamps[s];
-            const int pick = PlotStamps::Pick(g_dll.featureType(plot, nullptr), run.features,
-                                              static_cast<int>(run.pieces.size()), px, py);
+            const int pick = PlotStamps::Pick(feature, run.features, static_cast<int>(run.pieces.size()), px, py);
             out[count++] = {&run.pieces[pick], corners[k][0], corners[k][1], run.units};
             cell = static_cast<uint8_t>(run.cells.empty() ? 255 : run.cells[pick]);
+            layer = static_cast<uint8_t>(run.layer);
         }
         // The same pick as the height: what the terrain shader paints on this plot.
         if (painted && px >= 0 && py >= 0 && px < width && py < height)
         {
-            uint8_t& at = g_paintings.cells[static_cast<size_t>(py) * width + px];
-            if (at != cell)
+            uint8_t* at = &g_paintings.cells[(static_cast<size_t>(py) * width + px) * 2];
+            if (at[0] != cell || at[1] != layer)
             {
-                at = cell;
+                at[0] = cell;
+                at[1] = layer;
                 ++g_paintings.version;
             }
         }
@@ -1716,7 +1753,7 @@ std::wstring PlotStampsHiddenModels()
 {
     std::wstring all;
     for (const auto& p : g_config.plotStamps)
-        if (!p.terrains.empty() && !p.hideModels.empty())
+        if ((!p.terrains.empty() || !p.onFeatures.empty()) && !p.hideModels.empty())
             all += (all.empty() ? L"" : L";") + p.hideModels;
     return all;
 }
@@ -1742,19 +1779,24 @@ std::vector<MixedCoastSheet> MixedCoastSheets()
 
 bool PlotStampsCells(PlotStampsMap& out)
 {
-    // [debug] PlotStampsTest=<folder>;x;y: a 16 x 16 map with a stamp at plot x, y, painted with the last of <folder>\a.dds,
-    // b.dds... (each its own cell of the atlas).
+    // [debug] PlotStampsTest=<folder>;x;y[;layer]: a 16 x 16 map with a stamp at plot x, y, painted with the last of
+    // <folder>\a.dds, b.dds... (each its own cell of the atlas); layer: the plot's, if not the drawn layer's.
     if (!g_config.plotStampsTest.empty() && !g_paintings.testTried)
     {
         g_paintings.testTried = true;
-        std::wstring folder = g_config.plotStampsTest;
-        const size_t b = folder.rfind(L';'), a = b == std::wstring::npos ? b : folder.rfind(L';', b - 1);
+        std::vector<std::wstring> parts;
+        for (size_t from = 0; from <= g_config.plotStampsTest.size();)
+        {
+            const size_t end = (std::min)(g_config.plotStampsTest.find(L';', from), g_config.plotStampsTest.size());
+            parts.push_back(g_config.plotStampsTest.substr(from, end - from));
+            from = end + 1;
+        }
         std::string why = "can't be read";
-        for (wchar_t name = L'a'; a != std::wstring::npos && name <= L'h'; ++name)
+        for (wchar_t name = L'a'; parts.size() >= 3 && name <= L'h'; ++name)
         {
             std::vector<uint8_t> dds;
             PlotStamps::ColourFile colour;
-            if (!ReadFileBytes(folder.substr(0, a) + L"\\" + name + L".dds", dds) ||
+            if (!ReadFileBytes(parts[0] + L"\\" + name + L".dds", dds) ||
                 !PlotStamps::ParseColourDds(dds, colour, why))
                 break;
             g_paintings.first.size = colour.size;
@@ -1764,8 +1806,10 @@ bool PlotStampsCells(PlotStampsMap& out)
         if (!g_paintings.dds.empty())
         {
             PaintingsMap(16, 16, false, false);
-            g_paintings.cells[_wtoi(folder.c_str() + b + 1) * 16 + _wtoi(folder.c_str() + a + 1)] =
-                static_cast<uint8_t>(g_paintings.dds.size());
+            g_paintings.over = !g_config.plotStamps[0].onFeatures.empty();
+            uint8_t* at = &g_paintings.cells[(_wtoi(parts[2].c_str()) * 16 + _wtoi(parts[1].c_str())) * 2];
+            at[0] = static_cast<uint8_t>(g_paintings.dds.size());
+            at[1] = static_cast<uint8_t>(parts.size() > 3 ? _wtoi(parts[3].c_str()) : 1);
             g_paintings.allLayers = true;
             g_paintings.detail = g_config.plotStamps[0].textureDetail;
         }
@@ -1783,6 +1827,7 @@ bool PlotStampsCells(PlotStampsMap& out)
     out.version = g_paintings.version;
     memcpy(out.toPlot, g_paintings.toPlot, sizeof(out.toPlot));
     out.detail = g_paintings.detail;
+    out.over = g_paintings.over;
     return true;
 }
 

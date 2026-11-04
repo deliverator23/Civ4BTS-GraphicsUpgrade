@@ -4260,6 +4260,12 @@ static int PlotStampsTest(const wchar_t* folder)
                        pf.plots.size() != 1 ? "not a one-plot layout" : pwhy.c_str());
         }
     }
+    // A plot's set: by its feature first, then by its terrain.
+    const std::vector<int> setByFeature = {-1, -1, 1}, setByTerrain = {0, -1};
+    const bool setFor = SetFor(2, 0, setByFeature, setByTerrain) == 1 && SetFor(0, 0, setByFeature, setByTerrain) == 0 &&
+                        SetFor(-1, 0, setByFeature, setByTerrain) == 0 && SetFor(-1, 1, setByFeature, setByTerrain) == -1 &&
+                        SetFor(9, 9, setByFeature, setByTerrain) == -1;
+    printf("PLOTSTAMPS setfor=%d\n", setFor);
     // Paintings: DDS files read (DXT5 or A8R8G8B8, square, a power of two, mips down to 4 texels), others refused; the
     // atlas's layout; each cell's level copied to its place.
     auto dds = [](int w, int h, bool dxt5, int mips, uint8_t fill) {

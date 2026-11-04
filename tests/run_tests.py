@@ -462,6 +462,7 @@ def main():
           'the four squares round the plot each get their part of the stamp (sampled where the engine lays each '
           'height, 64 and 16 per plot), its full height in grid units')
     check(ps.get('combine') == 1, 'stamps on neighbouring plots combine by max')
+    check('PLOTSTAMPS setfor=1' in pout, "a plot's stamp goes by its feature first, then by its terrain")
     mc = re.search(r'^PLOTSTAMPS colourfiles=(\d) colourrefused=(\d) atlas=(\d) cells=(\d) (.*)$', pout, re.M)
     check(mc and mc.group(1) == '1' and mc.group(2) == '1',
           f"a stamp's painting read: DXT5 or A8R8G8B8, square, a power of two, mips to 4 texels; others refused "
@@ -1376,15 +1377,32 @@ def main():
     with open(os.path.join(stamp_dir, 'a.dds'), 'wb') as f:
         f.write(dds_a8r8g8b8(64, lambda u, v: (0x60, 0x60, 0x60, 255) if u > 0.5 and v > 0.5 else (0x20, 0x20, 0x20, 0)))
 
-    def stamp_at(x, y, detail=1, ramp=False):
-        v, slog = shadow_run(f'stamp_{x}_{y}', 0, 'slope', turned + f'[debug]\nPlotStampsTest={stamp_dir};{x};{y}\n'
-                             f'[terrain tiles]\nPlotStamps1TextureDetail={detail}\n', sheet='L', ramp=ramp)
+    def stamp_at(x, y, detail=1, ramp=False, over=False, layer=''):
+        v, slog = shadow_run(f'stamp_{x}_{y}', 0, 'slope', turned + f'[debug]\nPlotStampsTest={stamp_dir};{x};{y}{layer}\n'
+                             f'[terrain tiles]\nPlotStamps1TextureDetail={detail}\n' +
+                             ('PlotStamps1OnFeatures=FEATURE_TEST\n' if over else ''), sheet='L', ramp=ramp)
         return v, slog
 
     s_se, s_log = stamp_at(8, 8)   # the point is south-east of this plot: in the painting's opaque quarter
     s_n, _ = stamp_at(8, 7)        # north-east of this one
     s_w, _ = stamp_at(9, 8)        # south-west of this one
     s_far, _ = stamp_at(1, 1)      # not at the square's corners
+    # PlotStamps<n>OnFeatures: over the layer. Where the painting's alpha is 0 the layer is exactly as it was.
+    o_se, _ = stamp_at(8, 8, over=True)
+    o_n, _ = stamp_at(8, 7, over=True)
+    o_ramp_n, _ = stamp_at(8, 7, detail=0, ramp=True, over=True)
+    o_ramp_far, _ = stamp_at(1, 1, detail=0, ramp=True, over=True)
+    # A plot stamped for another layer isn't painted on this one, opaque as it is at the point.
+    o_other, _ = stamp_at(8, 8, over=True, layer=';3')
+    s_other, _ = stamp_at(8, 8, layer=';3')
+    check(abs(o_se.get('lit', 0) - hi) <= 2 and abs(o_n.get('lit', 0) - lo) <= 1 and
+          o_ramp_n.get('lit') == o_ramp_far.get('lit') and o_se['released'],
+          f"a painting over the layer (a set by feature): shows where its alpha does (blue {o_se.get('lit')}; {hi}), and "
+          f"where its alpha is 0 the layer's as it was, its detail too (blue {o_n.get('lit')}; {lo}. "
+          f"{o_ramp_n.get('lit')}; {o_ramp_far.get('lit')})")
+    check(abs(o_other.get('lit', 0) - lo) <= 1 and abs(s_other.get('lit', 0) - lo) <= 1,
+          f"a layer paints only its own stamps: another layer's on the same square leaves it as it was (blue "
+          f"{o_other.get('lit')}, {s_other.get('lit')}; {lo})")
     check('plot stamps\' paintings: 1 in a 64x64 atlas, 5 levels' in s_log and s_se.get('restored') == 1 and
           s_se['released'], 'the paintings made into an atlas, the game\'s state restored after, nothing left behind')
     check(abs(s_se.get('lit', 0) - hi) <= 2,
@@ -1416,6 +1434,16 @@ def main():
         with open(os.path.join(stamp_dir, name + '.dds'), 'wb') as f:
             f.write(dds_a8r8g8b8(64, lambda u, v, g=grey: (g, g, g, 255)))
     s_six, s6log = stamp_at(8, 8)
+    # half alpha over the layer: halfway, the layer showing through
+    half_dir = os.path.join(TEST, 'stamp_half')
+    os.makedirs(half_dir, exist_ok=True)
+    with open(os.path.join(half_dir, 'a.dds'), 'wb') as f:
+        f.write(dds_a8r8g8b8(64, lambda u, v: (0x60, 0x60, 0x60, 128)))
+    stamp_dir, keep_dir = half_dir, stamp_dir
+    o_half, _ = stamp_at(8, 8, over=True)
+    stamp_dir = keep_dir
+    check(abs(o_half.get('lit', 0) - (lo + hi) / 2) <= 4,
+          f"a part-see-through painting mixes with the layer under it (blue {o_half.get('lit')}; {lo} to {hi})")
     check('paintings: 6 in a 256x128 atlas' in s6log and abs(s_six.get('lit', 0) - hi) <= 2,
           f"each plot its own painting: the sixth of six read from its place in the atlas (blue {s_six.get('lit')}; "
           f"its grey {hi}, the others {lo})")

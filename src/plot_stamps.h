@@ -24,6 +24,11 @@
 //   are copied into the cells of one atlas here, and which cell a plot has goes to it per plot, from the same pick as the
 //   heights.
 //
+// - By feature ([terrain tiles] PlotStampsNOnFeatures): a set can go by a plot's feature instead of its terrain (Dune
+//   Wars' Caves, on any terrain). Heights as above. Such a plot has no layer of its own, so its painting goes on the peak
+//   overlay's draw (it needs a peak plot), over that layer: where the painting's alpha is 0 the layer draws as it would.
+//   Each plot says which layer's its stamp is, so a draw paints only its own: two sets can share a square.
+//
 // Pure logic here (no Windows calls), so the test harness can run it; terrain_sets.cpp has the hook.
 #pragma once
 
@@ -125,6 +130,15 @@ inline void CopyCell(const ColourFile& f, const AtlasLayout& a, int cell, int le
     for (int r = 0; r < perRow; ++r)
         memcpy(dest + static_cast<size_t>(row * perRow + r) * pitch + static_cast<size_t>(col) * perRow * unit,
                from + static_cast<size_t>(r) * perRow * unit, static_cast<size_t>(perRow) * unit);
+}
+
+// Which set a plot is stamped by (an index, or -1): by its feature first, then by its terrain.
+inline int SetFor(int feature, int terrain, const std::vector<int>& byFeature, const std::vector<int>& byTerrain)
+{
+    const int f = feature >= 0 && feature < static_cast<int>(byFeature.size()) ? byFeature[feature] : -1;
+    if (f >= 0)
+        return f;
+    return terrain >= 0 && terrain < static_cast<int>(byTerrain.size()) ? byTerrain[terrain] : -1;
 }
 
 // The piece a plot takes: the one at its feature's place in `features` (the INI's PlotStampsNFeatures as feature

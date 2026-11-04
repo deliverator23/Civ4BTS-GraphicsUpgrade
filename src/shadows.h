@@ -194,19 +194,21 @@ private:
     bool MixFor(IDirect3DBaseTexture9* sheet);  // sets m_mix (and the texture) for a terrain draw with this sheet
     // [terrain tiles] PlotStamps<n>Textures: the paintings' atlas (s11), each plot's cell (s10, PlotStampsCells, uploaded
     // when its version changes), which blend and grid sheets are the stamped layers' (by content), and this draw's
-    // c28-c30 (c28.w = 1: painted).
+    // c28-c31 (c28.w = 1: painted).
     struct StampSheet
     {
         TextureList match;
-        bool grid = false;
+        bool grid = false, over = false;
+        int layer = 0;
+        float detail = 0;
     };
     IDirect3DTexture9 *m_stampAtlas = nullptr, *m_stampPlots = nullptr;
     unsigned m_stampVersion = 0;
     int m_stampSize[2] = {}, m_stampCells[2] = {};
     std::vector<StampSheet> m_stampSheets;
     bool m_stampLoaded = false;
-    std::unordered_map<const void*, int> m_stampSheetOf;  // by sheet: 0 not a stamped layer's, 1 its blend, 2 its grid
-    float m_stamp[12] = {};
+    std::unordered_map<const void*, int> m_stampSheetOf;  // by sheet: index in m_stampSheets + 1, 0 none, -1 allLayers
+    float m_stamp[16] = {};
     bool StampAtlas();                            // made once from the paintings; false if it can't be
     bool StampFor(IDirect3DBaseTexture9* sheet);  // sets m_stamp (and the textures) for a terrain draw with this sheet
     bool m_loggedClamp = false;

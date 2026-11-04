@@ -72,18 +72,20 @@ struct Config
     // listing its terrain. PlotStampsNTextures=1: the terrain shader paints each piece's <piece>_colour.dds on the layer
     // of those terrains, which needs a blend sheet (and grid sheet) of their own (plot_stamps.h).
     // PlotStampsNTextureDetail: how much of the terrain's detail texture and its bumps shows on a painting (0 none, 1 all;
-    // one value for all the paintings: the first set's that has them).
+    // a value a layer). PlotStampsNOnFeatures=<feature types>, in place of Terrains: every plot with one of those features
+    // gets a stamp, whatever its terrain; paintings go over the peak overlay's layer, which such a plot needs.
     struct PlotStampSet
     {
-        std::wstring terrains, folder, features, hideModels;
+        std::wstring terrains, folder, features, hideModels, onFeatures;
         bool hasHeight = false;
         float height = 1.0f;
         bool textures = false;
         float textureDetail = 0;
     };
     PlotStampSet plotStamps[8];
-    // [debug] PlotStampsTest=<folder>;x;y (the test harness; there's no map there): a 16 x 16 map with one stamp at plot
-    // x, y, <folder>\a.dds its painting, and every terrain draw its layer.
+    // [debug] PlotStampsTest=<folder>;x;y[;layer] (the test harness; there's no map there): a 16 x 16 map with one stamp
+    // at plot x, y, the last of <folder>\a.dds, b.dds... its painting, and every terrain draw its layer (over it if
+    // PlotStamps1OnFeatures is set; a plot of another layer number isn't painted there).
     std::wstring plotStampsTest;
     int tileSets = 1;
     std::wstring tileSetTerrains[8];
@@ -291,10 +293,12 @@ struct MixedCoastSheet
 };
 std::vector<MixedCoastSheet> MixedCoastSheets();
 // [terrain tiles] PlotStamps<n>Textures (terrain_sets.cpp): which painting each plot has, for the terrain shader (false
-// when none): a byte a plot (0: no stamp; 255: a stamp with no painting; else the atlas cell + 1), the map's size and wrap,
-// a version that changes with the data, and world xy -> plot coordinates (x = scale, yz = offset; plot centres at whole
-// numbers). The paintings' DDS files, one a cell, and the blend and grid sheets of the layers they're painted on (paths
-// under Assets, or a full path). allLayers: [debug] PlotStampsTest, every terrain draw.
+// when none): two bytes a plot (the first 0: no stamp, 255: a stamp with no painting, else the atlas cell + 1; the second
+// the layer it's painted on, PlotStampsSheet::layer), the map's size and wrap, a version that changes with the data, and
+// world xy -> plot coordinates (x = scale, yz = offset; plot centres at whole numbers). The paintings' DDS files, one a
+// cell, and the blend and grid sheets of the layers they're painted on (paths under Assets, or a full path), each with
+// its layer number, whether paintings go over the layer's own blend (else they replace it where any shows), and how much
+// detail texture shows on them. allLayers: [debug] PlotStampsTest, every terrain draw, as over and detail say.
 struct PlotStampsMap
 {
     const uint8_t* cells = nullptr;
@@ -302,13 +306,17 @@ struct PlotStampsMap
     bool wrapX = false, wrapY = false, allLayers = false;
     unsigned version = 0;
     float toPlot[3] = {};
-    float detail = 0;  // PlotStamps<n>TextureDetail
+    float detail = 0;
+    bool over = false;
 };
 bool PlotStampsCells(PlotStampsMap& out);
 struct PlotStampsSheet
 {
     std::wstring path;
     bool grid = false;
+    int layer = 0;
+    bool over = false;
+    float detail = 0;
 };
 const std::vector<std::vector<uint8_t>>& PlotStampsPaintings();
 std::vector<PlotStampsSheet> PlotStampsSheets();
