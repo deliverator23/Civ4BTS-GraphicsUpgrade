@@ -543,10 +543,14 @@ struct PlotStampRun
     float units = 0;                    // grid units a pixel value
     std::vector<int> cells;             // by piece: its painting's atlas cell + 1, 255 for none; empty: no paintings
     int layer = 0;                      // the number of the layer its paintings go on: its own, or kPeakLayer
+    bool flatten = false;               // PlotStampsNFlatten: its pieces are weights
 };
 const int kPeakLayer = 9;                // PlotStamps<n>OnFeatures: their paintings all go on the peak overlay's draw
 std::vector<PlotStampRun> g_plotStamps;  // the sets that run
 std::vector<int> g_plotStampOnFeature;   // by FeatureTypes: the set (in g_plotStamps) its plots are in, or -1
+bool g_flattenHooked = false;            // PlotStamps<n>Flatten: the peak stamp's calls are wrapped
+unsigned g_flattenSquares = 0;
+bool g_flattenEdgeLogged = false;
 // [terrain tiles] PlotStamps<n>Textures: the paintings, the sheets of the layers they go on, and each plot's cell.
 struct StampPaintings
 {
@@ -756,6 +760,13 @@ bool PlotStampsReady()
         PlotStampRun run;
         run.name = "PlotStamps" + std::to_string(s + 1);
         const char* set = run.name.c_str();
+        run.flatten = cfg.flatten;
+        if (cfg.flatten && !g_flattenHooked)
+        {
+            // Its pieces aren't heights: without the hook they do nothing, rather than go in as other stamps do.
+            Log::Write("terrain tiles: %s off: Flatten needs the peak stamp's calls, not hooked", set);
+            continue;
+        }
         std::vector<int> terrains;
         std::string listed;
         for (const std::string& name : ListNames(cfg.terrains))
@@ -848,7 +859,9 @@ bool PlotStampsReady()
                 features += std::string(features.empty() ? "" : ", ") + name + " " + run.pieces[k].name;
             run.features.push_back(f);
         }
-        if (cfg.textures)
+        if (cfg.textures && cfg.flatten)
+            Log::Write("terrain tiles: %s: Textures doesn't apply with Flatten", set);
+        if (cfg.textures && !cfg.flatten)
         {
             std::vector<int> layerTerrains = terrains;
             if (!onFeatures.empty())
@@ -862,13 +875,19 @@ bool PlotStampsReady()
         }
         // Grid units a level: the INI's, else pieces.xml's world units over the grid's.
         const float level = cfg.hasHeight ? cfg.height : xml.heightScale / zScale;
-        run.units = level / Jigsaw::kValuePerLevel;
+        run.units = cfg.flatten ? PlotStamps::kFlattenUnits : level / Jigsaw::kValuePerLevel;
         char scale[96];
         if (cfg.hasHeight)
             snprintf(scale, sizeof(scale), "the INI's");
         else
             snprintf(scale, sizeof(scale), "pieces.xml's %.2f world units over fZScale %.2f%s", xml.heightScale, zScale,
                      zRead ? "" : " (assumed)");
+        if (cfg.flatten)
+            Log::Write("terrain tiles: %s: %s; %u one-plot pieces from %ls%s; by feature: %s; they level the ground",
+                       set, listed.c_str(), static_cast<unsigned>(run.pieces.size()), from.c_str(),
+                       left ? (", " + std::to_string(left) + " left out").c_str() : "",
+                       features.empty() ? "none, by plot" : features.c_str());
+        else
         Log::Write("terrain tiles: %s: %s; %u one-plot pieces from %ls%s; by feature: %s; %.3f grid units a level "
                    "(%s), the tallest %.1f grid units",
                    set, listed.c_str(), static_cast<unsigned>(run.pieces.size()), from.c_str(),
@@ -883,8 +902,8 @@ bool PlotStampsReady()
     return !g_plotStamps.empty();
 }
 
-// The stamps on square (x, y)'s corner plots, as the plots are now; how many.
-int PlotStampsAt(int x, int y, PlotStamps::Stamp out[4])
+// The stamps on square (x, y)'s corner plots, as the plots are now, the Flatten sets' or the others'; how many.
+int PlotStampsAt(int x, int y, PlotStamps::Stamp out[4], bool flatten = false)
 {
     void* map = g_dll.Map();
     const int width = g_dll.width(map, nullptr), height = g_dll.height(map, nullptr);
@@ -911,9 +930,13 @@ int PlotStampsAt(int x, int y, PlotStamps::Stamp out[4])
         {
             const PlotStampRun& run = g_plotStamps[s];
             const int pick = PlotStamps::Pick(feature, run.features, static_cast<int>(run.pieces.size()), px, py);
-            out[count++] = {&run.pieces[pick], corners[k][0], corners[k][1], run.units};
-            cell = static_cast<uint8_t>(run.cells.empty() ? 255 : run.cells[pick]);
-            layer = static_cast<uint8_t>(run.layer);
+            if (run.flatten == flatten)
+                out[count++] = {&run.pieces[pick], corners[k][0], corners[k][1], run.units};
+            if (!run.flatten)  // to the terrain shader a seat is no stamp
+            {
+                cell = static_cast<uint8_t>(run.cells.empty() ? 255 : run.cells[pick]);
+                layer = static_cast<uint8_t>(run.layer);
+            }
         }
         // The same pick as the height: what the terrain shader paints on this plot.
         if (painted && px >= 0 && py >= 0 && px < width && py < height)
@@ -1022,6 +1045,54 @@ extern "C" void __stdcall JigsawBaseAdd(void* grid, int x, int y)
     }
     else
         ++(any ? g_jigsawMisfit : g_stampMisfit);
+}
+
+// After the peak stamp, the last of a square's stamps: PlotStamps<n>Flatten, each corner's seat in turn.
+extern "C" void __stdcall PlotFlattenSquare(void* grid, int x, int y)
+{
+    PlotStamps::Stamp stamps[4];
+    const int count = PlotStampsReady() ? PlotStampsAt(x, y, stamps, true) : 0;
+    if (!count)
+        return;
+    Jigsaw::GridView g;
+    if (!Jigsaw::ReadGrid(grid, g) || g.cellX > 256)
+    {
+        ++g_stampMisfit;
+        return;
+    }
+    const int n = g.cellX, gridHeight = g_dll.height(g_dll.Map(), nullptr);
+    g_stampTile.resize(static_cast<size_t>(n) * n);
+    bool any = false;
+    for (int k = 0; k < count; ++k)
+    {
+        PlotStamps::Tile(&stamps[k], 1, x, y, gridHeight, n, g_stampTile.data());
+        if (!g_flattenEdgeLogged && PlotStamps::OnEdge(g_stampTile.data(), n))
+        {
+            g_flattenEdgeLogged = true;
+            Log::Write("terrain tiles: warning: Flatten piece %s has weight on the edge of square %d, %d, so a step there",
+                       stamps[k].piece->name.c_str(), x, y);
+        }
+        if (PlotStamps::Flatten(g.cells, g.rowBytes, g.rows, x * n, y * n, n, g_stampTile.data()))
+            any = true;
+    }
+    g_flattenSquares += any ? 1 : 0;
+}
+
+extern "C" uint32_t g_flattenNextPeak = 0;  // what the peak stamp's calls called (PlotStamps::WrapCalls)
+
+// The peak stamp's calls come here: (landscape, x) on the stack, its RET 8 pops them, the mask in EAX and y in EBX.
+extern "C" __declspec(naked) void PlotFlattenThunk()
+{
+    __asm {
+        push dword ptr [esp + 8]    // x
+        push dword ptr [esp + 8]    // landscape
+        call dword ptr [g_flattenNextPeak]
+        push ebx                    // y
+        push dword ptr [esp + 0xc]  // x
+        push dword ptr [esp + 0xc]  // landscape
+        call PlotFlattenSquare
+        ret 8
+    }
 }
 
 extern "C" uint32_t g_jigsawBaseResume = 0;  // FUN_00478a90 + 6, after the two instructions the hook took
@@ -1578,6 +1649,65 @@ extern "C" __declspec(naked) void LandBlendThunk()
     }
 }
 
+void ApplyPlotFlatten()
+{
+    bool any = false;
+    for (const auto& p : g_config.plotStamps)
+        any = any || (p.flatten && !(p.terrains.empty() && p.onFeatures.empty()));
+    if (!any)
+        return;
+    wchar_t exe[MAX_PATH] = {};
+    GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    std::wstring name = exe;
+    name = name.substr(name.find_last_of(L"\\/") + 1);
+    for (auto& c : name)
+        c = static_cast<wchar_t>(towlower(c));
+    if (name != L"civ4beyondsword.exe")
+    {
+        Log::Write("terrain tiles: Flatten: not applied: %ls isn't Civ4BeyondSword.exe", name.c_str());
+        return;
+    }
+    const uint8_t* base = reinterpret_cast<const uint8_t*>(GetModuleHandleW(nullptr));
+    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS32*>(base + reinterpret_cast<const IMAGE_DOS_HEADER*>(base)->e_lfanew);
+    const Exe::Layout* exeLayout = reinterpret_cast<uint32_t>(base) == 0x400000
+                                       ? Exe::Identify(base, nt->OptionalHeader.SizeOfImage)
+                                       : nullptr;
+    if (!exeLayout)
+    {
+        Log::Write("terrain tiles: Flatten: not applied: not a BtS 3.1.9.0 build it knows, at 0x400000 (exe timestamp "
+                   "0x%08lx)", static_cast<unsigned long>(nt->FileHeader.TimeDateStamp));
+        return;
+    }
+    std::vector<TerrainPatch::Site> sites;
+    std::string why;
+    const uint32_t at = reinterpret_cast<uint32_t>(base);
+    if (PlotStamps::WrapCalls(base, nt->OptionalHeader.SizeOfImage, at, *exeLayout,
+                              reinterpret_cast<uint32_t>(&PlotFlattenThunk), sites, g_flattenNextPeak, why))
+    {
+        size_t written = 0;
+        why = TerrainPatch::ApplySites(base, nt->OptionalHeader.SizeOfImage, sites,
+                                       [&](uint32_t rva, const uint8_t* bytes, size_t count) {
+            void* to = const_cast<uint8_t*>(base) + rva;
+            DWORD old = 0;
+            if (VirtualProtect(to, count, PAGE_EXECUTE_READWRITE, &old))
+            {
+                memcpy(to, bytes, count);
+                VirtualProtect(to, count, old, &old);
+                FlushInstructionCache(GetCurrentProcess(), to, count);
+                ++written;
+            }
+        });
+        g_flattenHooked = why.empty() && written == sites.size();
+        if (g_flattenHooked)
+            Log::Write("terrain tiles: Flatten: the peak stamp's %u calls wrapped (%s build)%s",
+                       static_cast<unsigned>(sites.size()), exeLayout->name,
+                       g_flattenNextPeak == at + exeLayout->peakStamp ? "" : ", round another patch's wrapper");
+    }
+    if (!g_flattenHooked)
+        Log::Write("terrain tiles: Flatten: not applied: %s (%s build)", why.empty() ? "a write failed" : why.c_str(),
+                   exeLayout->name);
+}
+
 void ApplyLandBlends()
 {
     // StandardBlendOnLand1..8 (the full form) first: they win over the short form's standard layout for the same
@@ -1686,7 +1816,7 @@ std::string TileSetsSummary()
     total += g_folded[0] + g_folded[1];
     total += g_hillCut + g_hillStock + g_hillRefits + g_hillUpdates;
     total += g_jigsawSquares + g_jigsawAdded + g_jigsawMisfit + g_jigsawDisagree + g_jigsawFits + g_jigsawUpdates;
-    total += g_stampSquares + g_stampClipped + g_stampMisfit;
+    total += g_stampSquares + g_stampClipped + g_stampMisfit + g_flattenSquares;
     if (total == g_logged)
         return "";
     g_logged = total;
@@ -1735,6 +1865,8 @@ std::string TileSetsSummary()
     if (g_stampSquares || g_stampMisfit)
         s += "; plot stamps: " + std::to_string(g_stampSquares) + " squares, " + std::to_string(g_stampClipped) +
              " samples clipped at 255 (no headroom), " + std::to_string(g_stampMisfit) + " not fitting the grid";
+    if (g_flattenSquares)
+        s += "; flattened: " + std::to_string(g_flattenSquares) + " squares";
     if (!g_setFlats.empty() && !g_setFlatsLogged)
     {
         g_setFlatsLogged = g_setFlats.size() >= 12;

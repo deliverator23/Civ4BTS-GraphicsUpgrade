@@ -222,6 +222,21 @@ the plain texture times the light:
 GroundLitTextures=Art\Terrain\Features\Rocks\rock_base.dds
 ```
 
+**Level ground under a model (experimental).** A model with `ContourGeometry` has each vertex laid at the ground's height
+plus its own, so on uneven ground it shears. A plot stamp set with `Flatten=1` levels a seat for it instead of adding
+height: its pieces (`pieces.xml` and 16-bit greyscale heightmaps, in a one-plot layout, two plots across and centred on the
+plot) are weights, from 0 to 1 over 0 to 65535. Where the weight is 1 the ground goes to one level, the mean height there,
+and the ground around it is drawn towards that level by the weight. The weight must be 0 before it reaches the edge of a
+square, a line that runs through each plot centre, so a seat lies wholly inside one square; the log warns if not. A plot
+takes one set, by feature first, so a plot in this set gets no stamp from a set that lists its terrain:
+
+```ini
+[terrain tiles]
+PlotStamps1OnFeatures=FEATURE_CAVE
+PlotStamps1Folder=Art\Terrain\Stamps\CaveSeats
+PlotStamps1Flatten=1
+```
+
 **Buildings and resources under a bright light.** BtS lights buildings, improvements and resources in a way that
 stops at the colour of their textures. When the sun and the ambient add up to more than that, as they do in BtS's own
 light and in bright day–night cycles, whatever faces the sky shows its texture's colour whatever the time of day,

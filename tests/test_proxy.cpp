@@ -4335,6 +4335,129 @@ static int PlotStampsTest(const wchar_t* folder)
            copied, w1.c_str(), w2.c_str(), w3.c_str(), w4.c_str());
     printf("PLOTSTAMPS pick=%d orient=%d exact=%d reached=%d squares=%d peak=%d combine=%d clip=%d\n", pick, orient,
            exact, reached, inSquares, peak, combine, clip);
+
+    // PlotStamps<n>Flatten: a piece of weights, as Dune Wars' Cave seats, a round seat to the south-east and south-west of
+    // the plot's centre, each 1 over 0.08 plots and 0 by 0.16. Square (6, H - 5) has plot (5, 5)'s east seat and plot
+    // (6, 5)'s west one. Its ground slopes east and a little south, so each seat has its own level.
+    std::vector<uint16_t> seatPx(static_cast<size_t>(w) * w, 0);
+    for (int r = 0; r < w; ++r)
+        for (int c = 0; c < w; ++c)
+        {
+            const float X = -1 + c / 64.0f, Y = 1 - (r + 1) / 64.0f;
+            const float seatsAt[2][2] = {{0.25f, -0.37f}, {-0.24f, -0.38f}};
+            float most = 0;
+            for (const auto& at : seatsAt)
+            {
+                const float d = std::hypot(X - at[0], Y - at[1]);
+                most = (std::max)(most, d < 0.08f ? 1.0f : d < 0.16f ? (0.16f - d) / 0.08f : 0.0f);
+            }
+            seatPx[static_cast<size_t>(r) * w + c] = static_cast<uint16_t>(most * 65535 + 0.5f);
+        }
+    Jigsaw::Piece seats;
+    Jigsaw::MakePiece("seats.dds", {{0, 0}}, w, w, std::move(seatPx), seats, why);
+    const int fn = 64, fgrid = 128, fo = 32;
+    auto ground = [&]() {  // the square as the engine rebuilds it
+        std::vector<uint8_t> g(static_cast<size_t>(fgrid) * fgrid, 7);
+        for (int j = 0; j < fn; ++j)
+            for (int i = 0; i < fn; ++i)
+                g[static_cast<size_t>(fo + j) * fgrid + fo + i] = static_cast<uint8_t>(100 + i * 60 / fn + j * 10 / fn);
+        return g;
+    };
+    auto height = [&](const std::vector<uint8_t>& g, int i, int j) { return static_cast<int>(g[static_cast<size_t>(fo + j) * fgrid + fo + i]); };
+    const Stamp seatEast = {&seats, 5, 5, kFlattenUnits}, seatWest = {&seats, 6, 5, kFlattenUnits};
+    std::vector<float> eastW(fn * fn), westW(fn * fn);
+    Tile(&seatEast, 1, 6, H - 5, H, fn, eastW.data());
+    Tile(&seatWest, 1, 6, H - 5, H, fn, westW.data());
+    const std::vector<uint8_t> built = ground();
+    double coreSum = 0;
+    int coreCount = 0, ramp = 0;
+    for (int k = 0; k < fn * fn; ++k)
+    {
+        coreSum += eastW[k] >= kFlattenCore ? height(built, k % fn, k / fn) : 0;
+        coreCount += eastW[k] >= kFlattenCore ? 1 : 0;
+        ramp += eastW[k] > 0.2f && eastW[k] < 0.8f ? 1 : 0;
+    }
+    std::vector<uint8_t> flat = built;
+    int eastLevel = -1, westLevel = -1;
+    const bool flatDone = Flatten(flat.data(), fgrid, fgrid, fo, fo, fn, eastW.data(), &eastLevel);
+    const bool fromCore = flatDone && coreCount > 20 && eastLevel == std::lround(coreSum / coreCount);
+    bool byWeight = ramp > 20, seatFlat = true;
+    for (int k = 0; k < fn * fn; ++k)
+    {
+        const int was = height(built, k % fn, k / fn), now = height(flat, k % fn, k / fn);
+        byWeight = byWeight && now == std::lround(was + (eastLevel - was) * eastW[k]);
+        seatFlat = seatFlat && (eastW[k] < 1 || now == eastLevel);
+    }
+    bool outside = true;  // nothing beyond the tile
+    for (int k = 0; k < fgrid * fgrid; ++k)
+        outside = outside && ((k / fgrid >= fo && k / fgrid < fo + fn && k % fgrid >= fo && k % fgrid < fo + fn) ||
+                              flat[k] == 7);
+    // the engine rebuilds the square and it's flattened again: the same, not flattened on what was flattened before
+    std::vector<uint8_t> again = ground();
+    int againLevel = -1;
+    Flatten(again.data(), fgrid, fgrid, fo, fo, fn, eastW.data(), &againLevel);
+    const bool repeat = again == flat && againLevel == eastLevel;
+    // the second corner's seat in turn, on its own level; the first's stays, and so does what neither touches
+    const bool flatTwo = Flatten(flat.data(), fgrid, fgrid, fo, fo, fn, westW.data(), &westLevel);
+    bool twoSeats = flatTwo && westLevel > eastLevel + 15;
+    for (int k = 0; k < fn * fn; ++k)
+    {
+        const int was = height(built, k % fn, k / fn), now = height(flat, k % fn, k / fn);
+        twoSeats = twoSeats && (eastW[k] < 1 || now == eastLevel) && (westW[k] < 1 || now == westLevel) &&
+              (eastW[k] > 0 || westW[k] > 0 || now == was);
+    }
+    // nothing at the full weight: the mean of all it touches, drawn half way; no weight: left alone
+    std::vector<float> half(fn * fn, 0.0f), none(fn * fn, 0.0f);
+    half[fn * 20 + 20] = half[fn * 20 + 21] = 0.5f;
+    std::vector<uint8_t> partial = {};
+    for (int k = 0; k < fn * fn; ++k)
+        partial.push_back(k == fn * 20 + 20 ? 40 : k == fn * 20 + 21 ? 60 : 90);
+    int partLevel = -1;
+    const bool fallback = Flatten(partial.data(), fn, fn, 0, 0, fn, half.data(), &partLevel) && partLevel == 50 &&
+                          partial[fn * 20 + 20] == 45 && partial[fn * 20 + 21] == 55 && partial[0] == 90;
+    std::vector<uint8_t> untouched = built;
+    const bool noWeight = !Flatten(untouched.data(), fgrid, fgrid, fo, fo, fn, none.data()) && untouched == built &&
+                          !Flatten(untouched.data(), fgrid, fgrid, 100, 100, fn, eastW.data()) && untouched == built;
+    // a seat inside its square isn't on the edge; weight on any side of it is
+    bool edge = !OnEdge(eastW.data(), fn) && !OnEdge(westW.data(), fn) && !OnEdge(none.data(), fn);
+    for (int k : {5, fn * fn - 6, fn * 7, fn * 8 - 1})
+    {
+        std::vector<float> side(fn * fn, 0.0f);
+        side[k] = 0.25f;
+        edge = edge && OnEdge(side.data(), fn);
+    }
+    // the peak stamp's calls wrapped: round the stamp, or round another patch's wrapper; not if they disagree
+    Exe::Layout calls = Exe::kGog;
+    const uint32_t callRva[4] = {0x10, 0x20, 0x30, 0x40};
+    memcpy(calls.peakStampCalls, callRva, sizeof(callRva));
+    auto callsTo = [&](uint32_t to) {
+        std::vector<uint8_t> image(0x60, 0x90);
+        for (uint32_t rva : callRva)
+        {
+            const std::vector<uint8_t> call = TerrainPatch::CallTo(0x400000 + rva, to);
+            memcpy(image.data() + rva, call.data(), call.size());
+        }
+        return image;
+    };
+    std::vector<TerrainPatch::Site> wrapped;
+    uint32_t next = 0;
+    std::vector<uint8_t> image = callsTo(0x478a70);
+    bool wrap = WrapCalls(image.data(), image.size(), 0x400000, calls, 0x10000000, wrapped, next, why) &&
+                next == 0x478a70 && wrapped.size() == 4 && wrapped[2].rva == 0x30 &&
+                wrapped[2].original == TerrainPatch::CallTo(0x400030, 0x478a70) &&
+                wrapped[2].patched == TerrainPatch::CallTo(0x400030, 0x10000000);
+    image = callsTo(0x10001000);
+    wrap = wrap && WrapCalls(image.data(), image.size(), 0x400000, calls, 0x10000000, wrapped, next, why) &&
+           next == 0x10001000;
+    image[0x20] = 0x90;
+    wrap = wrap && !WrapCalls(image.data(), image.size(), 0x400000, calls, 0x10000000, wrapped, next, why);
+    image = callsTo(0x478a70);
+    image[0x31] ^= 1;
+    wrap = wrap && !WrapCalls(image.data(), image.size(), 0x400000, calls, 0x10000000, wrapped, next, why);
+    image = callsTo(0x10000000);
+    wrap = wrap && !WrapCalls(image.data(), image.size(), 0x400000, calls, 0x10000000, wrapped, next, why);
+    printf("PLOTFLATTEN core=%d weight=%d seat=%d outside=%d repeat=%d two=%d fallback=%d none=%d edge=%d wrap=%d\n",
+           fromCore, byWeight, seatFlat, outside, repeat, twoSeats, fallback, noWeight, edge, wrap);
     return 0;
 }
 
@@ -4402,6 +4525,11 @@ static int ExeLayoutTest(const wchar_t* path, bool steam)
                                                           0x10006000, x));
     const bool landBlend = code && applies(TileSets::LandBlendSites(base, 0x10007000, x));
     const bool jigsaw = code && applies(Jigsaw::Sites(base, 0x10008000, x));
+    std::vector<TerrainPatch::Site> peakSites;
+    uint32_t peakNext = 0;
+    std::string peakWhy;
+    const bool peakCalls = code && PlotStamps::WrapCalls(img.data(), img.size(), base, x, 0x10009000, peakSites, peakNext,
+                                                         peakWhy) && peakNext == base + x.peakStamp && applies(peakSites);
     // the loader: PUSH <prefix>; MOV ESI,<list>, for each list in the layout's order
     bool lists = code;
     for (int k = 0; k < 8 && lists; ++k)
@@ -4428,9 +4556,9 @@ static int ExeLayoutTest(const wchar_t* path, bool steam)
     };
     const bool crt = imports(x.srand, "srand") && imports(x.rand, "rand");
     printf("EXELAYOUT build=%s timestamp=0x%08lx identified=%d verts=%d masks=%d folders=%d tilesets=%d landblend=%d "
-           "jigsaw=%d lists=%d strings=%d cellslots=%d crt=%d\n",
+           "jigsaw=%d peakcalls=%d lists=%d strings=%d cellslots=%d crt=%d\n",
            found ? found->name : "-", static_cast<unsigned long>(nt->FileHeader.TimeDateStamp), identified, verts,
-           masks, folders, tileSets, landBlend, jigsaw, lists, strs, cellSlots, crt);
+           masks, folders, tileSets, landBlend, jigsaw, peakCalls, lists, strs, cellSlots, crt);
     return 0;
 }
 

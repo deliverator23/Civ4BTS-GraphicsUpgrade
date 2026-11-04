@@ -29,10 +29,19 @@
 //   overlay's draw (it needs a peak plot), over that layer: where the painting's alpha is 0 the layer draws as it would.
 //   Each plot says which layer's its stamp is, so a draw paints only its own: two sets can share a square.
 //
+// - Flatten ([terrain tiles] PlotStampsNFlatten): a set's pieces are weights, 0..1 over 0..65535, and level a seat in the
+//   ground for a model, whose vertices the game lays at ground + model z (ContourGeometry). Nothing is added: square by
+//   square, each corner's stamp takes the height where its weight is 1 (rounded to a grid level) and draws the ground to
+//   it by the weight, in turn. That has to see every stamp, and the engine stamps a square's base tile, hills and peaks
+//   in that order in all four of its height loops, so unlike the rest of a plot stamp it's done after the peak stamp, by
+//   wrapping the four calls to it (WrapCalls). The engine rebuilds a square from its base tile when a plot changes, so
+//   the level is worked out afresh and nothing accumulates. A square holds one seat whole, so a piece's weight must be 0
+//   by a square's edge, which runs through the plot's centre and along the piece's own edge (the log warns if not).
+//
 // Pure logic here (no Windows calls), so the test harness can run it; terrain_sets.cpp has the hook.
 #pragma once
 
-#include "jigsaw.h"  // Piece, AddTile; hill_field.h's Hash, Mix
+#include "jigsaw.h"  // Piece, AddTile, Exe::Layout, TerrainPatch::Site; hill_field.h's Hash, Mix
 
 #include <algorithm>
 #include <cstdint>
@@ -214,5 +223,76 @@ inline int Clipped(const uint8_t* cells, int rowBytes, int rows, int ox, int oy,
                 cells[static_cast<size_t>(oy + j) * rowBytes + ox + i] + std::lround(total[j * n + i]) > 255)
                 ++clipped;
     return clipped;
+}
+
+const float kFlattenCore = 0.99f;  // a weight this high is the seat's own ground
+const float kFlattenUnits = 1.0f / 65535;  // Stamp::units for a Flatten piece: Tile then gives weights
+
+// Levels the n x n tile at (ox, oy) by `weight`, 0..1 (Tile): the mean height of the samples of weight kFlattenCore and
+// up (or, if there are none, of those above 0), rounded to a grid level, and each sample drawn to it by its weight.
+// False, nothing changed, if no weight is above 0 or the tile is off the grid.
+inline bool Flatten(uint8_t* cells, int rowBytes, int rows, int ox, int oy, int n, const float* weight, int* level = nullptr)
+{
+    if (!cells || n < 1 || ox < 0 || oy < 0 || ox + n > rowBytes || oy + n > rows)
+        return false;
+    int count[2] = {};
+    float sum[2] = {};
+    for (int j = 0; j < n; ++j)
+    {
+        const uint8_t* row = cells + static_cast<size_t>(oy + j) * rowBytes + ox;
+        for (int i = 0; i < n; ++i)
+            for (int k = 0; k < 2; ++k)
+                if (k ? weight[j * n + i] > 0 : weight[j * n + i] >= kFlattenCore)
+                {
+                    ++count[k];
+                    sum[k] += row[i];
+                }
+    }
+    const int k = count[0] ? 0 : 1;
+    if (!count[k])
+        return false;
+    const int flat = static_cast<int>(std::lround(sum[k] / count[k]));
+    for (int j = 0; j < n; ++j)
+    {
+        uint8_t* row = cells + static_cast<size_t>(oy + j) * rowBytes + ox;
+        for (int i = 0; i < n; ++i)
+            row[i] = static_cast<uint8_t>(std::lround(row[i] + (flat - row[i]) * weight[j * n + i]));
+    }
+    if (level)
+        *level = flat;
+    return true;
+}
+
+// Any weight on the tile's edge: there the next square, levelled on its own or not at all, would meet it with a step.
+inline bool OnEdge(const float* weight, int n)
+{
+    for (int k = 0; k < n; ++k)
+        if (weight[k] > 0 || weight[(n - 1) * n + k] > 0 || weight[k * n] > 0 || weight[k * n + n - 1] > 0)
+            return true;
+    return false;
+}
+
+// The peak stamp's four calls sent to `thunk`, and what they called in `next`: the stamp itself, or another patch's
+// wrapper round it ([terrain tiles] RiverLayerCaps), which then runs inside this one. False, with why, unless all four
+// are CALLs to one place that isn't `thunk`.
+inline bool WrapCalls(const uint8_t* image, size_t size, uint32_t base, const Exe::Layout& x, uint32_t thunk,
+                      std::vector<TerrainPatch::Site>& sites, uint32_t& next, std::string& why)
+{
+    sites.clear();
+    next = 0;
+    for (uint32_t rva : x.peakStampCalls)
+    {
+        if (rva + 5 > size || image[rva] != 0xe8)
+            return why = "no CALL at the peak stamp's site", false;
+        uint32_t rel;
+        memcpy(&rel, image + rva + 1, 4);
+        const uint32_t to = base + rva + 5 + rel;
+        if (to == thunk || (next && to != next))
+            return why = "the peak stamp's calls don't all go to one place", false;
+        next = to;
+        sites.push_back({rva, TerrainPatch::CallTo(base + rva, to), TerrainPatch::CallTo(base + rva, thunk),
+                         "terrain peak stamp (CALL FUN_00478e10)"});
+    }
+    return true;
 }
 }  // namespace PlotStamps

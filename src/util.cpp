@@ -537,6 +537,7 @@ void LoadConfig()
         p.height = p.hasHeight ? static_cast<float>(_wtof(height.c_str())) : 1.0f;
         p.onFeatures = IniString(ini, L"terrain tiles", (n + L"OnFeatures").c_str(), L"");
         p.textureMultiply = IniInt(ini, L"terrain tiles", (n + L"TextureMultiply").c_str(), 0) != 0;
+        p.flatten = IniInt(ini, L"terrain tiles", (n + L"Flatten").c_str(), 0) != 0;
         p.textures = IniInt(ini, L"terrain tiles", (n + L"Textures").c_str(), 0) != 0;
         p.textureDetail = (std::max)(0.0f, (std::min)(1.0f, static_cast<float>(_wtof(
             IniString(ini, L"terrain tiles", (n + L"TextureDetail").c_str(), L"0").c_str()))));

@@ -30,6 +30,7 @@ static void Init()
     ApplyTerrainPatch();
     ApplyTileSets();
     ApplyLandBlends();
+    ApplyPlotFlatten();
     if (!g_config.chainDll.empty())
     {
         g_real = LoadLibraryW(g_config.chainDll.c_str());

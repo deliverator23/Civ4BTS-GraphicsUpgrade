@@ -38,6 +38,8 @@ struct Layout
     uint32_t blendPick;                      // FUN_00479920, a terrain layer's blend pick
     uint32_t blendPickCalls[3];
     uint32_t baseStamp;                      // FUN_00478a90, the base tile stamp
+    uint32_t peakStamp;                      // FUN_00478e10, a square's peak stamp, the last of its stamps
+    uint32_t peakStampCalls[4];              // the CALLs to it, one in each height loop
 };
 
 // Steam's build (timestamp 0x53869b61).
@@ -60,6 +62,8 @@ const Layout kSteam = {
     0x79920,
     {0x796b8, 0x79787, 0x79845},
     0x78a90,
+    0x78e10,
+    {0x77660, 0x77769, 0x77a0d, 0x78232},
 };
 
 // GOG's build (timestamp 0x4a0c27e6).
@@ -82,6 +86,8 @@ const Layout kGog = {
     0x79580,
     {0x79318, 0x793e7, 0x794a5},
     0x786f0,
+    0x78a70,
+    {0x772c0, 0x773c9, 0x7766d, 0x77e92},
 };
 
 const Layout* const kLayouts[] = {&kSteam, &kGog};

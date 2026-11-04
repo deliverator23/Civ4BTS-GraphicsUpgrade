@@ -328,9 +328,9 @@ def main():
         if not steam:
             check(m and m.group(1) == 'GOG' and xl.get('identified') == 1,
                   f'GOG ({m.group(2) if m else "?"}): recognised by its three calls to the tile picker {xl}')
-            check(all(xl.get(k) == 1 for k in ('verts', 'masks', 'folders', 'tilesets', 'landblend', 'jigsaw')),
+            check(all(xl.get(k) == 1 for k in ('verts', 'masks', 'folders', 'tilesets', 'landblend', 'jigsaw', 'peakcalls')),
                   'GOG: every patch site holds BtS\'s bytes (TerrainVertsPerPlot 33 and 65, coast scale masks, heightmap '
-                  'folder, tile groups, land blends, jigsaw base stamp)' + ('' if xl else f'\n{xout}'))
+                  'folder, tile groups, land blends, jigsaw base stamp, peak stamp calls)' + ('' if xl else f'\n{xout}'))
             check(xl.get('lists') == 1, "GOG: the tile loader fills the layout's eight tile lists, in its order")
         else:
             check(xl.get('identified') == 1, f'Steam ({m.group(2) if m else "?"}): its code is encrypted on disk, so only '
@@ -463,6 +463,18 @@ def main():
           'height, 64 and 16 per plot), its full height in grid units')
     check(ps.get('combine') == 1, 'stamps on neighbouring plots combine by max')
     check('PLOTSTAMPS setfor=1' in pout, "a plot's stamp goes by its feature first, then by its terrain")
+    mf = re.search(r'^PLOTFLATTEN (.*)$', pout, re.M)
+    pf = {k: int(v) for k, v in (kv.split('=') for kv in mf.group(1).split())} if mf else {}
+    check(pf.get('core') == 1, f'Flatten: the level is the mean height over the weights of 1, a grid level {pf}')
+    check(pf.get('weight') == 1 and pf.get('seat') == 1 and pf.get('outside') == 1,
+          'Flatten: each sample is drawn to the level by its weight: flat over the seat, nothing past the square')
+    check(pf.get('repeat') == 1, 'Flatten: a square rebuilt by the engine comes out the same, with nothing accumulating')
+    check(pf.get('two') == 1, "Flatten: two corners' seats in one square each keep their own level")
+    check(pf.get('fallback') == 1 and pf.get('none') == 1,
+          'Flatten: with no weight of 1, the mean of all it touches; with no weight at all, nothing changes')
+    check(pf.get('edge') == 1, "Flatten: weight on a square's edge is found, on all four sides, and a seat inside isn't")
+    check(pf.get('wrap') == 1, "Flatten: the peak stamp's four calls are wrapped round the stamp or another patch's "
+          "wrapper, and not if they aren't one target's calls")
     mc = re.search(r'^PLOTSTAMPS colourfiles=(\d) colourrefused=(\d) atlas=(\d) cells=(\d) (.*)$', pout, re.M)
     check(mc and mc.group(1) == '1' and mc.group(2) == '1',
           f"a stamp's painting read: DXT5 or A8R8G8B8, square, a power of two, mips to 4 texels; others refused "

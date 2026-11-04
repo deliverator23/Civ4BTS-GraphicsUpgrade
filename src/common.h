@@ -75,6 +75,8 @@ struct Config
     // a value a layer). PlotStampsNOnFeatures=<feature types>, in place of Terrains: every plot with one of those features
     // gets a stamp, whatever its terrain; paintings go over the peak overlay's layer, which such a plot needs.
     // PlotStampsNTextureMultiply=1: a painting is multiplied by the light rather than added to it, so black stays black.
+    // PlotStampsNFlatten=1: the pieces are weights, 0..1 over 0..65535, not heights, and level the ground under a model:
+    // PlotStampsNHeight and PlotStampsNTextures don't apply. Done last in each square, each corner's in turn.
     struct PlotStampSet
     {
         std::wstring terrains, folder, features, hideModels, onFeatures;
@@ -83,6 +85,7 @@ struct Config
         bool textures = false;
         float textureDetail = 0;
         bool textureMultiply = false;
+        bool flatten = false;
     };
     PlotStampSet plotStamps[8];
     // [debug] PlotStampsTest=<folder>;x;y[;layer] (the test harness; there's no map there): a 16 x 16 map with one stamp
@@ -263,6 +266,9 @@ void LoadConfig();
 void ApplyTerrainPatch();
 // [terrain tiles] TilePicker: hook the heightmap tile picks (terrain_sets.cpp); logs what it did. Once.
 void ApplyTileSets();
+// [terrain tiles] PlotStamps<n>Flatten: wraps the calls to the peak stamp if any is set (terrain_sets.cpp); after every
+// other patch of those calls, whose target it calls. Once.
+void ApplyPlotFlatten();
 // [terrain tiles] StandardBlendOnLand(1..8): hooks the terrain layers' blend pick if any is set (terrain_sets.cpp).
 // Once.
 void ApplyLandBlends();
