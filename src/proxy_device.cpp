@@ -4,6 +4,7 @@
 #include "proxy_d3d9.h"
 #include "overlay.h"
 
+#include <cmath>
 #include <cstdio>
 
 void LogPresentParameters(const char* what, const D3DPRESENT_PARAMETERS* pp);
@@ -1265,6 +1266,8 @@ HRESULT ProxyDevice::Dispatch(Draw draw)
             m_water.DrawSubmerged(vs, m_refl.WaterHeight(), [&] { draw(); }) && m_trace.Active())
             m_trace.Event("{\"ev\":\"submerged\"}");
     }
+    if (m_shadows.enabled && (vs || fixedFunction))
+        m_shadows.unitGround = UnitGround(vs);
     if (m_shadows.enabled && (vs || fixedFunction) && m_shadows.AfterDraw(vs, fixedFunction, [&] { draw(); }) &&
         m_trace.Active())
         m_trace.Event(std::string("{\"ev\":\"shadow_caster\",\"path\":\"") + (vs ? "vs" : "ff") + "\"}");
@@ -1420,6 +1423,35 @@ static bool ModelOrigin(IDirect3DDevice9* dev, const ShaderInfo& vs, float* out)
     for (int i = 0; i < 3; ++i)
         out[i] = static_cast<float>(p[i] / p[3]);
     return true;
+}
+
+// The height a skinned model casts from: the terrain under it, less the margin trees and buildings have, or -1e30 if
+// unknown (a sandworm's mound goes solidly under the sand: more would shade the ground round it, on the sunward side
+// too). The lower of the terrain under its first bone and under the last blob: a unit
+// with no blob leaves another's, and a first bone's origin can swing well off the model, but the lower one only ever
+// clips less.
+float ProxyDevice::UnitGround(const ShaderInfo* vs)
+{
+    const float kMargin = 2.0f;
+    float origin[3];
+    if (vs)
+    {
+        if (vs->viewProj < 0 || vs->worldBones < 0 || !ModelOrigin(m_real, *vs, origin))
+            return -1e30f;
+    }
+    else
+    {
+        DWORD blend = D3DVBF_DISABLE;
+        D3DMATRIX bone;
+        m_real->GetRenderState(D3DRS_VERTEXBLEND, &blend);
+        if (blend == D3DVBF_DISABLE || FAILED(m_real->GetTransform(D3DTS_WORLDMATRIX(0), &bone)))
+            return -1e30f;
+        origin[0] = bone._41, origin[1] = bone._42;
+    }
+    float ground = m_terrain.GroundAt(origin[0], origin[1]);
+    if (const float* blob = m_shadows.Anchor())
+        ground = std::fmin(ground, m_terrain.GroundAt(blob[0], blob[1]));  // ignores a NaN (terrain not read)
+    return std::isnan(ground) ? -1e30f : ground - kMargin;
 }
 
 void ProxyDevice::KeepSeaModel(bool indexed, D3DPRIMITIVETYPE type, INT base, UINT minVertex, UINT numVertices,

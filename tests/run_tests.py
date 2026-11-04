@@ -1382,6 +1382,18 @@ def main():
           f"a terrain blend sheet's own normal map, read at the sheet's coordinates and turned with them (blue "
           f"{b_on.get('lit')} vs {b_off.get('lit')} without: change {got}, expected {want:.1f})")
 
+    # A unit under the ground (a sandworm under the sand) casts nothing on its sunward side; over it, it casts as ever.
+    s_on, _ = shadow_run('sunk', 1, 'sunk')
+    g_on, _ = shadow_run('ground50', 1, 'ground50')
+    t_on, _ = shadow_run('shallow', 1, 'shallow')
+    print(f'  sunk {s_on}\n  ground50 {g_on}')
+    check(abs(s_on.get('sunk', 0) - s_on.get('lit', 0)) <= 2,
+          f"a unit under the ground doesn't shade it ({s_on.get('sunk')}, lit {s_on.get('lit')})")
+    check(abs(g_on.get('above', 0) - g_on.get('lit', 0) // 2) <= 3,
+          f"a unit above raised ground still casts ({g_on.get('above')}, lit {g_on.get('lit')})")
+    check(abs(t_on.get('shallow', 0) - t_on.get('lit', 0)) <= 2,
+          f"nor does a part just under the ground ({t_on.get('shallow')}, lit {t_on.get('lit')})")
+
     # Hill shadows: a 300-high ridge along x = 0, sun going towards -x at 45 degrees: the ground behind it (-250,0) is
     # shaded (Darkness 0.5), the sunny side (200,0) isn't; HillShadows=0 turns it off.
     h_on, hlog = shadow_run('hills', 1, 'ridge')

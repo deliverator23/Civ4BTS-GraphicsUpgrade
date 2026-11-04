@@ -99,6 +99,7 @@ private:
     // [debug] TerrainDebug: true if it took the draw (drew it its own way, or left it out), with the result in hr.
     template <class Draw> bool TerrainDebug(Draw& draw, HRESULT& hr);
     bool DrawingToBackBuffer();
+    float UnitGround(const ShaderInfo* vs);
     const ShaderInfo* CurrentPixelShader();
     // Selection circles under ships: BtS draws them at water level before the water, so the reflective, dynamic water
     // would show them refracted beneath its surface. Such draws are held back and replayed straight after the water.

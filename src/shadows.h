@@ -48,6 +48,9 @@ public:
     // what's above it: the coverage has no depth, so a part under the surface (a whale's tail, a hull's keel) would
     // shade the water on its sunward side. Not before: a mod's land can lie below the start value.
     bool waterDrawn = false;
+    // Set before each unit draw: the height a unit casts from (ProxyDevice::UnitGround; -1e30 if unknown). A mod's
+    // land can lie above the water, and a sandworm waits under the sand: its coverage would shade the ground too.
+    float unitGround = -1e30f;
     IDirect3DTexture9* terrainNormals = nullptr;  // TerrainNormals' map for per-pixel terrain lighting (s5), or null
     IDirect3DTexture9* hillShadows = nullptr;     // TerrainNormals' hill shadow mask (s6), or null
     const float* decalLight = nullptr;            // unlit ground decals' change of light (Lighting::DecalLight), or null
@@ -114,6 +117,7 @@ public:
     // For receivers drawn elsewhere (the water): last frame's shadow texture (null when there's none), its matrix
     // (world -> texture, VS register layout as the terrain's c20-c23), the darkness now, and the sampler setup.
     IDirect3DTexture9* LitTexture() const { return enabled && m_havePrev ? m_lit : nullptr; }
+    const float* Anchor() const { return m_haveAnchor ? m_anchor : nullptr; }  // the last blob shadow this frame, or null
     const float* LitMatrix() const { return m_prevShadowTex; }
     float Darkness() const { return g_config.shadowDarkness * darknessScale; }
     static void BindSampler(IDirect3DDevice9* dev, DWORD stage);

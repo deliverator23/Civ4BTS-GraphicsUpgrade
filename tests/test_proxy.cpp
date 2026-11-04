@@ -797,6 +797,11 @@ static int SeaScene(IDirect3DDevice9* dev, int frames)
 //                    z = 0.2 x: the proxy reads its heights for per-pixel lighting (traces save terrain_normals.bmp)
 //   ridge            the same grid, flat but for a 300-high ridge along x = 0: with the sun going towards -x, the
 //                    ridge shades the ground at x = -250 (hill shadows); adds " hill=." (blue at (-250,0))
+//   sunk             the same grid, flat at z = 150, over the caster: it's underground, so no shadow on its sunward
+//                    side; adds " sunk=." (blue at (50,0)). ground50: flat at z = 50, under the caster: it still
+//                    casts, onto (-50,0); adds " above=.". shallow: flat at z = 109, just over the caster: no shadow
+//                    either, as the buried skirt of a sandworm's mound; adds " shallow=." (blue at (43,0), just
+//                    beyond the caster's edge on its sunward side)
 //   finemap          instead of the quad, three small terrain chunks 1024 grid cells apart at spacing 11.25 (High
 //                    Detail Terrain): the proxy's height grid must keep them apart (traces save terrain_heights.bin)
 //   widemap          the same at spacing 22.5, with mtxLightmap over a map 256 plots across
@@ -958,7 +963,9 @@ static int ShadowScene(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS& pp, int fra
                buildingWater = wcscmp(overlay, L"buildingwater") == 0,
                building = wcscmp(overlay, L"building") == 0 || buildingWater, ridge = wcscmp(overlay, L"ridge") == 0,
                vanish = wcscmp(overlay, L"vanish") == 0, waterOverlay = wcscmp(overlay, L"water") == 0,
-               slope = wcscmp(overlay, L"slope") == 0 || ridge,
+               sunk = wcscmp(overlay, L"sunk") == 0, ground50 = wcscmp(overlay, L"ground50") == 0,
+               shallow = wcscmp(overlay, L"shallow") == 0,
+               slope = wcscmp(overlay, L"slope") == 0 || ridge || sunk || ground50 || shallow,
                wideMap = wcscmp(overlay, L"widemap") == 0, ultraMap = wcscmp(overlay, L"ultramap") == 0,
                sharedMap = wcscmp(overlay, L"sharedmap") == 0,
                fineMap = wcscmp(overlay, L"finemap") == 0 || wideMap || ultraMap || sharedMap,
@@ -974,7 +981,8 @@ static int ShadowScene(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS& pp, int fra
             for (int x = 0; x < 5; ++x)
             {
                 float wx = -500.0f + 250 * x, wy = -500.0f + 250 * y;
-                const float z = ridge ? (x == 2 ? 300.0f : 0.0f) : 0.2f * wx;
+                const float z = ridge ? (x == 2 ? 300.0f : 0.0f) : sunk ? 150.0f : ground50 ? 50.0f :
+                                shallow ? 109.0f : 0.2f * wx;
                 const float v[7] = {wx, wy, z, x / 4.0f, 1 - y / 4.0f, x / 4.0f, 1 - y / 4.0f};
                 memcpy(verts[y * 5 + x], v, sizeof(v));
             }
@@ -1139,7 +1147,7 @@ static int ShadowScene(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS& pp, int fra
         return reinterpret_cast<const DWORD*>(static_cast<const BYTE*>(lr.pBits) + py * lr.Pitch)[px];
     };
     unsigned lit = 0, shadowed = 0, lit2 = 0, shadowed2 = 0, casterRed = 0, blobPixel = 0, partPixel = 0,
-             farPixel = 0, buildingPixel = 0, paintedPixel = 0, overlayPixel = 0, hillPixel = 0, footingPixel = 0;
+             sunkPixel = 0, abovePixel = 0, shallowPixel = 0, farPixel = 0, buildingPixel = 0, paintedPixel = 0, overlayPixel = 0, hillPixel = 0, footingPixel = 0;
     int restored = 1, reset = 1;
     for (int f = 0; f < frames; ++f)
     {
@@ -1590,6 +1598,9 @@ static int ShadowScene(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS& pp, int fra
             partPixel = pixel(lr, 200, 400) & 0xFF;
             farPixel = pixel(lr, -400, -200) & 0xFF;
             buildingPixel = pixel(lr, 100, 300) & 0xFF;
+            sunkPixel = pixel(lr, 50, 0) & 0xFF;
+            abovePixel = pixel(lr, -50, 0) & 0xFF;
+            shallowPixel = pixel(lr, 43, 0) & 0xFF;
             paintedPixel = pixel(lr, -300, 300) & 0xFF;
             overlayPixel = pixel(lr, -300, -300) & 0xFF;
             hillPixel = pixel(lr, -250, 0) & 0xFF;
@@ -1632,6 +1643,12 @@ static int ShadowScene(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS& pp, int fra
                footingPixel, reused);
     if (ridge)
         printf(" hill=%u", hillPixel);
+    if (sunk)
+        printf(" sunk=%u", sunkPixel);
+    if (ground50)
+        printf(" above=%u", abovePixel);
+    if (shallow)
+        printf(" shallow=%u", shallowPixel);
     printf("\n");
     if (blob)
         blob->Release();
