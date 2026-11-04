@@ -41,9 +41,9 @@ rem The same water with the shoreline and shallow water (Shader Model 3).
 %FXC% /T ps_2_0 /E PSMain /Vn g_waterShadowPS /Fh build\shaders\water_shadow_ps.h shaders\water_shadow.hlsl >nul || exit /b 1
 %FXC% /T vs_2_0 /E VSMain /Vn g_terrainShadowVS /Fh build\shaders\terrain_shadow_vs.h shaders\terrain_shadow.hlsl >nul || exit /b 1
 %FXC% /T ps_2_0 /E PSMain /Vn g_terrainShadowPS /Fh build\shaders\terrain_shadow_ps.h shaders\terrain_shadow.hlsl >nul || exit /b 1
-rem The same with the blend sheets' own normal maps (Shader Model 3).
-%FXC% /T vs_3_0 /D BLENDNORMALS=1 /E VSMain /Vn g_terrainSheetNormalsVS /Fh build\shaders\terrain_sheetnormals_vs.h shaders\terrain_shadow.hlsl >nul || exit /b 1
-%FXC% /T ps_3_0 /D BLENDNORMALS=1 /E PSMain /Vn g_terrainSheetNormalsPS /Fh build\shaders\terrain_sheetnormals_ps.h shaders\terrain_shadow.hlsl >nul || exit /b 1
+rem The same with the blend sheet read inside its tile and the rest of the Shader Model 3 work.
+%FXC% /T vs_3_0 /D SM3=1 /E VSMain /Vn g_terrainSm3VS /Fh build\shaders\terrain_sm3_vs.h shaders\terrain_shadow.hlsl >nul || exit /b 1
+%FXC% /T ps_3_0 /D SM3=1 /E PSMain /Vn g_terrainSm3PS /Fh build\shaders\terrain_sm3_ps.h shaders\terrain_shadow.hlsl >nul || exit /b 1
 %FXC% /T vs_2_0 /E VSFlood /Vn g_riverFloodVS /Fh build\shaders\river_flood_vs.h shaders\river_shadow.hlsl >nul || exit /b 1
 %FXC% /T ps_2_0 /E PSFlood /Vn g_riverFloodPS /Fh build\shaders\river_flood_ps.h shaders\river_shadow.hlsl >nul || exit /b 1
 %FXC% /T vs_2_0 /E VSRiver /Vn g_riverVS /Fh build\shaders\river_vs.h shaders\river_shadow.hlsl >nul || exit /b 1

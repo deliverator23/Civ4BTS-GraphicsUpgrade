@@ -16,7 +16,7 @@
 // normal, and amount += N_detail . L' - N . L': the bumps are lit by the sun as it is now. They come from a normal
 // map shipped with the detail texture (s7, tangent space: red along +u, green along -v), or else from the detail
 // texture's own brightness, read as height (two more samples, one texel along u and v).
-// Built a second time with BLENDNORMALS (Shader Model 3), for every terrain draw the card allows: the blend sheet
+// Built a second time with SM3 (Shader Model 3), for every terrain draw the card allows: the blend sheet
 // (BtS's base texture: 4 tiles across, the engine's texture coordinates running to half a texel inside the square's
 // tile) read inside its tile at every mip (c23): the coordinates clamped a texel of the next coarser mip in from the
 // tile's edges, read with the unclamped coordinates' derivatives, so filtering never takes colour or alpha from the
@@ -24,12 +24,7 @@
 // and the clamped position come from the coordinates at the centroid (the part of the pixel the triangle covers): with
 // multisampling, a pixel on a square's edge is shaded at its centre for each square's triangle, and the centre can lie
 // just outside a triangle, so its coordinates run on into the next tile in the sheet (a faint line of that tile's colour
-// and alpha along the square's edge). The derivatives still come from the centre's. And the
-// blend sheet's own normal map too (s8, a terrain's
-// <Path> with _normal before .dds; DetailNormals::ForBlend), read at the sheet's texture coordinates, so with the tile
-// and the turn the engine gave this square. The turn is in the coordinates, so which way the sheet's u and v run on the
-// ground is read from how they and the position change across the pixel. Added to the ground's normal as the detail
-// normals are, x c22.x.
+// and alpha along the square's edge). The derivatives still come from the centre's.
 
 float4x4 mtxWorldViewProj : register(c0);
 float4x3 mtxWorld : register(c4);
@@ -60,9 +55,7 @@ float4 f4DetailAxes : register(c20);      // xy: world direction of +u in the de
 float4 f4DetailNormal : register(c21);    // x = strength of s7's normal map, y = strength of the normals made from
                                           // the detail texture (0 = none), zw = one detail texel in uv
 sampler2D DetailNormals : register(s7);   // a normal map for the detail texture, or nothing (f4DetailNormal.x = 0)
-#ifdef BLENDNORMALS
-sampler2D BlendNormals : register(s8);    // the blend sheet's normal map (red along +u, green along -v)
-float4 f4BlendNormal : register(c22);     // x = strength, y = 1: the map is DXT5nm (x in alpha, y in green)
+#ifdef SM3
 float4 f4Sheet : register(c23);           // the blend sheet: xy = its size in texels; w = 1: read inside the tile
 float4 f4Debug : register(c24);           // [debug] TerrainDebug 4: w = 1, a flat colour (rgb) with the sheet's alpha
 // [terrain tiles] MixedCoastBlend: on a coast square of two or more land terrains with paired lists, each of those
@@ -206,7 +199,7 @@ struct VSOut
     float2 detail : TEXCOORD3;
     float4 shadow : TEXCOORD4;
     float2 worldXY : TEXCOORD5;
-#ifdef BLENDNORMALS
+#ifdef SM3
     float2 baseAt : TEXCOORD6;   // the base coordinates again, read at the centroid
     float2 worldAt : TEXCOORD7;  // and the world position (MixWeight's square)
 #endif
@@ -222,7 +215,7 @@ VSOut VSMain(float3 pos : POSITION, float2 uv0 : TEXCOORD0, float2 uv1 : TEXCOOR
     o.lightmap = mul(world, mtxLightmap);
     o.detail = uv1 * fDetailTexScaling;
     o.base = uv0;
-#ifdef BLENDNORMALS
+#ifdef SM3
     o.baseAt = uv0;
     o.worldAt = world.xy;
 #endif
@@ -233,12 +226,12 @@ VSOut VSMain(float3 pos : POSITION, float2 uv0 : TEXCOORD0, float2 uv1 : TEXCOOR
 
 float4 PSMain(float2 base : TEXCOORD0, float2 fow : TEXCOORD1, float2 lightmap : TEXCOORD2, float2 detail : TEXCOORD3,
               float4 shadow : TEXCOORD4, float2 worldXY : TEXCOORD5
-#ifdef BLENDNORMALS
+#ifdef SM3
               , float2 baseAt : TEXCOORD6_centroid, float2 worldAt : TEXCOORD7_centroid
 #endif
               ) : COLOR
 {
-#ifdef BLENDNORMALS
+#ifdef SM3
     float2 sheetUV = SheetCoords(base, baseAt);
     float4 b = tex2Dgrad(TerrainBase, sheetUV, ddx(base), ddy(base));
     if (f4Mix.w > 0)
@@ -265,32 +258,18 @@ float4 PSMain(float2 base : TEXCOORD0, float2 fow : TEXCOORD1, float2 lightmap :
     float2 made = float2(h - dot(tex2D(TerrainDetail, detail + float2(f4DetailNormal.z, 0)).rgb, kLuma),
                          dot(tex2D(TerrainDetail, detail + float2(0, f4DetailNormal.w)).rgb, kLuma) - h);
     float2 slope = f4DetailNormal.x * (tex2D(DetailNormals, detail).rg * 2 - 1) + f4DetailNormal.y * made;
-#ifdef BLENDNORMALS
+#ifdef SM3
     float detailShown = 1 - painted * (1 - f4StampToPlot.w);
     d = lerp(0.5, d, detailShown);
     slope *= detailShown;
 #endif
     float3 flat = lerp(float3(0, 0, 1), n, known);
     float2 worldSlope = slope.x * f4DetailAxes.xy - slope.y * f4DetailAxes.zw;
-#ifdef BLENDNORMALS
-    // The sheet's u and v directions on the ground: d(world)/d(uv) from the screen derivatives of both. A tile is square
-    // on the ground, so u and v come out as long as each other and at right angles, except where the pixel's
-    // neighbours are on another square (the coordinates jump to another tile there): those pixels go without.
-    float2 du = ddx(base), dv = ddy(base), px = ddx(worldXY), py = ddy(worldXY);
-    float det = du.x * dv.y - dv.x * du.y;
-    float safe = abs(det) > 1e-12 ? det : 1e-12;
-    float2 pu = (px * dv.y - py * du.y) / safe, pv = (py * du.x - px * dv.x) / safe;
-    float lu = max(length(pu), 1e-6), lv = max(length(pv), 1e-6);
-    float square = abs(det) > 1e-12 && abs(lu - lv) < 0.2 * max(lu, lv) && abs(dot(pu, pv)) < 0.2 * lu * lv ? 1 : 0;
-    float4 sheetTexel = tex2Dgrad(BlendNormals, sheetUV, ddx(base), ddy(base));
-    float2 sheet = (lerp(sheetTexel.rg, sheetTexel.ag, f4BlendNormal.y) * 2 - 1) * f4BlendNormal.x * square;
-    worldSlope += sheet.x * pu / lu - sheet.y * pv / lv;
-#endif
     float3 bumped = normalize(flat + float3(worldSlope, 0));
     amount = max(0, amount + dot(bumped, f4LightNew.xyz) - dot(flat, f4LightNew.xyz));
     lm = lerp(lm, saturate(0.5 * (f4Ambient.rgb + f4Sun.rgb * amount)), f4Relight.x);
     float3 colour = b.rgb + d + lm - 1;
-#ifdef BLENDNORMALS
+#ifdef SM3
     // The sum can't go much below lm - 0.5 at a colour of 0: multiplied by the light, black stays black in any light.
     colour = lerp(colour, b.rgb * lm * 2, painted * f4StampLayer.z);
 #endif
@@ -299,7 +278,7 @@ float4 PSMain(float2 base : TEXCOORD0, float2 fow : TEXCOORD1, float2 lightmap :
     // Objects' shadows and hills' shadows: the darker of the two (no double darkening where they overlap).
     float objects = lerp(1, tex2Dproj(ShadowMap, shadow).r, f4Shadow.z);
     float hills = 1 - f4Shadow.x * f4NormalMap.w * tex2D(HillShadows, worldXY * f4HillGrid.x + f4HillGrid.yz).a;
-#ifdef BLENDNORMALS
+#ifdef SM3
     if (f4Debug.w > 0)
         return float4(f4Debug.rgb, b.a);
 #endif

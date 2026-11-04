@@ -168,13 +168,11 @@ private:
     IDirect3DStateBlock9* m_overlayState = nullptr;
     IDirect3DVertexShader9* m_terrainVs = nullptr;
     IDirect3DPixelShader9* m_terrainPs = nullptr;
-    // The terrain with its blend sheet's normal map (Shader Model 3), made on first use, and the map for this draw.
+    // The terrain in Shader Model 3 (terrain_shadow.hlsl's SM3), made on first use.
     IDirect3DVertexShader9* m_terrainSheetVs = nullptr;
     IDirect3DPixelShader9* m_terrainSheetPs = nullptr;
     bool m_terrainSheetTried = false;
-    IDirect3DTexture9* m_sheetNormals = nullptr;
-    bool m_sheetNm = false;   // ...in DXT5nm
-    bool m_sheetPass = false;  // this terrain draw goes through that shader (the sheet read inside its tile, its normals)
+    bool m_sheetPass = false;  // this terrain draw goes through that shader
     float m_sheet[4] = {};     // its c23: the sheet's size in texels, w = 1: clamp to the tile
     // [terrain tiles] MixedCoastBlend: the plots' data (s9, MixedCoastPlots, uploaded when its version changes), which
     // paired land terrain each blend sheet is (by content), and this draw's c25-c27 (c25.w = 1: weighted).

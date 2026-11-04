@@ -682,8 +682,6 @@ void LoadConfig()
     g_config.detailNormalStrength = (std::max)(
         0.0f, static_cast<float>(_wtof(IniString(ini, L"textures", L"DetailNormalStrength", L"1").c_str())));
     g_config.blendTileClamp = IniInt(ini, L"textures", L"BlendTileClamp", 1) != 0;
-    g_config.blendNormalStrength = (std::max)(
-        0.0f, static_cast<float>(_wtof(IniString(ini, L"textures", L"BlendNormalStrength", L"1").c_str())));
     g_config.detailBumpiness =
         (std::max)(0.0f, static_cast<float>(_wtof(IniString(ini, L"textures", L"DetailBumpiness", L"1.5").c_str())));
     g_config.lightingEnabled = IniInt(ini, L"lighting", L"Enabled", 1) != 0;

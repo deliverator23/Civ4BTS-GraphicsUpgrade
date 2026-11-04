@@ -1470,41 +1470,6 @@ def main():
           f"PlotStamps<n>TextureDetail: the terrain's detail texture left off a painting at 0 (blue {d_none.get('lit')}, "
           f"whatever the detail: {d_flat.get('lit')}), all of it at 1 ({d_all.get('lit')}), between ({d_half.get('lit')})")
 
-    # A terrain blend sheet's own normal map (<Path> with _normal before .dds; Shader Model 3): the harness's base
-    # texture (1x1 grey 0x66) is recognised as the mod's blend sheet; the map's texel (64,128,255) tilts the normal 0.5
-    # against the sheet's u. The slope's texture coordinates run with the world (u along +x, v along -y), so the
-    # change is the same as the detail map's above; BlendNormalStrength=0 is without.
-    sheet_art = (b'<?xml version="1.0"?>\n<Civ4ArtDefines><TerrainArtInfos><TerrainArtInfo><Type>ART_DEF_TERRAIN_TEST</Type>'
-                 b'<Path>Art/Terrain/Textures/Blend/TestBlend.dds</Path><Grid>Art/Terrain/Textures/Blend/TestGrids.dds</Grid>'
-                 b'</TerrainArtInfo></TerrainArtInfos></Civ4ArtDefines>\n')
-    sheet_files = {'Assets/XML/Art/CIV4ArtDefines_Terrain.xml': sheet_art,
-                   'Assets/Art/Terrain/Textures/Blend/TestBlend.dds': dds_1x1(0xFF666666),
-                   'Assets/Art/Terrain/Textures/Blend/TestGrids.dds': dds_1x1(0xFF606060),
-                   'Assets/Art/Terrain/Textures/Blend/TestBlend_normal.dds': dds_1x1(0xFF4080FF)}
-    b_on, blog2 = shadow_run('sheet_normals', 0, 'slope', turned, mod_files=sheet_files)
-    b_off, _ = shadow_run('sheet_normals_off', 0, 'slope', turned + '[textures]\nBlendNormalStrength=0\n',
-                          mod_files=sheet_files)
-    # The same map as DXT5nm (one 4x4 DXT5 block: x 0x40 in alpha, y in green, the DDS's DDPF_NORMAL flag).
-    def dxt5nm_4x4(x, g6):
-        head = struct.pack('<4sIIIIIII44x', b'DDS ', 124, 0x81007, 4, 4, 16, 0, 1)
-        head += struct.pack('<II4sIIIII', 32, 0x80000004, b'DXT5', 0, 0, 0, 0, 0)
-        head += struct.pack('<IIIII', 0x1000, 0, 0, 0, 0)
-        colour = (g6 << 5) | (16 << 11) | 16
-        return head + bytes([x, x]) + bytes(6) + struct.pack('<HHI', colour, colour, 0)
-    nm_files = dict(sheet_files)
-    nm_files['Assets/Art/Terrain/Textures/Blend/TestBlend_normal.dds'] = dxt5nm_4x4(0x40, 32)
-    n_on, nlog2 = shadow_run('sheet_normals_nm', 0, 'slope', turned, mod_files=nm_files)
-    nm_got = n_on.get('lit', 0) - b_off.get('lit', 0)
-    check('DXT5nm' in nlog2 and abs(nm_got - want) <= 2 and n_on['released'],
-          f"the same map in DXT5nm (x in alpha, y in green): blue {n_on.get('lit')} (change {nm_got}, expected "
-          f"{want:.1f})")
-    got = b_on.get('lit', 0) - b_off.get('lit', 0)
-    check('blend normals: 1 terrain blend sheets, 1 with their own normal map' in blog2 and
-          'testblend_normal.dds in use for' in blog2.lower() and abs(got - want) <= 2 and abs(want) > 10 and
-          b_on.get('restored') == 1 and b_on['released'],
-          f"a terrain blend sheet's own normal map, read at the sheet's coordinates and turned with them (blue "
-          f"{b_on.get('lit')} vs {b_off.get('lit')} without: change {got}, expected {want:.1f})")
-
     # A unit under the ground (a sandworm under the sand) casts nothing on its sunward side; over it, it casts as ever.
     s_on, _ = shadow_run('sunk', 1, 'sunk')
     g_on, _ = shadow_run('ground50', 1, 'ground50')
