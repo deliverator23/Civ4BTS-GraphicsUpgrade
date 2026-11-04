@@ -501,6 +501,9 @@ void LoadConfig()
     g_config.terrainVertsPerPlot = IniInt(ini, L"debug", L"TerrainVertsPerPlot", 17);
     g_config.tileSetsPatch = IniInt(ini, L"terrain tiles", L"TilePicker", 0) != 0;
     g_config.hillField = IniInt(ini, L"terrain tiles", L"HillStamps", 0) != 0;
+    g_config.riverLayerTerrain = IniString(ini, L"terrain tiles", L"RiverLayerTerrain", L"");
+    g_config.riverLayerFirstTile = IniInt(ini, L"terrain tiles", L"RiverLayerFirstTile", 33);
+    g_config.riverLayerCaps = IniString(ini, L"terrain tiles", L"RiverLayerCaps", L"");
     for (int s = 0; s < 8; ++s)  // JigsawPieces1..8
     {
         const std::wstring n = L"JigsawPieces" + std::to_wstring(s + 1);

@@ -22,6 +22,7 @@
 #include "jigsaw.h"
 #include "hill_field.h"
 #include "plot_stamps.h"
+#include "river_layer.h"
 #include "terrain_sets.h"
 
 #include <algorithm>
@@ -45,6 +46,7 @@ struct GameDll
     Member getMap = nullptr;
     MemberInt width = nullptr, height = nullptr, numTerrains = nullptr, terrainType = nullptr;
     MemberBool wrapX = nullptr, wrapY = nullptr, isWater = nullptr, isHills = nullptr, isPeak = nullptr;
+    MemberBool isNOfRiver = nullptr, isWOfRiver = nullptr;  // optional: the river layer
     MemberArgs plot = nullptr;
     MemberArg terrainInfo = nullptr;
     MemberStr type = nullptr;
@@ -82,6 +84,8 @@ struct GameDll
         isWater = reinterpret_cast<MemberBool>(get("?isWater@CvPlot@@QBE_NXZ"));  // optional
         isHills = reinterpret_cast<MemberBool>(get("?isHills@CvPlot@@QBE_NXZ"));  // optional: the hill field
         isPeak = reinterpret_cast<MemberBool>(get("?isPeak@CvPlot@@QBE_NXZ"));    // optional: jigsaw sets
+        isNOfRiver = reinterpret_cast<MemberBool>(get("?isNOfRiver@CvPlot@@QBE_NXZ"));
+        isWOfRiver = reinterpret_cast<MemberBool>(get("?isWOfRiver@CvPlot@@QBE_NXZ"));
         numTerrains = reinterpret_cast<MemberInt>(get("?getNumTerrainInfos@CvGlobals@@QAEHXZ"));
         terrainInfo = reinterpret_cast<MemberArg>(get("?getTerrainInfo@CvGlobals@@QAEAAVCvTerrainInfo@@W4TerrainTypes@@@Z"));
         type = reinterpret_cast<MemberStr>(get("?getType@CvInfoBase@@QBEPBDXZ"));
@@ -1404,10 +1408,11 @@ unsigned g_overlaySquares = 0;  // coast squares where an overlay (peaks) coveri
 unsigned g_blendedSquares = 0;  // MixedCoastBlend: squares whose paired land layers blend
 
 // [terrain tiles] MixedCoastBlend: what the terrain shader needs to weight a blended square's paired land layers
-// (terrain_shadow.hlsl, MixWeight). Per plot: r = terrain + 1, g = 255 where water, b = the terrain's rank among the
-// paired land terrains by layer order (1, 2...; 0: none), a = 255 where the square with this plot at its south-west
-// corner (its lowest x and y) is blended. A peak plot has the peak layer's terrain and rank, whatever its own terrain:
-// that layer is what shows there. Filled by the blend pick hook as the engine builds the layers.
+// (terrain_shadow.hlsl, MixWeight). Per plot: r = terrain + 1, g = 255 where water, 128 on a peak plot (when the peak
+// layer is paired), b = the terrain's rank among the paired land terrains by layer order (1, 2...; 0: none), a = 255
+// where the square with this plot at its south-west corner (its lowest x and y) is blended. A peak plot keeps its own
+// terrain and rank: the engine builds that terrain's layer there, so the layer must find its corner, or it's drawn whole.
+// Filled by the blend pick hook as the engine builds the layers.
 struct MixData
 {
     bool tried = false, on = false;
@@ -1582,9 +1587,10 @@ extern "C" void __stdcall LandBlendFix(int terrain, int mask, int* tile, int* ro
             if (i < 0)
                 continue;
             void* plot = g_mix.peak >= 0 ? g_dll.plot(map, nullptr, at[k][0], at[k][1]) : nullptr;
-            const int t = plot && g_dll.isPeak(plot, nullptr) ? g_mix.peak : corners.terrain[k];
+            const bool peak = plot && g_dll.isPeak(plot, nullptr);
+            const int t = corners.terrain[k];
             MixSet(i, static_cast<uint8_t>(t >= 0 && t < 254 ? t + 1 : 0));
-            MixSet(i + 1, corners.water[k] ? 255 : 0);
+            MixSet(i + 1, corners.water[k] ? 255 : peak ? 128 : 0);
             MixSet(i + 2, static_cast<uint8_t>(t >= 0 && t < static_cast<int>(g_mix.rank.size()) ? g_mix.rank[t] : 0));
         }
         if (x != g_mix.squareX || y != g_mix.squareY)
@@ -1784,6 +1790,240 @@ void ApplyLandBlends()
         Log::Write("terrain land blends: %d of %u code sites written (%s build); %u terrain%s with land entries", written,
                    static_cast<unsigned>(sites.size()), g_exe->name, static_cast<unsigned>(g_landBlends.size()),
                    g_landBlends.size() == 1 ? "" : "s");
+}
+
+namespace
+{
+void(__stdcall* g_layerBuilder)(void*) = nullptr;
+int g_riverTerrain = -2, g_riverOrder = 0;  // -2: not looked up yet; -1: it can't run
+unsigned g_riverLogged = 0xffffffffu;
+RiverLayer::Shapes g_shapes;
+bool g_shapesRead = false;
+unsigned g_capSquares = 0, g_capLogged = 0;
+
+// The shape tiles, once.
+void ReadShapes()
+{
+    if (g_shapesRead)
+        return;
+    g_shapesRead = true;
+    const std::wstring& folder = g_config.riverLayerCaps;
+    if (folder.empty())
+        return;
+    for (const RiverLayer::ShapeId& id : RiverLayer::kOrder)
+    {
+        g_shapes.first[id.kind][id.arms] = static_cast<int>(g_shapes.tiles.size());
+        for (int n = 1;; ++n)
+        {
+            const std::string name = RiverLayer::CapFile(id.kind, id.arms, n);
+            std::vector<uint8_t> file, cap;
+            std::wstring from;
+            if (!ReadPiecesFile(folder, name, file, from))
+                break;
+            if (!RiverLayer::ParseCap(file, cap))
+            {
+                Log::Write("terrain river layer: %s isn't a 64 x 64 8-bit grey TGA, left out", name.c_str());
+                continue;
+            }
+            g_shapes.tiles.push_back(std::move(cap));
+            ++g_shapes.count[id.kind][id.arms];
+        }
+    }
+    Log::Write("terrain river layer: %u shape tiles from %ls", static_cast<unsigned>(g_shapes.tiles.size()), folder.c_str());
+}
+
+// The tile for square (x, y), or -1: its arms from the plots round its middle, and which of them are water or sinks.
+int ShapeAt(void* map, int x, int y, int h, int w, bool wrapX, int* armsOut)
+{
+    int c[4][2];
+    TileSets::Corners(x, y, h, c);  // TL, TR, BR, BL
+    void* plots[4];
+    for (int k = 0; k < 4; ++k)
+        plots[k] = g_dll.plot(map, nullptr, c[k][0], c[k][1]);
+    void* tl = plots[0];
+    void* tr = plots[1];
+    void* bl = plots[3];
+    const int arms = RiverLayer::Arms(tl && g_dll.isWOfRiver(tl, nullptr), bl && g_dll.isWOfRiver(bl, nullptr),
+                                      tl && g_dll.isNOfRiver(tl, nullptr), tr && g_dll.isNOfRiver(tr, nullptr));
+    if (armsOut)
+        *armsOut = arms;
+    if (arms == 0 || g_shapes.tiles.empty())
+        return -1;
+    int open = 0;
+    for (int k = 0; k < 4; ++k)
+        if (plots[k] && ((g_dll.isWater && g_dll.isWater(plots[k], nullptr)) || (g_dll.isHills && g_dll.isHills(plots[k], nullptr))))
+            open |= 1 << k;
+    return RiverLayer::ShapeTile(g_shapes, arms, open, wrapX && w > 0 ? x % w : x, y);
+}
+
+// The terrain's number and layer order, the first time the records are built (the DLL's infos are loaded by then).
+void FindRiverTerrain()
+{
+    g_riverTerrain = -1;
+    if (!g_dll.Resolve() || !g_dll.isNOfRiver || !g_dll.isWOfRiver || !g_dll.artDefineTag || !g_dll.artFileMgr ||
+        !g_dll.terrainArt || !g_dll.layerOrder)
+    {
+        Log::Write("terrain river layer: off: the game DLL lacks the river or terrain art exports");
+        return;
+    }
+    const std::wstring& w = g_config.riverLayerTerrain;
+    const std::string wanted(w.begin(), w.end());
+    void* gc = g_dll.getInstance();
+    const int count = g_dll.numTerrains(gc, nullptr);
+    for (int t = 0; t < count; ++t)
+    {
+        void* info = g_dll.terrainInfo(gc, nullptr, t);
+        const char* name = g_dll.type(info, nullptr);
+        if (!name || _stricmp(name, wanted.c_str()) != 0)
+            continue;
+        const char* tag = g_dll.artDefineTag(info, nullptr);
+        void* art = tag ? g_dll.terrainArt(g_dll.artFileMgr(), nullptr, tag) : nullptr;
+        if (art)
+        {
+            g_riverTerrain = t;
+            g_riverOrder = g_dll.layerOrder(art, nullptr);
+        }
+        break;
+    }
+    if (g_riverTerrain < 0)
+        Log::Write("terrain river layer: off: no terrain %s with art", wanted.c_str());
+}
+
+// Runs in place of the layer record builder (river_layer.h).
+void __stdcall RiverLayerBuilder(void* landscape)
+{
+    g_layerBuilder(landscape);
+    if (g_riverTerrain == -2)
+        FindRiverTerrain();
+    if (g_riverTerrain < 0)
+        return;
+    ReadShapes();
+    void* map = g_dll.Map();
+    const int w = g_dll.width(map, nullptr), h = g_dll.height(map, nullptr);
+    const bool wrapX = g_dll.wrapX(map, nullptr);
+    uint8_t* records = *reinterpret_cast<uint8_t**>(static_cast<uint8_t*>(landscape) + RiverLayer::kRecordsAt);
+    unsigned added = 0, full = 0;
+    for (int y = 0; y <= h; ++y)
+        for (int x = 0; x <= w; ++x)
+        {
+            int arms = 0;
+            const int shape = ShapeAt(map, x, y, h, w, wrapX, &arms);
+            if (arms == 0)
+                continue;
+            const int tile = shape >= 0 ? g_config.riverLayerFirstTile + shape : RiverLayer::Tile(arms, g_config.riverLayerFirstTile);
+            uint8_t* record = records + (static_cast<size_t>(y) * (w + 1) + x) * RiverLayer::kRecordBytes;
+            if (RiverLayer::Add(record, g_riverTerrain, tile, g_riverOrder))
+                ++added;
+            else
+                ++full;
+        }
+    if (added + full * 65536 != g_riverLogged)
+    {
+        g_riverLogged = added + full * 65536;
+        Log::Write("terrain river layer: on %u squares (%u had no free layer), terrain %d, order %d", added, full,
+                   g_riverTerrain, g_riverOrder);
+    }
+}
+}  // namespace
+
+extern "C" uint32_t g_peakStampFn = 0;
+
+// After the peak stamp, the last of a square's stamps (river_layer.h).
+extern "C" void __stdcall RiverCapSquare(uint8_t* landscape, int x, int y)
+{
+    if (!g_dll.Resolve() || !g_dll.isNOfRiver || !g_dll.isWOfRiver)
+        return;
+    ReadShapes();
+    if (g_shapes.tiles.empty())
+        return;
+    uint8_t* image = *reinterpret_cast<uint8_t**>(landscape + 4);
+    if (!image)
+        return;
+    const int cellW = *reinterpret_cast<int*>(landscape + 0x30) - 1, cellH = *reinterpret_cast<int*>(landscape + 0x34) - 1;
+    const int stride = *reinterpret_cast<int*>(image + 0x50);
+    uint8_t* pixels = *reinterpret_cast<uint8_t**>(image + 0x58);
+    if (!pixels || cellW != RiverLayer::kCapSize || cellH != RiverLayer::kCapSize)
+        return;
+    void* map = g_dll.Map();
+    const int w = g_dll.width(map, nullptr), h = g_dll.height(map, nullptr);
+    const int shape = ShapeAt(map, x, y, h, w, g_dll.wrapX(map, nullptr), nullptr);
+    if (shape < 0)
+        return;
+    RiverLayer::ApplyCap(pixels + static_cast<size_t>(cellH) * stride * y + static_cast<size_t>(cellW) * x, stride,
+                         g_shapes.tiles[shape].data());
+    ++g_capSquares;
+}
+
+// The peak stamp's calls come here: (landscape, x) on the stack, its RET 8 pops them, the mask in EAX and y in EBX.
+extern "C" __declspec(naked) void RiverPeakThunk()
+{
+    __asm {
+        push dword ptr [esp + 8]    // x
+        push dword ptr [esp + 8]    // landscape
+        call dword ptr [g_peakStampFn]
+        push ebx                    // y
+        push dword ptr [esp + 0xc]  // x
+        push dword ptr [esp + 0xc]  // landscape
+        call RiverCapSquare
+        ret 8
+    }
+}
+
+void ApplyRiverLayer()
+{
+    if (g_config.riverLayerTerrain.empty())
+        return;
+    wchar_t exe[MAX_PATH] = {};
+    GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    std::wstring name = exe;
+    name = name.substr(name.find_last_of(L"\\/") + 1);
+    for (auto& c : name)
+        c = static_cast<wchar_t>(towlower(c));
+    if (name != L"civ4beyondsword.exe")
+    {
+        Log::Write("terrain river layer: not applied: %ls isn't Civ4BeyondSword.exe", name.c_str());
+        return;
+    }
+    const uint8_t* base = reinterpret_cast<const uint8_t*>(GetModuleHandleW(nullptr));
+    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS32*>(base + reinterpret_cast<const IMAGE_DOS_HEADER*>(base)->e_lfanew);
+    if (reinterpret_cast<uint32_t>(base) != 0x400000)
+    {
+        Log::Write("terrain river layer: not applied: the exe is loaded at %p, not 0x400000", base);
+        return;
+    }
+    const Exe::Layout* exeLayout = Exe::Identify(base, nt->OptionalHeader.SizeOfImage);
+    if (!exeLayout)
+    {
+        Log::Write("terrain river layer: not applied: not a BtS 3.1.9.0 build it knows (exe timestamp 0x%08lx)",
+                   static_cast<unsigned long>(nt->FileHeader.TimeDateStamp));
+        return;
+    }
+    const uint32_t at = reinterpret_cast<uint32_t>(base);
+    g_layerBuilder = reinterpret_cast<void(__stdcall*)(void*)>(at + exeLayout->layerBuilder);
+    g_peakStampFn = at + exeLayout->peakStamp;
+    auto sites = RiverLayer::Sites(at, reinterpret_cast<uint32_t>(&RiverLayerBuilder), *exeLayout);
+    if (!g_config.riverLayerCaps.empty())
+        for (const auto& site : RiverLayer::CapSites(at, reinterpret_cast<uint32_t>(&RiverPeakThunk), *exeLayout))
+            sites.push_back(site);
+    int written = 0;
+    const std::string why = TerrainPatch::ApplySites(base, nt->OptionalHeader.SizeOfImage, sites,
+                                                     [&](uint32_t rva, const uint8_t* bytes, size_t count) {
+        void* to = const_cast<uint8_t*>(base) + rva;
+        DWORD old = 0;
+        if (VirtualProtect(to, count, PAGE_EXECUTE_READWRITE, &old))
+        {
+            memcpy(to, bytes, count);
+            VirtualProtect(to, count, old, &old);
+            FlushInstructionCache(GetCurrentProcess(), to, count);
+            ++written;
+        }
+    });
+    if (!why.empty())
+        Log::Write("terrain river layer: not applied: %s (%s build)", why.c_str(), exeLayout->name);
+    else
+        Log::Write("terrain river layer: %d of %u code sites written (%s build); %ls, tiles from %d", written,
+                   static_cast<unsigned>(sites.size()), exeLayout->name, g_config.riverLayerTerrain.c_str(),
+                   g_config.riverLayerFirstTile);
 }
 
 std::string LandBlendsSummary()

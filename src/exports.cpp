@@ -30,6 +30,7 @@ static void Init()
     ApplyTerrainPatch();
     ApplyTileSets();
     ApplyLandBlends();
+    ApplyRiverLayer();
     ApplyPlotFlatten();
     if (!g_config.chainDll.empty())
     {

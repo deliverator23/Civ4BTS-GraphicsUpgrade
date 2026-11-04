@@ -229,7 +229,7 @@ inline bool ParseLandBlend(const std::string& text, LandBlend& out, std::string&
 // by its share of the square's land corners (terrain_shadow.hlsl, MixWeight), so the terrains blend across the square
 // and agree along every edge with the squares beside it. A square left to the engine stays so. An overlay taking the
 // whole land's cliff on a coast (above) marks its square too: its layer is weighted by its share of the land corners
-// (peak plots count as the peak layer's in the shader's data, whatever their terrain), so Mesa blends across the square.
+// (the shader's data marks peak plots, which keep their terrain too), so Mesa blends across the square.
 struct BlendCorners
 {
     int terrain[4];

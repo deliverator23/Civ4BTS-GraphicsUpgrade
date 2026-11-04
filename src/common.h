@@ -102,6 +102,12 @@ struct Config
     std::wstring landBlends[8];
     // StandardBlendOnLand (no number): terrains taking BtS's standard blend layout on land squares
     std::wstring landBlendTerrains;
+    // [terrain tiles] RiverLayerTerrain=<terrain type> (experimental, river_layer.h; empty = off): that terrain's layer
+    // on every square a river runs through, its blend tile picked by the river's arms there, from RiverLayerFirstTile.
+    std::wstring riverLayerTerrain;
+    int riverLayerFirstTile = 33;
+    // RiverLayerCaps=<folder under Assets> (river_layer.h; empty = none): shape tiles, cutting the ground to fit.
+    std::wstring riverLayerCaps;
     // MixedCoastBlend=1 (terrain_sets.h, BlendSquare): on a coast square of two or more land terrains with paired lists,
     // each paired land layer paints the whole land and the terrain shader weights it by its share of the square's land
     // corners, so they blend across the square instead of meeting in square blocks. Needs our terrain shader (the
@@ -272,6 +278,8 @@ void ApplyPlotFlatten();
 // [terrain tiles] StandardBlendOnLand(1..8): hooks the terrain layers' blend pick if any is set (terrain_sets.cpp).
 // Once.
 void ApplyLandBlends();
+// [terrain tiles] RiverLayerTerrain: hooks the terrain layer records if set (terrain_sets.cpp). Once.
+void ApplyRiverLayer();
 std::string LandBlendsSummary();  // "" if nothing new since the last call
 // "terrain tile groups: ..." (picks by tile group, hill/peak variants used) when they changed since the last call,
 // else "".
@@ -281,11 +289,10 @@ std::string TileSetsSummary();
 bool PlotStampsOn();
 std::wstring PlotStampsHiddenModels();
 // [terrain tiles] MixedCoastBlend (terrain_sets.cpp): the plots the terrain shader weights blended squares by (false
-// when off): rgba a plot (r = terrain + 1, g = 255 where water, b = the paired land terrain's rank by layer order, a =
-// 255 where the square with this plot at its south-west corner blends), the map's size and wrap, a version that changes
-// with the data, and world xy -> plot coordinates (x = scale, yz = offset; plot centres at whole numbers). A peak plot
-// has the peak layer's terrain and rank. And the paired land terrains' blend and grid sheets (paths under Assets), each
-// with its terrain + 1 and rank.
+// when off): rgba a plot (r = terrain + 1, g = 255 where water, 128 on a peak plot, b = the paired land terrain's rank by
+// layer order, a = 255 where the square with this plot at its south-west corner blends), the map's size and wrap, a
+// version that changes with the data, and world xy -> plot coordinates (x = scale, yz = offset; plot centres at whole
+// numbers). And the paired land terrains' blend and grid sheets (paths under Assets), each with its terrain + 1 and rank.
 struct MixedCoastMap
 {
     const uint8_t* rgba = nullptr;

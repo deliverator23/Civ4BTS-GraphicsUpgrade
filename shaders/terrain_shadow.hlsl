@@ -60,9 +60,10 @@ float4 f4Sheet : register(c23);           // the blend sheet: xy = its size in t
 float4 f4Debug : register(c24);           // [debug] TerrainDebug 4: w = 1, a flat colour (rgb) with the sheet's alpha
 // [terrain tiles] MixedCoastBlend: on a coast square of two or more land terrains with paired lists, each of those
 // layers paints the whole land (terrain_sets.h, BlendSquare); here each is weighted by its share of the square's land
-// corners. The plots (s9): r = terrain + 1, g = 1 where water, b = the paired land terrain's rank by layer order (0:
-// none), a = 1 where the square with this plot at its south-west corner blends. A peak plot has the peak layer's terrain
-// and rank: Mesa blends the same way, its share taken of all the land corners, as it's drawn over them all.
+// corners. The plots (s9): r = terrain + 1, g = 1 where water, 0.5 on a peak plot, b = the paired land terrain's rank by
+// layer order (0: none), a = 1 where the square with this plot at its south-west corner blends. A peak plot keeps its
+// terrain and rank, as the engine builds that terrain's layer there. Mesa, the peak layer, blends the same way by the peak
+// plots, its share taken of all the land corners, as it's drawn over them all.
 sampler2D MixPlots : register(s9);
 float4 f4Mix : register(c25);        // x = this layer's terrain + 1, y = its rank, z = 1: the peak layer, w = 1: weight it
 float4 f4MixToPlot : register(c26);  // world xy -> plot coordinates (plot centres at whole numbers): x = scale, yz = offset
@@ -88,10 +89,11 @@ float MixWeight(float2 world, float2 at)
     if (c0.a < 0.5)
         return 1;  // not a blended square
     float4 bw = float4((1 - f.x) * (1 - f.y), f.x * (1 - f.y), (1 - f.x) * f.y, f.x * f.y);
-    float4 land = 1 - step(0.5, float4(c0.g, c1.g, c2.g, c3.g));
+    float4 mark = float4(c0.g, c1.g, c2.g, c3.g);
+    float4 land = 1 - step(0.75, mark);
     float4 terrain = floor(float4(c0.r, c1.r, c2.r, c3.r) * 255 + 0.5);
     float4 rank = floor(float4(c0.b, c1.b, c2.b, c3.b) * 255 + 0.5) * land;
-    float4 own = (1 - step(0.5, abs(terrain - f4Mix.x))) * land;
+    float4 own = lerp((1 - step(0.5, abs(terrain - f4Mix.x))) * land, step(0.25, mark) * land, f4Mix.z);
     float4 lower = lerp(step(0.5, rank) * (1 - step(f4Mix.y - 0.5, rank)), land * (1 - own), f4Mix.z);
     if (dot(own, 1) == 0 || dot(lower, 1) == 0)
         return 1;  // not at this square's land corners (an overlay), or the lowest paired terrain: drawn whole

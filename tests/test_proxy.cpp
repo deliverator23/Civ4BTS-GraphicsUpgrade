@@ -3113,6 +3113,156 @@ static int TerrainCellsTest()
     return 0;
 }
 
+#include "../src/river_layer.h"
+
+// test_proxy riverlayer: the river layer's arms, records and patch sites (river_layer.h). Prints "RIVERLAYER name=0/1 ...".
+static int RiverLayerTest()
+{
+    using namespace RiverLayer;
+    const bool arms = Arms(true, false, false, false) == kNorth && Arms(false, true, false, false) == kSouth &&
+                      Arms(false, false, true, false) == kWest && Arms(false, false, false, true) == kEast &&
+                      Arms(true, true, true, true) == 15 && Arms(false, false, false, false) == 0;
+    const bool tile = Tile(1, 33) == 33 && Tile(15, 33) == 47;
+
+    // A record as the builder leaves it: rock (terrain 3, order 14), then the end marker
+    uint8_t r[kRecordBytes];
+    memset(r, 0, sizeof(r));
+    const uint16_t end = 0xffff, turned = 90;
+    r[0] = 3;
+    r[6] = 15;
+    r[0xc] = 20;
+    memcpy(r + 0x18, &turned, 2);
+    r[0x24] = 14;
+    r[1] = 0xff;
+    r[0xc + 1] = 0xff;
+    r[0x12 + 1] = 0xff;
+    memcpy(r + 0x18 + 2, &end, 2);
+    r[0x24 + 1] = 0xff;
+    uint16_t rot = 1234, next = 0;
+    const bool added = Add(r, 9, 40, 100);
+    memcpy(&rot, r + 0x18 + 2, 2);
+    memcpy(&next, r + 0x18 + 4, 2);
+    const bool add = added && r[0] == 3 && r[6] == 15 && r[0xc] == 20 && r[0x24] == 14 &&  // the rock's layer as it was
+                     r[1] == 9 && r[6 + 1] == 15 && r[0xc + 1] == 40 && rot == 0 && r[0x24 + 1] == 100 && r[0x2a + 1] == 0 &&
+                     r[2] == 0xff && r[6 + 2] == 0 && r[0xc + 2] == 0xff && next == 0xffff && r[0x24 + 2] == 0xff;
+    // Filling the six slots: the last has no room for an end marker (the reader stops at six), the seventh is refused
+    bool fill = true;
+    for (int k = 2; k < kLayers; ++k)
+        fill = Add(r, 9, 40, 100) && fill;
+    uint8_t before[kRecordBytes];
+    memcpy(before, r, sizeof(r));
+    const bool full = fill && r[6 + 5] == 15 && !Add(r, 9, 41, 100) && memcmp(before, r, sizeof(r)) == 0;
+
+    // Both builds: four calls to the builder, each rewritten to the thunk; another build's bytes refused
+    bool sites = true, refused = true;
+    for (const Exe::Layout* x : Exe::kLayouts)
+    {
+        const uint32_t base = 0x400000, thunk = 0x10001000;
+        const auto list = Sites(base, thunk, *x);
+        std::vector<uint8_t> image(0x100000, 0x90);
+        sites = sites && list.size() == 4;
+        for (const auto& s : list)
+            memcpy(image.data() + s.rva, s.original.data(), s.original.size());
+        int written = 0;
+        const std::string why = TerrainPatch::ApplySites(image.data(), image.size(), list,
+                                                         [&](uint32_t rva, const uint8_t* bytes, size_t count) {
+            memcpy(image.data() + rva, bytes, count);
+            ++written;
+        });
+        sites = sites && why.empty() && written == 4;
+        for (const auto& s : list)
+        {
+            int32_t rel = 0;
+            memcpy(&rel, image.data() + s.rva + 1, 4);
+            sites = sites && image[s.rva] == 0xe8 && base + s.rva + 5 + static_cast<uint32_t>(rel) == thunk;
+        }
+        std::vector<uint8_t> other(0x100000, 0x90);
+        const std::string no = TerrainPatch::ApplySites(other.data(), other.size(), list,
+                                                        [&](uint32_t, const uint8_t*, size_t) { refused = false; });
+        refused = refused && !no.empty();
+    }
+    // A cap tile: 64 x 64, 8-bit; a TGA's row order; other files refused
+    std::vector<uint8_t> tga(18 + kCapSize * kCapSize, 200), parsed;
+    memset(tga.data(), 0, 18);
+    tga[2] = 3;
+    tga[12] = tga[14] = kCapSize;
+    tga[16] = 8;
+    tga[18] = 7;                                  // bottom-up: the first row in the file is the south one
+    bool parse = ParseCap(tga, parsed) && parsed[(kCapSize - 1) * kCapSize] == 7 && parsed[0] == 200;
+    tga[17] = 0x20;                               // top-down
+    parse = parse && ParseCap(tga, parsed) && parsed[0] == 7;
+    std::vector<uint8_t> bad = tga;
+    bad[16] = 24;
+    parse = parse && !ParseCap(bad, parsed);
+    bad = tga;
+    bad[12] = 32;
+    parse = parse && !ParseCap(bad, parsed);
+    bad = tga;
+    bad.resize(100);
+    parse = parse && !ParseCap(bad, parsed);
+
+    // Shapes: mouths only on one arm, and only where they exist; a square keeps its pick; nothing for no arms
+    Shapes shapes;
+    shapes.tiles.resize(9);
+    shapes.first[0][1] = 0, shapes.count[0][1] = 2;
+    shapes.first[0][5] = 2, shapes.count[0][5] = 3;
+    shapes.first[1][1] = 5, shapes.count[1][1] = 2;
+    shapes.first[0][2] = 7, shapes.count[0][2] = 1;
+    bool pick = true;
+    for (int x = 0; x < 40; ++x)
+        for (int y = 0; y < 40; ++y)
+        {
+            const int a = ShapeTile(shapes, 1, 0, x, y), b = ShapeTile(shapes, 1, 12, x, y);
+            const int c = ShapeTile(shapes, 5, 15, x, y), d = ShapeTile(shapes, 2, 15, x, y);
+            pick = pick && a >= 0 && a < 2 && b >= 5 && b < 7 && c >= 2 && c < 5 && d == 7;
+            pick = pick && a == ShapeTile(shapes, 1, 0, x, y);
+        }
+    pick = pick && ShapeTile(shapes, 0, 0, 1, 1) == -1 && ShapeTile(shapes, 3, 0, 1, 1) == -1;
+    // A mouth by which far corners are open, and a missing mouth falling back on the shape itself
+    pick = pick && MouthKind(1, 8) == 2 && MouthKind(1, 4) == 3 && MouthKind(1, 12) == 1 && MouthKind(1, 0) == 0 &&
+           MouthKind(2, 1) == 2 && MouthKind(2, 8) == 3 && MouthKind(4, 3) == 1 && MouthKind(8, 2) == 3 &&
+           MouthKind(5, 15) == 0 && MouthKind(3, 15) == 0;
+    pick = pick && ShapeTile(shapes, 1, 8, 1, 1) == ShapeTile(shapes, 1, 0, 1, 1);
+    pick = pick && Pick(5, 9, 18) == ((((5u * 0x1C81 + 9u * 0xB5D) * 214013u + 2531011u) >> 16) & 0x7FFF) % 18;
+    // Every shape in the order is one of the fifteen, or a one-arm mouth, once
+    bool order = sizeof(kOrder) / sizeof(kOrder[0]) == 27;
+    for (const ShapeId& a : kOrder)
+    {
+        int same = 0;
+        for (const ShapeId& b : kOrder)
+            same += a.kind == b.kind && a.arms == b.arms;
+        order = order && same == 1 && a.arms >= 1 && a.arms <= 15;
+    }
+    order = order && CapFile(0, 12, 3) == "cap12_3.tga" && CapFile(1, 8, 1) == "mouth8_1.tga" &&
+            CapFile(2, 4, 1) == "mouthr4_1.tga" && CapFile(3, 2, 2) == "mouthl2_2.tga";
+
+    // The cap: min in place, through a stride, nothing outside the square
+    const int gridStride = 80;
+    std::vector<uint8_t> grid(gridStride * (kCapSize + 2), 150), capTile(kCapSize * kCapSize, 255);
+    capTile[0] = 48;
+    capTile[kCapSize + 1] = 96;
+    capTile[kCapSize * kCapSize - 1] = 200;
+    ApplyCap(grid.data() + gridStride, gridStride, capTile.data());
+    const uint8_t* g = grid.data() + gridStride;
+    bool cap = g[0] == 48 && g[gridStride + 1] == 96 && g[1] == 150 && g[(kCapSize - 1) * gridStride + kCapSize - 1] == 150;
+    for (int k = 0; k < gridStride; ++k)
+        cap = cap && grid[k] == 150 && grid[(kCapSize + 1) * gridStride + k] == 150;
+    for (int r = 0; r < kCapSize; ++r)
+        cap = cap && g[r * gridStride + kCapSize] == 150;
+
+    bool capsites = true;
+    for (const Exe::Layout* x : Exe::kLayouts)
+    {
+        const auto list = CapSites(0x400000, 0x10002000, *x);
+        capsites = capsites && list.size() == 4;
+        for (const auto& s : list)
+            capsites = capsites && s.original[0] == 0xe8 && s.patched[0] == 0xe8 && s.rva > x->peakStamp - 0x2000 && s.rva < x->peakStamp;
+    }
+    printf("RIVERLAYER arms=%d tile=%d add=%d full=%d sites=%d refused=%d parse=%d pick=%d order=%d cap=%d capsites=%d\n", arms,
+           tile, add, full, sites, refused, parse, pick, order, cap, capsites);
+    return 0;
+}
+
 // test_proxy tilesets: terrain tile sets' logic and patch sites (terrain_sets.h). Prints "TILESETS name=0/1 ...".
 static int TileSetsTest()
 {
@@ -3298,13 +3448,14 @@ static int TileSetsTest()
         runAll(mixed, {{0, 15, false}, {13, 2, true}, {14, 1, true}, {40, 2, true}},
                {A::Engine, A::FullMask, A::FullMask, A::FullMask}, true, 3);
     // The shader's weight (terrain_shadow.hlsl, MixWeight), as written there: corners SW, SE, NW, NE; terrain + 1, water,
-    // rank (0: not paired). Drawn one over another in rank order, each terrain should end up at its share of the paired
+    // rank (0: not paired), peak plot. Drawn one over another in rank order, each terrain should end up at its share of the paired
     // land corners, and two squares should agree along their shared edge.
     struct Corner
     {
         int terrain;
         bool water;
         int rank;
+        bool peak;
     };
     auto weight = [](const Corner c[4], int layer, int layerRank, float fx, float fy) {
         const float bw[4] = {(1 - fx) * (1 - fy), fx * (1 - fy), (1 - fx) * fy, fx * fy};
@@ -3364,19 +3515,19 @@ static int TileSetsTest()
     const bool whole = weight(single, 15, 1, 0.3f, 0.6f) == 1.0f && weight(sqA, 41, 3, 0, 0) == 0.0f &&
                        weight(sqA, 15, 1, 0.9f, 0.9f) == 1.0f && weight(sqA, 99, 4, 0.5f, 0.5f) == 1.0f;
     // The peak layer (an overlay: Mesa) on a coast: it takes the full land mask and marks the square, on a square of one
-    // land terrain too; covering all the land, the engine's pick, unmarked. In the shader's data a peak plot is the peak
-    // layer's, whatever its terrain, and its share is of all the land corners, paired or not.
+    // land terrain too; covering all the land, the engine's pick, unmarked. In the shader's data a peak plot keeps its
+    // terrain and is marked, and the peak layer's share is of all the land corners, paired or not.
     const bool overlayPicks =
         runAll(rockCoast, {{0, 15, false}, {14, 3, true}, {40, 1, true}}, {A::Engine, A::Engine, A::FullMask}, true, 3) &&
         runAll(rockCoast, {{0, 15, false}, {14, 3, true}, {40, 3, true}}, {A::Engine, A::Engine, A::Engine}, false) &&
         runAll(rockCoast, {{0, 15, false}, {14, 3, true}, {40, 1, false}}, {A::Engine, A::Engine, A::Engine}, false);
-    auto overlayWeight = [](const Corner c[4], int layer, float fx, float fy) {
+    auto overlayWeight = [](const Corner c[4], float fx, float fy) {
         const float bw[4] = {(1 - fx) * (1 - fy), fx * (1 - fy), (1 - fx) * fy, fx * fy};
         float own = 0, lower = 0;
         bool anyOwn = false, anyLower = false;
         for (int k = 0; k < 4; ++k)
         {
-            const bool land = !c[k].water, isOwn = land && c[k].terrain == layer, isLower = land && !isOwn;
+            const bool land = !c[k].water, isOwn = land && c[k].peak, isLower = land && !isOwn;
             anyOwn = anyOwn || isOwn;
             anyLower = anyLower || isLower;
             own += isOwn ? bw[k] : 0;
@@ -3385,10 +3536,10 @@ static int TileSetsTest()
         return !anyOwn || !anyLower ? 1.0f : own / (std::max)(own + lower, 1e-5f);
     };
     // SW Mesa (a peak plot), SE Rock, NW water, NE Plains (no paired list); the square east shares SE and NE.
-    const Corner mesaA[4] = {{41, false, 3}, {15, false, 1}, {1, true, 0}, {9, false, 0}};
-    const Corner mesaB[4] = {{15, false, 1}, {41, false, 3}, {9, false, 0}, {1, true, 0}};
-    const Corner mesaPure[4] = {{41, false, 3}, {41, false, 3}, {1, true, 0}, {1, true, 0}};
-    bool overlayShare = overlayWeight(mesaPure, 41, 0.3f, 0.2f) == 1.0f;
+    const Corner mesaA[4] = {{15, false, 1, true}, {15, false, 1}, {1, true, 0}, {9, false, 0}};
+    const Corner mesaB[4] = {{15, false, 1}, {14, false, 2, true}, {9, false, 0}, {1, true, 0}};
+    const Corner mesaPure[4] = {{15, false, 1, true}, {14, false, 2, true}, {1, true, 0}, {1, true, 0}};
+    bool overlayShare = overlayWeight(mesaPure, 0.3f, 0.2f) == 1.0f;
     for (int i = 0; i <= 8; ++i)
         for (int j = 0; j <= 8; ++j)
         {
@@ -3396,15 +3547,28 @@ static int TileSetsTest()
             const float bw[4] = {(1 - fx) * (1 - fy), fx * (1 - fy), (1 - fx) * fy, fx * fy};
             const float land = bw[0] + bw[1] + bw[3];
             if (land > 0.05f)
-                overlayShare = overlayShare && std::fabs(overlayWeight(mesaA, 41, fx, fy) - bw[0] / land) < 1e-4f;
+                overlayShare = overlayShare && std::fabs(overlayWeight(mesaA, fx, fy) - bw[0] / land) < 1e-4f;
         }
     bool overlayEdges = true;
     for (int j = 0; j <= 8; ++j)  // A's east edge has no Mesa corner, nor has B's west: none of it on either side
-        overlayEdges = overlayEdges && overlayWeight(mesaA, 41, 1, j / 8.0f) < 1e-4f &&
-                       overlayWeight(mesaB, 41, 0, j / 8.0f) < 1e-4f;
-    const bool mixBlend = blendPicks && partition && edges && whole && overlayPicks && overlayShare && overlayEdges;
-    printf("TILESETS mixblend=%d (picks %d, partition %d, edges %d, whole %d, overlay picks %d, share %d, edges %d)\n",
-           mixBlend, blendPicks, partition, edges, whole, overlayPicks, overlayShare, overlayEdges);
+        overlayEdges = overlayEdges && overlayWeight(mesaA, 1, j / 8.0f) < 1e-4f &&
+                       overlayWeight(mesaB, 0, j / 8.0f) < 1e-4f;
+    // A peak plot over one paired terrain beside flat ground of another, on a coast: the upper terrain's layer paints the
+    // whole land and must fade out to the other corner, both ways round (it was drawn whole, a square with hard edges).
+    const Corner upperUnderMesa[4] = {{15, false, 1}, {14, false, 2, true}, {1, true, 0}, {1, true, 0}};
+    const Corner lowerUnderMesa[4] = {{15, false, 1, true}, {14, false, 2}, {1, true, 0}, {1, true, 0}};
+    bool underMesa = true;
+    for (int j = 0; j <= 8; ++j)
+    {
+        const float fx = j / 8.0f;
+        underMesa = underMesa && std::fabs(weight(upperUnderMesa, 14, 2, fx, 0) - fx) < 1e-4f &&
+                    std::fabs(weight(lowerUnderMesa, 14, 2, fx, 0) - fx) < 1e-4f;
+    }
+    const bool mixBlend =
+        blendPicks && partition && edges && whole && overlayPicks && overlayShare && overlayEdges && underMesa;
+    printf("TILESETS mixblend=%d (picks %d, partition %d, edges %d, whole %d, overlay picks %d, share %d, edges %d, "
+           "under Mesa %d)\n",
+           mixBlend, blendPicks, partition, edges, whole, overlayPicks, overlayShare, overlayEdges, underMesa);
     printf("TILESETS ranges=%d majority=%d corners=%d seed=%d patched=%d refused=%d cycle=%d landparse=%d landbad=%d "
            "landsites=%d mixed=%d overlays=%d landshort=%d\n", ranges, majority, corners, seed, patched, refused, cycle,
            parsed, badOnes, landSites, squares && fresh, overlays, shortForm);
@@ -4592,6 +4756,8 @@ int wmain(int argc, wchar_t** argv)
         return TerrainPatchTest();
     if (argc > 1 && wcscmp(argv[1], L"tilesets") == 0)
         return TileSetsTest();
+    if (argc > 1 && wcscmp(argv[1], L"riverlayer") == 0)
+        return RiverLayerTest();
     if (argc > 1 && wcscmp(argv[1], L"hillfield") == 0)
         return HillFieldTest();
     if (argc > 1 && wcscmp(argv[1], L"jigsaw") == 0)

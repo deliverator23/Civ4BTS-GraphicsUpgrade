@@ -342,6 +342,22 @@ def main():
     print('terrain tile groups ([terrain tiles], experimental):')
     check("terrain tile groups: not applied: test_proxy.exe isn't Civ4BeyondSword.exe" in log,
           'not applied outside BtS (the harness ran with TilePicker=1, TileGroups=2)')
+    rout = run([os.path.join(TEST, 'test_proxy.exe'), 'riverlayer'])
+    m = re.search(r'^RIVERLAYER (arms.*)$', rout, re.M)
+    rl = {k: int(v) for k, v in (kv.split('=') for kv in m.group(1).split())} if m else {}
+    check(rl.get('arms') == 1 and rl.get('tile') == 1,
+          "river layer: a square's arms from the plots round its middle; the tile from them (first tile + arms - 1)")
+    check(rl.get('add') == 1, "river layer: a layer added after the square's own, as the builder writes one, and the "
+          "list's end marker moved after it")
+    check(rl.get('full') == 1, 'river layer: six layers fill a record, a seventh is refused and changes nothing')
+    check(rl.get('sites') == 1 and rl.get('refused') == 1,
+          "river layer: the builder's four CALLs on both builds sent to the thunk; other bytes refused, nothing written")
+    check(rl.get('parse') == 1, 'river caps: a 64 x 64 8-bit TGA read either way up; other sizes, depths and cut files refused')
+    check(rl.get('pick') == 1 and rl.get('order') == 1,
+          "river caps: a square's tile by arms and the engine's pick, mouths on one arm only and where they exist; the "
+          'order the blend sheet is laid out in')
+    check(rl.get('cap') == 1, 'river caps: height = min(height, cap) through the grid\'s stride, nothing outside the square')
+    check(rl.get('capsites') == 1, "river caps: the peak stamp's four CALLs on both builds")
     sout = run([os.path.join(TEST, 'test_proxy.exe'), 'tilesets'])
     m = re.search(r'^TILESETS (ranges.*)$', sout, re.M)
     ts = {k: int(v) for k, v in (kv.split('=') for kv in m.group(1).split())} if m else {}
