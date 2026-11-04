@@ -52,14 +52,14 @@ struct GameDll
     MemberInt featureType = nullptr, numFeatures = nullptr, activeLandscape = nullptr;
     MemberArg featureInfo = nullptr, landscapeInfo = nullptr;
     MemberFloat zScale = nullptr;
-    // optional: MixedCoastBlend (each terrain's art: its layer order and blend sheet; plot centres in the world)
+    // optional: MixedCoastBlend (each terrain's art: its layer order and blend sheet; the size of a plot)
     using MemberNamed = void*(__fastcall*)(void* self, void* unused, const char* name);
-    using MemberFloatArg = float(__fastcall*)(void* self, void* unused, int a);
+    using MemberFloatNamed = float(__fastcall*)(void* self, void* unused, const char* name);
     MemberStr artDefineTag = nullptr, baseTexture = nullptr;
     GetInstance artFileMgr = nullptr;
     MemberNamed terrainArt = nullptr;
     MemberInt layerOrder = nullptr;
-    MemberFloatArg plotX = nullptr, plotY = nullptr;
+    MemberFloatNamed defineFloat = nullptr;
     bool tried = false, ok = false;
 
     bool Resolve()
@@ -96,8 +96,7 @@ struct GameDll
         terrainArt = reinterpret_cast<MemberNamed>(get("?getTerrainArtInfo@CvArtFileMgr@@QBEPAVCvArtInfoTerrain@@PBD@Z"));
         layerOrder = reinterpret_cast<MemberInt>(get("?getLayerOrder@CvArtInfoTerrain@@QAEHXZ"));
         baseTexture = reinterpret_cast<MemberStr>(get("?getBaseTexture@CvArtInfoTerrain@@QAEPBDXZ"));
-        plotX = reinterpret_cast<MemberFloatArg>(get("?plotXToPointX@CvMap@@QAEMH@Z"));
-        plotY = reinterpret_cast<MemberFloatArg>(get("?plotYToPointY@CvMap@@QAEMH@Z"));
+        defineFloat = reinterpret_cast<MemberFloatNamed>(get("?getDefineFLOAT@CvGlobals@@QBEMPBD@Z"));
         ok = getInstance && getMap && width && height && wrapX && wrapY && plot && terrainType && numTerrains &&
              terrainInfo && type;
         if (!ok)
@@ -1186,19 +1185,21 @@ bool MixReady()
     g_mix.tried = true;
     g_mix.on = false;
     if (!g_dll.artDefineTag || !g_dll.artFileMgr || !g_dll.terrainArt || !g_dll.layerOrder || !g_dll.baseTexture ||
-        !g_dll.plotX || !g_dll.plotY || w <= 0 || h <= 0 || w > 1024 || h > 1024)
+        !g_dll.defineFloat || w <= 0 || h <= 0 || w > 1024 || h > 1024)
     {
-        Log::Write("terrain land blends: MixedCoastBlend off: the game DLL lacks the terrain art or plot position exports");
+        Log::Write("terrain land blends: MixedCoastBlend off: the game DLL lacks the terrain art or PLOT_SIZE exports");
         return false;
     }
-    const float x0 = g_dll.plotX(map, nullptr, 0), dx = g_dll.plotX(map, nullptr, 1) - x0;
-    const float y0 = g_dll.plotY(map, nullptr, 0), dy = g_dll.plotY(map, nullptr, 1) - y0;
-    if (dx < 1 || std::fabs(dx - dy) > 0.01f * dx)
-    {
-        Log::Write("terrain land blends: MixedCoastBlend off: plots %.1f by %.1f world units", dx, dy);
-        return false;
-    }
+    // Plot centres, as CvMap::plotXToPointX and plotYToPointY give them once the landscape is up (it isn't while the
+    // layers are built): evenly spaced round the middle of the map.
     void* gc = g_dll.getInstance();
+    const float dx = g_dll.defineFloat(gc, nullptr, "PLOT_SIZE");
+    if (dx < 1)
+    {
+        Log::Write("terrain land blends: MixedCoastBlend off: PLOT_SIZE is %.1f", dx);
+        return false;
+    }
+    const float x0 = (0.5f - w * 0.5f) * dx, y0 = (0.5f - h * 0.5f) * dx;
     const int n = static_cast<int>(g_landBlendFor.size());
     struct Paired
     {
@@ -1235,7 +1236,7 @@ bool MixReady()
     g_mix.wrapY = g_dll.wrapY(map, nullptr);
     g_mix.toPlot[0] = 1.0f / dx;
     g_mix.toPlot[1] = -x0 / dx;
-    g_mix.toPlot[2] = -y0 / dy;
+    g_mix.toPlot[2] = -y0 / dx;
     g_mix.rgba.assign(static_cast<size_t>(w) * h * 4, 0);
     ++g_mix.version;
     g_mix.on = paired.size() >= 2;
