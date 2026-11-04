@@ -1296,10 +1296,12 @@ unsigned g_blendedSquares = 0;  // MixedCoastBlend: squares whose paired land la
 // [terrain tiles] MixedCoastBlend: what the terrain shader needs to weight a blended square's paired land layers
 // (terrain_shadow.hlsl, MixWeight). Per plot: r = terrain + 1, g = 255 where water, b = the terrain's rank among the
 // paired land terrains by layer order (1, 2...; 0: none), a = 255 where the square with this plot at its south-west
-// corner (its lowest x and y) is blended. Filled by the blend pick hook as the engine builds the layers.
+// corner (its lowest x and y) is blended. A peak plot has the peak layer's terrain and rank, whatever its own terrain:
+// that layer is what shows there. Filled by the blend pick hook as the engine builds the layers.
 struct MixData
 {
     bool tried = false, on = false;
+    int peak = -1;  // TERRAIN_PEAK, if it's a paired layer
     int width = 0, height = 0;
     bool wrapX = false, wrapY = false;
     float toPlot[3] = {};
@@ -1342,7 +1344,7 @@ bool MixReady()
     struct Paired
     {
         int terrain, order;
-        std::string name, sheet;
+        std::string name, sheet, grid;
     };
     std::vector<Paired> paired;
     for (int t = 0; t < n; ++t)
@@ -1353,18 +1355,26 @@ bool MixReady()
         const char* tag = g_dll.artDefineTag(info, nullptr);
         void* art = tag ? g_dll.terrainArt(g_dll.artFileMgr(), nullptr, tag) : nullptr;
         const char* sheet = art ? g_dll.baseTexture(art, nullptr) : nullptr;
+        const char* grid = art && g_dll.gridTexture ? g_dll.gridTexture(art, nullptr) : nullptr;
         if (art && sheet && *sheet)
-            paired.push_back({t, g_dll.layerOrder(art, nullptr), g_dll.type(info, nullptr), sheet});
+            paired.push_back({t, g_dll.layerOrder(art, nullptr), g_dll.type(info, nullptr), sheet, grid ? grid : ""});
     }
     std::stable_sort(paired.begin(), paired.end(), [](const Paired& a, const Paired& b) { return a.order < b.order; });
     g_mix.rank.assign(n, 0);
     g_mix.sheets.clear();
+    g_mix.peak = -1;
     std::string listed;
     for (size_t k = 0; k < paired.size(); ++k)
     {
         g_mix.rank[paired[k].terrain] = static_cast<int>(k) + 1;
+        const bool peak = g_dll.isPeak && _stricmp(paired[k].name.c_str(), "TERRAIN_PEAK") == 0;
+        if (peak)
+            g_mix.peak = paired[k].terrain;
         g_mix.sheets.push_back({std::wstring(paired[k].sheet.begin(), paired[k].sheet.end()), paired[k].terrain + 1,
-                                static_cast<int>(k) + 1});
+                                static_cast<int>(k) + 1, peak});
+        if (!paired[k].grid.empty())  // what's bound with the grid on
+            g_mix.sheets.push_back({std::wstring(paired[k].grid.begin(), paired[k].grid.end()), paired[k].terrain + 1,
+                                    static_cast<int>(k) + 1, peak});
         listed += (listed.empty() ? "" : ", ") + paired[k].name + " (layer " + std::to_string(paired[k].order) + ", " +
                   paired[k].sheet + ")";
     }
@@ -1379,9 +1389,10 @@ bool MixReady()
     ++g_mix.version;
     g_mix.on = paired.size() >= 2;
     if (first || g_mix.on)
-        Log::Write("terrain land blends: MixedCoastBlend %s: %s; a %dx%d map, %.1f world units a plot",
+        Log::Write("terrain land blends: MixedCoastBlend %s: %s; a %dx%d map, %.1f world units a plot%s",
                    g_mix.on ? "on" : "off (fewer than two land terrains with paired lists)",
-                   listed.empty() ? "none" : listed.c_str(), w, h, dx);
+                   listed.empty() ? "none" : listed.c_str(), w, h, dx,
+                   g_mix.peak >= 0 ? "; peak plots blend as TERRAIN_PEAK" : "");
     return g_mix.on;
 }
 
@@ -1460,7 +1471,8 @@ extern "C" void __stdcall LandBlendFix(int terrain, int mask, int* tile, int* ro
             const int i = MixIndex(at[k][0], at[k][1]);
             if (i < 0)
                 continue;
-            const int t = corners.terrain[k];
+            void* plot = g_mix.peak >= 0 ? g_dll.plot(map, nullptr, at[k][0], at[k][1]) : nullptr;
+            const int t = plot && g_dll.isPeak(plot, nullptr) ? g_mix.peak : corners.terrain[k];
             MixSet(i, static_cast<uint8_t>(t >= 0 && t < 254 ? t + 1 : 0));
             MixSet(i + 1, corners.water[k] ? 255 : 0);
             MixSet(i + 2, static_cast<uint8_t>(t >= 0 && t < static_cast<int>(g_mix.rank.size()) ? g_mix.rank[t] : 0));

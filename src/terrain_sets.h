@@ -227,7 +227,9 @@ inline bool ParseLandBlend(const std::string& text, LandBlend& out, std::string&
 // full land mask, every higher land layer with a paired list takes its own paired pick for the full land mask too
 // (instead of its land entry), and the square is marked blended: the terrain shader then weights each of those layers
 // by its share of the square's land corners (terrain_shadow.hlsl, MixWeight), so the terrains blend across the square
-// and agree along every edge with the squares beside it. A square left to the engine stays so.
+// and agree along every edge with the squares beside it. A square left to the engine stays so. An overlay taking the
+// whole land's cliff on a coast (above) marks its square too: its layer is weighted by its share of the land corners
+// (peak plots count as the peak layer's in the shader's data, whatever their terrain), so Mesa blends across the square.
 struct BlendCorners
 {
     int terrain[4];
@@ -278,6 +280,7 @@ struct BlendSquare
             if (!hasLand || mask < 1 || mask > 14 || mask == full)
                 return BlendAction::Engine;  // no paired list, or it covers all the land already: paired as it is
             fullMask = full;
+            blended = blended || blendAll;
             return BlendAction::FullMask;
         }
         if (n < 2 || !atLandCorner)

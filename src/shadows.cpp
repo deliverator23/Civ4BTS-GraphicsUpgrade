@@ -212,6 +212,7 @@ bool Shadows::MixFor(IDirect3DBaseTexture9* sheet)
             m_mixSheets[k].match.Load(sheets[k].path, "[terrain tiles] MixedCoastBlend's blend sheets");
             m_mixSheets[k].terrain = sheets[k].terrain;
             m_mixSheets[k].rank = sheets[k].rank;
+            m_mixSheets[k].overlay = sheets[k].overlay;
         }
     }
     auto it = m_mixSheetOf.find(sheet);
@@ -269,7 +270,7 @@ bool Shadows::MixFor(IDirect3DBaseTexture9* sheet)
         m_mixVersion = map.version;
     }
     const MixSheet& s = m_mixSheets[it->second];
-    const float mix[12] = {static_cast<float>(s.terrain), static_cast<float>(s.rank), 0, 1,
+    const float mix[12] = {static_cast<float>(s.terrain), static_cast<float>(s.rank), s.overlay ? 1.0f : 0.0f, 1,
                            map.toPlot[0], map.toPlot[1], map.toPlot[2], 0,
                            static_cast<float>(map.width), static_cast<float>(map.height), map.wrapX ? 1.0f : 0.0f,
                            map.wrapY ? 1.0f : 0.0f};

@@ -68,9 +68,10 @@ float4 f4Debug : register(c24);           // [debug] TerrainDebug 4: w = 1, a fl
 // [terrain tiles] MixedCoastBlend: on a coast square of two or more land terrains with paired lists, each of those
 // layers paints the whole land (terrain_sets.h, BlendSquare); here each is weighted by its share of the square's land
 // corners. The plots (s9): r = terrain + 1, g = 1 where water, b = the paired land terrain's rank by layer order (0:
-// none), a = 1 where the square with this plot at its south-west corner blends.
+// none), a = 1 where the square with this plot at its south-west corner blends. A peak plot has the peak layer's terrain
+// and rank: Mesa blends the same way, its share taken of all the land corners, as it's drawn over them all.
 sampler2D MixPlots : register(s9);
-float4 f4Mix : register(c25);        // x = this layer's terrain + 1, y = its rank, w = 1: weight it
+float4 f4Mix : register(c25);        // x = this layer's terrain + 1, y = its rank, z = 1: the peak layer, w = 1: weight it
 float4 f4MixToPlot : register(c26);  // world xy -> plot coordinates (plot centres at whole numbers): x = scale, yz = offset
 float4 f4MixSize : register(c27);    // the map: xy = its size in plots, zw = 1 where it wraps
 
@@ -98,7 +99,7 @@ float MixWeight(float2 world, float2 at)
     float4 terrain = floor(float4(c0.r, c1.r, c2.r, c3.r) * 255 + 0.5);
     float4 rank = floor(float4(c0.b, c1.b, c2.b, c3.b) * 255 + 0.5) * land;
     float4 own = (1 - step(0.5, abs(terrain - f4Mix.x))) * land;
-    float4 lower = step(0.5, rank) * (1 - step(f4Mix.y - 0.5, rank));
+    float4 lower = lerp(step(0.5, rank) * (1 - step(f4Mix.y - 0.5, rank)), land * (1 - own), f4Mix.z);
     if (dot(own, 1) == 0 || dot(lower, 1) == 0)
         return 1;  // not at this square's land corners (an overlay), or the lowest paired terrain: drawn whole
     return dot(bw, own) / max(dot(bw, own + lower), 1e-5);

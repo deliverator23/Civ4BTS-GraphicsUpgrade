@@ -370,7 +370,8 @@ def main():
     check(mb and mb.group(1) == '1',
           'MixedCoastBlend: on a coast of two land terrains every paired land layer takes the whole land mask (the '
           'square marked blended; the rest as before), and weighted by their share of the land corners, drawn one over '
-          f"another, each terrain ends up at its share, the same either side of an edge ({mb.group(2) if mb else ''})")
+          f"another, each terrain ends up at its share, the same either side of an edge; the peak layer too, its share "
+          f"of all the land corners ({mb.group(2) if mb else ''})")
     check(ts.get('overlays') == 1,
           'StandardBlendOnLand, hill and peak layers (at no corner): land entries on all land; on a coast, covering '
           "part of the land, re-picked for the whole land mask (Mesa paints the cliff); covering all of it, or without "

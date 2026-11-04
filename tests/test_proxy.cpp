@@ -3324,9 +3324,48 @@ static int TileSetsTest()
     const Corner single[4] = {{15, false, 1}, {15, false, 1}, {1, true, 0}, {1, true, 0}};  // one land terrain: whole
     const bool whole = weight(single, 15, 1, 0.3f, 0.6f) == 1.0f && weight(sqA, 41, 3, 0, 0) == 0.0f &&
                        weight(sqA, 15, 1, 0.9f, 0.9f) == 1.0f && weight(sqA, 99, 4, 0.5f, 0.5f) == 1.0f;
-    const bool mixBlend = blendPicks && partition && edges && whole;
-    printf("TILESETS mixblend=%d (picks %d, partition %d, edges %d, whole %d)\n", mixBlend, blendPicks, partition, edges,
-           whole);
+    // The peak layer (an overlay: Mesa) on a coast: it takes the full land mask and marks the square, on a square of one
+    // land terrain too; covering all the land, the engine's pick, unmarked. In the shader's data a peak plot is the peak
+    // layer's, whatever its terrain, and its share is of all the land corners, paired or not.
+    const bool overlayPicks =
+        runAll(rockCoast, {{0, 15, false}, {14, 3, true}, {40, 1, true}}, {A::Engine, A::Engine, A::FullMask}, true, 3) &&
+        runAll(rockCoast, {{0, 15, false}, {14, 3, true}, {40, 3, true}}, {A::Engine, A::Engine, A::Engine}, false) &&
+        runAll(rockCoast, {{0, 15, false}, {14, 3, true}, {40, 1, false}}, {A::Engine, A::Engine, A::Engine}, false);
+    auto overlayWeight = [](const Corner c[4], int layer, float fx, float fy) {
+        const float bw[4] = {(1 - fx) * (1 - fy), fx * (1 - fy), (1 - fx) * fy, fx * fy};
+        float own = 0, lower = 0;
+        bool anyOwn = false, anyLower = false;
+        for (int k = 0; k < 4; ++k)
+        {
+            const bool land = !c[k].water, isOwn = land && c[k].terrain == layer, isLower = land && !isOwn;
+            anyOwn = anyOwn || isOwn;
+            anyLower = anyLower || isLower;
+            own += isOwn ? bw[k] : 0;
+            lower += isLower ? bw[k] : 0;
+        }
+        return !anyOwn || !anyLower ? 1.0f : own / (std::max)(own + lower, 1e-5f);
+    };
+    // SW Mesa (a peak plot), SE Rock, NW water, NE Plains (no paired list); the square east shares SE and NE.
+    const Corner mesaA[4] = {{41, false, 3}, {15, false, 1}, {1, true, 0}, {9, false, 0}};
+    const Corner mesaB[4] = {{15, false, 1}, {41, false, 3}, {9, false, 0}, {1, true, 0}};
+    const Corner mesaPure[4] = {{41, false, 3}, {41, false, 3}, {1, true, 0}, {1, true, 0}};
+    bool overlayShare = overlayWeight(mesaPure, 41, 0.3f, 0.2f) == 1.0f;
+    for (int i = 0; i <= 8; ++i)
+        for (int j = 0; j <= 8; ++j)
+        {
+            const float fx = i / 8.0f, fy = j / 8.0f;
+            const float bw[4] = {(1 - fx) * (1 - fy), fx * (1 - fy), (1 - fx) * fy, fx * fy};
+            const float land = bw[0] + bw[1] + bw[3];
+            if (land > 0.05f)
+                overlayShare = overlayShare && std::fabs(overlayWeight(mesaA, 41, fx, fy) - bw[0] / land) < 1e-4f;
+        }
+    bool overlayEdges = true;
+    for (int j = 0; j <= 8; ++j)  // A's east edge has no Mesa corner, nor has B's west: none of it on either side
+        overlayEdges = overlayEdges && overlayWeight(mesaA, 41, 1, j / 8.0f) < 1e-4f &&
+                       overlayWeight(mesaB, 41, 0, j / 8.0f) < 1e-4f;
+    const bool mixBlend = blendPicks && partition && edges && whole && overlayPicks && overlayShare && overlayEdges;
+    printf("TILESETS mixblend=%d (picks %d, partition %d, edges %d, whole %d, overlay picks %d, share %d, edges %d)\n",
+           mixBlend, blendPicks, partition, edges, whole, overlayPicks, overlayShare, overlayEdges);
     printf("TILESETS ranges=%d majority=%d corners=%d seed=%d patched=%d refused=%d cycle=%d landparse=%d landbad=%d "
            "landsites=%d mixed=%d overlays=%d landshort=%d\n", ranges, majority, corners, seed, patched, refused, cycle,
            parsed, badOnes, landSites, squares && fresh, overlays, shortForm);

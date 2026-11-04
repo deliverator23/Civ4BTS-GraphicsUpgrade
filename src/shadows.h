@@ -182,6 +182,7 @@ private:
     {
         TextureList match;
         int terrain = 0, rank = 0;
+        bool overlay = false;
     };
     IDirect3DTexture9* m_mixTex = nullptr;
     unsigned m_mixVersion = 0;

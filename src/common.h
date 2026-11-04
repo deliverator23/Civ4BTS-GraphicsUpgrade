@@ -271,8 +271,9 @@ std::wstring PlotStampsHiddenModels();
 // [terrain tiles] MixedCoastBlend (terrain_sets.cpp): the plots the terrain shader weights blended squares by (false
 // when off): rgba a plot (r = terrain + 1, g = 255 where water, b = the paired land terrain's rank by layer order, a =
 // 255 where the square with this plot at its south-west corner blends), the map's size and wrap, a version that changes
-// with the data, and world xy -> plot coordinates (x = scale, yz = offset; plot centres at whole numbers). And the
-// paired land terrains' blend sheets (paths under Assets), each with its terrain + 1 and rank.
+// with the data, and world xy -> plot coordinates (x = scale, yz = offset; plot centres at whole numbers). A peak plot
+// has the peak layer's terrain and rank. And the paired land terrains' blend and grid sheets (paths under Assets), each
+// with its terrain + 1 and rank.
 struct MixedCoastMap
 {
     const uint8_t* rgba = nullptr;
@@ -286,6 +287,7 @@ struct MixedCoastSheet
 {
     std::wstring path;
     int terrain = 0, rank = 0;
+    bool overlay = false;  // the peak layer: its share is of all the land corners
 };
 std::vector<MixedCoastSheet> MixedCoastSheets();
 // [terrain tiles] PlotStamps<n>Textures (terrain_sets.cpp): which painting each plot has, for the terrain shader (false
