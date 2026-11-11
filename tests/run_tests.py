@@ -358,6 +358,11 @@ def main():
           'order the blend sheet is laid out in')
     check(rl.get('cap') == 1, 'river caps: height = min(height, cap) through the grid\'s stride, nothing outside the square')
     check(rl.get('capsites') == 1, "river caps: the peak stamp's four CALLs on both builds")
+    check(rl.get('cuts') == 1, "river cuts: what a square lost found again from a world position (wrapping east-west), "
+          "forgotten when restamped with nothing cut, the version moving with each change; bridged whole in a shallow "
+          "trench, not at all in a deep gorge (by the square's deepest cut), in proportion between")
+    check(rl.get('depth') == 1, "river depths: the ground lowered by the tile, never below the sand's level; ground "
+          "already lower left alone; nothing outside the square")
     sout = run([os.path.join(TEST, 'test_proxy.exe'), 'tilesets'])
     m = re.search(r'^TILESETS (ranges.*)$', sout, re.M)
     ts = {k: int(v) for k, v in (kv.split('=') for kv in m.group(1).split())} if m else {}
@@ -861,6 +866,11 @@ def main():
                   f"our border shader: where the ground is unknown it's drawn as BtS draws it (worst "
                   f"{ml.group(1) if ml else '?'}); ground 100 above it lifts it onto it "
                   f"({ml.group(2) if ml else '?'} pixels changed)")
+            mw = re.search(r'BORDERWRAP west=(\d+) east=(\d+)', bout)
+            check(mw and int(mw.group(1)) <= 1 and int(mw.group(2)) <= 1,
+                  f"our border shader wraps the height grid itself: ground known only at negative cells lifts the "
+                  f"border's west half and not its east, even on a card that clamps vertex texture reads (worst "
+                  f"{mw.group(1) if mw else '?'} and {mw.group(2) if mw else '?'} of 255)")
         check('final refs device 0, d3d 0' in bout, 'border comparison: device released')
         textures = '[textures]\nAnisotropy=1\n'
         sout, splain, sridge, slog = border_run('borderstock', f'Games=*\n{textures}')

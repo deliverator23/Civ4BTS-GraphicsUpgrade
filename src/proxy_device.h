@@ -7,6 +7,7 @@
 #include "water.h"
 #include "waves.h"
 #include "borders.h"
+#include "border_haze.h"
 #include "reflection.h"
 #include "lighting.h"
 #include "perf.h"
@@ -125,6 +126,7 @@ private:
     Lighting m_light;
     Waves m_waves;  // coast waves drawn with our copy of their shader (opacity over time)
     Borders m_borders;  // culture borders over finer terrain ([debug] TerrainVertsPerPlot), our copy of their shader
+    BorderHaze m_haze;  // models under the borders' tint ([textures] ModelsUnderBorders)
     TerrainNormals m_terrain;  // heights and normals read from the terrain's vertex buffers (per-pixel lighting)
     DetailNormals m_detail;    // the terrain detail textures' normal maps ([textures] DetailNormals)
     TextureList m_hiddenModels;  // [terrain tiles] PlotStamps<n>HideModels

@@ -33,8 +33,12 @@
 #include "terrain_sets.h"   // Rel32
 
 #include <cstdint>
+#include <cstdio>
+#include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace RiverLayer
@@ -183,6 +187,146 @@ inline void ApplyCap(uint8_t* grid, int stride, const uint8_t* cap)
             if (grid[c] > cap[c])
                 grid[c] = cap[c];
 }
+
+// [terrain tiles] RiverLayerDepths=<folder>, in place of RiverLayerCaps: the same tiles and names, but each holds how
+// far to lower the ground (0: not at all), so a crack is as deep on a mesa as on the plain. It never takes the ground
+// below the sand's level, nor raises ground already lower.
+const int kSandLevel = 48;
+
+inline void ApplyDepth(uint8_t* grid, int stride, const uint8_t* depth)
+{
+    for (int r = 0; r < kCapSize; ++r, grid += stride, depth += kCapSize)
+        for (int c = 0; c < kCapSize; ++c)
+        {
+            const int h = grid[c], lowest = h < kSandLevel ? h : kSandLevel, cut = h - depth[c];
+            grid[c] = static_cast<uint8_t>(cut < lowest ? lowest : cut);
+        }
+}
+
+// How far the canyons lowered the ground, so what drapes itself over the terrain (the culture borders, through the height
+// texture) can lie on the ground as it was and bridge a canyon rather than drop into it: canyons follow plot edges,
+// where borders run. Kept per cut square (kCapSize x kCapSize levels, the grid's own samples), looked up by world
+// position: tile pixel (i, j) of square (x, y) is at plot (x - 1 + i / kCapSize, height - y - j / kCapSize), and plot
+// (px, py)'s centre at (x0 + px * plot, y0 + py * plot).
+class Cuts
+{
+public:
+    void Map(int width, int height, bool wrapX, float x0, float y0, float plot)
+    {
+        m_w = width, m_h = height, m_wrapX = wrapX, m_x0 = x0, m_y0 = y0, m_plot = plot;
+    }
+    bool Mapped() const { return m_plot > 0; }
+    // A square after its cut: before and after are its samples (after through the grid's stride). Nothing kept if
+    // nothing was lowered.
+    void Set(int sx, int sy, const uint8_t* before, const uint8_t* after, int stride)
+    {
+        std::vector<uint8_t> cut(static_cast<size_t>(kCapSize) * kCapSize + 1);  // the last: the square's typical cut
+        std::vector<uint8_t> lowered;
+        for (int r = 0; r < kCapSize; ++r)
+            for (int c = 0; c < kCapSize; ++c)
+            {
+                const int d = before[r * kCapSize + c] - after[r * stride + c];
+                cut[r * kCapSize + c] = static_cast<uint8_t>(d > 0 ? d : 0);
+                if (d > 0)
+                    lowered.push_back(static_cast<uint8_t>(d));
+            }
+        const bool any = !lowered.empty();
+        if (any)
+        {
+            // three quarters of the lowered samples are cut no deeper than this: a trench reads as a trench even with a
+            // high spot in the square (a Rugged rise, a mesa's edge), a gorge through a mesa as the gorge it mostly is
+            const size_t at = (lowered.size() - 1) * 3 / 4;
+            std::nth_element(lowered.begin(), lowered.begin() + at, lowered.end());
+            cut.back() = lowered[at];
+        }
+        if (any)
+            m_squares[Key(sx, sy)] = std::move(cut);
+        else
+            Clear(sx, sy);
+        ++m_version;
+    }
+    void Clear(int sx, int sy)
+    {
+        if (m_squares.erase(Key(sx, sy)))
+            ++m_version;
+    }
+    // Levels lowered at a world position (the nearest sample; 0 off the map or where nothing was cut).
+    float At(float wx, float wy) const
+    {
+        int at = 0;
+        const std::vector<uint8_t>* square = Find(wx, wy, at);
+        return square ? static_cast<float>((*square)[at]) : 0.0f;
+    }
+    // What to add back for a border to lie on: the whole cut in a square whose typical cut is no deeper than kBridgeFull
+    // (a trench in rock, 89-128 down to the sand's 48), none where it's kBridgeNone or deeper (a gorge through a mesa,
+    // where a lid at the old height looked like a sheet floating over it; the border follows the gorge down, as it does
+    // every mesa's cliffs), in between in proportion. By the square's typical cut (three quarters of its lowered samples
+    // no deeper; its deepest let one high spot leave a trench unbridged, Iain's trace 2026-11-10 23:03), so a square
+    // bridges all of a piece or none of it.
+    static constexpr float kBridgeFull = 70, kBridgeNone = 100;
+    float Bridge(float wx, float wy) const
+    {
+        int at = 0;
+        const std::vector<uint8_t>* square = Find(wx, wy, at);
+        if (!square)
+            return 0;
+        float w = (kBridgeNone - square->back()) / (kBridgeNone - kBridgeFull);
+        w = w < 0 ? 0 : w > 1 ? 1 : w;
+        return (*square)[at] * w;
+    }
+    unsigned Version() const { return m_version; }
+    size_t Squares() const { return m_squares.size(); }
+    // Debug, for traces: how the cuts are placed, and each cut square as [x, y, typical cut, deepest cut].
+    std::string Describe() const
+    {
+        char head[200];
+        snprintf(head, sizeof(head), "\"map\":[%d,%d,%d],\"x0\":%.2f,\"y0\":%.2f,\"plot\":%.2f,\"squares\":[", m_w, m_h,
+                 m_wrapX ? 1 : 0, m_x0, m_y0, m_plot);
+        std::string out = head;
+        bool first = true;
+        for (const auto& kv : m_squares)
+        {
+            const auto& cut = kv.second;
+            const uint8_t deepest = *std::max_element(cut.begin(), cut.end() - 1);
+            char one[48];
+            snprintf(one, sizeof(one), "%s[%d,%d,%d,%d]", first ? "" : ",", kv.first % (m_w + 1), kv.first / (m_w + 1),
+                     cut.back(), deepest);
+            out += one;
+            first = false;
+        }
+        return out + "]";
+    }
+
+private:
+    const std::vector<uint8_t>* Find(float wx, float wy, int& at) const
+    {
+        if (m_squares.empty() || m_plot <= 0)
+            return nullptr;
+        float px = (wx - m_x0) / m_plot, q = m_h - (wy - m_y0) / m_plot;
+        if (m_wrapX && m_w > 0)
+            px -= std::floor(px / m_w) * m_w;
+        int sx = static_cast<int>(std::floor(px)) + 1, sy = static_cast<int>(std::floor(q));
+        int i = static_cast<int>(std::floor((px - std::floor(px)) * kCapSize + 0.5f));
+        int j = static_cast<int>(std::floor((q - std::floor(q)) * kCapSize + 0.5f));
+        if (i == kCapSize)
+            i = 0, ++sx;
+        if (j == kCapSize)
+            j = 0, ++sy;
+        if (sx < 0 || sy < 0 || sx > m_w || sy > m_h)
+            return nullptr;
+        const auto it = m_squares.find(Key(sx, sy));
+        if (it == m_squares.end())
+            return nullptr;
+        at = j * kCapSize + i;
+        return &it->second;
+    }
+    int Key(int sx, int sy) const { return sy * (m_w + 1) + sx; }
+    std::unordered_map<int, std::vector<uint8_t>> m_squares;
+    int m_w = 0, m_h = 0;
+    bool m_wrapX = false;
+    float m_x0 = 0, m_y0 = 0, m_plot = 0;
+    unsigned m_version = 0;
+};
 
 // The peak stamp's four calls, sent to `thunk`.
 inline std::vector<TerrainPatch::Site> CapSites(uint32_t base, uint32_t thunk, const Exe::Layout& x)

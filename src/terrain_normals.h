@@ -98,6 +98,11 @@ public:
     {
         return !m_heights.empty() && WriteBytes(path, m_heights.data(), m_heights.size() * sizeof(float));
     }
+    // Debug: per cell, what the height texture adds back over the canyons and the whole cut there (RiverCutAt,
+    // RiverCutRawAt), as pairs of floats, row by row like SaveHeights.
+    bool SaveCuts(const std::wstring& path) const;
+    // Debug: the height texture as uploaded (what the borders and waves read), raw floats like SaveHeights.
+    bool SaveHeightTexture(const std::wstring& path);
     void ReleaseDefault();  // the mask target and state block, before a Reset (made again on use)
     void ReleaseAll();
     ULONG InternalRefs() const { return m_internalRefs; }
@@ -142,6 +147,7 @@ private:
     IDirect3DTexture9* m_heightTex = nullptr;
     bool m_heightsDirty = true;     // new heights since the hill shadows last used them
     TerrainCells::Rect m_heightsNew;  // new heights here since the height texture was last uploaded
+    unsigned m_cutVersion = 0;        // the canyons' cuts (RiverCutVersion) the height texture was uploaded with
     bool m_heightFilter = true;  // R32F can be filtered (bilinear), else point
     IDirect3DTexture9* m_hillTex = nullptr;
     IDirect3DSurface9* m_hillSurf = nullptr;

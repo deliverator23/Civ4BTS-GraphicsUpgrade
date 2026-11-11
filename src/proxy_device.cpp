@@ -62,13 +62,16 @@ std::string Rect(const RECT* r)
 }
 
 ProxyDevice::ProxyDevice(IDirect3DDevice9* real, ProxyD3D9* parent)
-    : Device9Forward(real), m_parent(parent), m_trace(m_registry), m_refl(real), m_water(real), m_shadows(real), m_light(real), m_waves(real), m_borders(real), m_terrain(real), m_detail(real), m_perf(real)
+    : Device9Forward(real), m_parent(parent), m_trace(m_registry), m_refl(real), m_water(real), m_shadows(real), m_light(real), m_waves(real), m_borders(real), m_haze(real), m_terrain(real), m_detail(real), m_perf(real)
 {
     m_effects = EffectsAllowed();
     m_refl.enabled = m_effects && g_config.reflectionEnabled;
     m_refl.overlay = m_effects && g_config.overlayEnabled;
     m_water.enabled = m_effects && g_config.waterEnabled;
     m_borders.enabled = m_effects && g_config.terrainVertsPerPlot > 17;  // the terrain finer than the borders' grid
+    m_haze.enabled = m_effects && !g_config.modelsUnderBorders.empty();
+    if (m_haze.enabled)
+        m_haze.models.Load(g_config.modelsUnderBorders, "[textures] ModelsUnderBorders");
     m_shadows.enabled = m_effects && g_config.shadowsEnabled;
     m_shadows.overlay = m_effects && g_config.shadowOverlay;
     m_light.enabled = m_effects && g_config.lightingEnabled;
@@ -158,7 +161,7 @@ ULONG ProxyDevice::Release()
     bool timed = false;  // the frames since the log's last timing line, logged
     if (refs != 0 && refs == m_refl.InternalRefs() + m_water.InternalRefs() + m_shadows.InternalRefs() + m_deferRefs +
                                  m_light.InternalRefs() + m_waves.InternalRefs() + m_borders.InternalRefs() + m_terrain.InternalRefs() +
-                                 m_detail.InternalRefs() + m_perf.InternalRefs() + shotRefs)
+                                 m_detail.InternalRefs() + m_perf.InternalRefs() + m_haze.InternalRefs() + shotRefs)
     {
         // Only our own objects still hold the device: the game has let go, so release them, which destroys the
         // device, and the wrapper with it.
@@ -167,6 +170,7 @@ ULONG ProxyDevice::Release()
         Log::Write("%s", m_perf.Summary().c_str());
         timed = true;
         DropDeferred();  // first: it reads the device's reference count, so the device must still be alive
+        m_haze.ReleaseAll();  // reads it too
         m_refl.ReleaseResources();
         m_water.ReleaseAll();
         m_shadows.ReleaseAll();
@@ -206,6 +210,7 @@ HRESULT ProxyDevice::Reset(D3DPRESENT_PARAMETERS* pPresentationParameters)
     m_water.ReleaseDefault();
     m_shadows.ReleaseDefault();
     m_terrain.ReleaseDefault();
+    m_haze.ReleaseDefault();
     m_perf.EndFrame();
     m_perf.Flush();
     m_perf.ReleaseAll();  // queries: made again after the Reset
@@ -238,6 +243,7 @@ HRESULT ProxyDevice::Present(CONST RECT* pSourceRect, CONST RECT* pDestRect, HWN
         if (shot)
             shot->Release();
     }
+    m_haze.EndFrame();
     if (m_compareStep)
     {
         m_compareShots[m_compareStep - 1] = CopyBackBuffer(m_real);
@@ -494,6 +500,7 @@ HRESULT ProxyDevice::CreateTexture(UINT Width, UINT Height, UINT Levels, DWORD U
         m_detail.ForgetTexture(*ppTexture);
         m_light.ForgetTexture(*ppTexture);
         m_hiddenModels.Forget(*ppTexture);
+        m_haze.ForgetTexture(*ppTexture);
     }
     if (Usage & (D3DUSAGE_RENDERTARGET | D3DUSAGE_DEPTHSTENCIL))
         Log::Write("CreateTexture %ux%u levels %u usage 0x%x fmt %u pool %u -> 0x%08x tex %s", Width, Height, Levels,
@@ -989,7 +996,8 @@ HRESULT ProxyDevice::Dispatch(Draw draw)
     // state right after its draw.
     const ShaderInfo* vs = nullptr;
     bool fixedFunction = false;
-    if (m_refl.enabled || m_water.enabled || m_shadows.enabled || m_light.enabled || m_aniso || m_borders.enabled)
+    if (m_refl.enabled || m_water.enabled || m_shadows.enabled || m_light.enabled || m_aniso || m_borders.enabled ||
+        m_haze.enabled)
     {
         IDirect3DVertexShader9* shader = nullptr;
         m_real->GetVertexShader(&shader);
@@ -1103,6 +1111,10 @@ HRESULT ProxyDevice::Dispatch(Draw draw)
         if (m_terrain.SaveHeights(m_trace.Dir() + L"\\terrain_heights.bin"))
             m_trace.Event("{\"ev\":\"terrain_heights_saved\",\"cells\":" + std::to_string(m_terrain.Cells()) +
                           ",\"spacing\":" + std::to_string(m_terrain.Spacing()) + "}");
+        if (RiverCutVersion() && m_terrain.SaveCuts(m_trace.Dir() + L"\\river_cuts.bin"))
+            m_trace.Event("{\"ev\":\"river_cuts_saved\"," + RiverCutDescribe() + "}");
+        if (m_terrain.SaveHeightTexture(m_trace.Dir() + L"\\height_texture.bin"))
+            m_trace.Event("{\"ev\":\"height_texture_saved\",\"cut_version\":" + std::to_string(RiverCutVersion()) + "}");
         if (m_terrain.SaveHillBmp(m_trace.Dir() + L"\\hill_shadows.bmp"))
             m_trace.Event("{\"ev\":\"hill_shadows_saved\"}");
         // The shore the water's caustics use (red: distance to land, green: depth, alpha: known)
@@ -1229,15 +1241,29 @@ HRESULT ProxyDevice::Dispatch(Draw draw)
     }
     // The culture borders over terrain finer than BtS's own ([debug] TerrainVertsPerPlot): lifted onto it and moved
     // towards the camera, so its finer relief doesn't rise through them.
-    const bool border = !wave && m_borders.enabled && vs && Borders::IsBorder(*vs, CurrentPixelShader());
+    const bool anyBorder = !wave && (m_borders.enabled || m_haze.enabled) && vs && Borders::IsBorder(*vs, CurrentPixelShader());
+    const bool border = anyBorder && m_borders.enabled;
     if (border)
     {
         m_borders.heightTexture = m_terrain.HeightTexture();
         m_borders.heightSpacing = m_terrain.Spacing();
         m_borders.heightCells = m_terrain.Cells();
     }
-    if (!(wave && m_waves.Draw([&] { return draw(); }, hr)) && !(border && m_borders.Draw([&] { return draw(); }, hr)))
+    // [textures] ModelsUnderBorders: a listed model on the map, under the borders' tint (BorderHaze).
+    const bool underBorders = m_haze.enabled && !wave && !anyBorder && m_refl.TargetIsBackBuffer() && m_haze.Listed();
+    if (underBorders)
+        hr = m_haze.DrawUnder([&] { return draw(); });
+    else if (!(wave && m_waves.Draw([&] { return draw(); }, hr)) && !(border && m_borders.Draw([&] { return draw(); }, hr)))
         hr = draw();
+    // ... and each border on the map drawn again, the same way, into the tint layer the listed models get laid over them.
+    if (anyBorder && m_haze.enabled && m_refl.TargetIsBackBuffer())
+    {
+        m_haze.AddBorder([&] {
+            HRESULT again = D3D_OK;
+            if (!(border && m_borders.Draw([&] { return draw(); }, again)))
+                draw();
+        });
+    }
     m_perf.AddGameDraw(Perf::Now() - gameDrawStart);
     if (vs && vs->btsWater)
         m_shadows.ShadeWater([&] { return draw(); });  // BtS's own water (Colonization's off): shadows on it too

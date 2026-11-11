@@ -2456,6 +2456,56 @@ static int BorderScene(IDirect3DDevice9* dev, const std::wstring& gameDir)
         for (size_t i = 0; i < lifted[1].size(); ++i)
             moved += lifted[1][i] != game[0][i];
         printf("BORDERLIFT flat=%d moved=%zu\n", worst(lifted[0], game[0]), moved);
+        // Wrapping: ground known (100) only in the grid's upper half, which is the world's negative side (the grid
+        // wraps; the map is centred on 0), unknown in the lower. The border's west half (x < 0) must come out as when
+        // lifted everywhere, its east half as when lifted nowhere, even where the card clamps vertex texture reads.
+        // As the game fills it: drawn with first (all unknown, so the card has a copy), then written again in a rect
+        // (TerrainNormals::Upload locks the cells that changed), then drawn with: the second draw must see the new
+        // heights.
+        IDirect3DTexture9* half = nullptr;
+        CHECK(dev->CreateTexture(64, 64, 1, 0, D3DFMT_R32F, D3DPOOL_MANAGED, &half, nullptr));
+        auto fill = [&](bool known) -> int {
+            const RECT rc = {0, 0, 64, 64};
+            D3DLOCKED_RECT lr;
+            CHECK(half->LockRect(0, &lr, &rc, 0));
+            for (UINT y = 0; y < 64; ++y)
+                for (UINT x = 0; x < 64; ++x)
+                    reinterpret_cast<float*>(static_cast<BYTE*>(lr.pBits) + y * lr.Pitch)[x] =
+                        known && x >= 32 ? 100.0f : -10000.0f;
+            half->UnlockRect(0);
+            return 0;
+        };
+        if (fill(false))
+            return 1;
+        CHECK(dev->SetTexture(D3DVERTEXTEXTURESAMPLER0, half));
+        CHECK(dev->SetSamplerState(D3DVERTEXTEXTURESAMPLER0, D3DSAMP_ADDRESSU, D3DTADDRESS_WRAP));
+        CHECK(dev->SetSamplerState(D3DVERTEXTEXTURESAMPLER0, D3DSAMP_ADDRESSV, D3DTADDRESS_WRAP));
+        std::vector<DWORD> wrapped;
+        if (frame(0, false, ourVs, ourPs, extra, wrapped) || fill(true))
+            return 1;
+        CHECK(dev->SetTexture(D3DVERTEXTEXTURESAMPLER0, nullptr));
+        CHECK(dev->SetTexture(D3DVERTEXTEXTURESAMPLER0, half));
+        if (frame(0, false, ourVs, ourPs, extra, wrapped))
+            return 1;
+        int west = 0, east = 0;
+        const UINT margin = bd.Width / 8;  // the seam: cells 63 and 0 blend over the last 22.5 units west of 0
+        auto channels = [](DWORD p, DWORD q) {
+            int d = 0;
+            for (int sh = 0; sh < 24; sh += 8)
+                d = (std::max)(d, std::abs(static_cast<int>((p >> sh) & 0xFF) - static_cast<int>((q >> sh) & 0xFF)));
+            return d;
+        };
+        for (UINT y = 0; y < bd.Height; ++y)
+            for (UINT x = 0; x < bd.Width; ++x)
+            {
+                const size_t i = static_cast<size_t>(y) * bd.Width + x;
+                if (x + margin < bd.Width / 2)
+                    west = (std::max)(west, channels(wrapped[i], lifted[1][i]));
+                else if (x > bd.Width / 2 + margin)
+                    east = (std::max)(east, channels(wrapped[i], lifted[0][i]));
+            }
+        printf("BORDERWRAP west=%d east=%d\n", west, east);
+        half->Release();
         CHECK(dev->SetTexture(D3DVERTEXTEXTURESAMPLER0, nullptr));
         ground[0]->Release();
         ground[1]->Release();
@@ -3258,8 +3308,67 @@ static int RiverLayerTest()
         for (const auto& s : list)
             capsites = capsites && s.original[0] == 0xe8 && s.patched[0] == 0xe8 && s.rva > x->peakStamp - 0x2000 && s.rva < x->peakStamp;
     }
-    printf("RIVERLAYER arms=%d tile=%d add=%d full=%d sites=%d refused=%d parse=%d pick=%d order=%d cap=%d capsites=%d\n", arms,
-           tile, add, full, sites, refused, parse, pick, order, cap, capsites);
+    // Depths: lowered by the tile, never below the sand's level, ground already lower left alone, nothing outside
+    std::vector<uint8_t> dgrid(gridStride * (kCapSize + 2), 120), dtile(kCapSize * kCapSize, 0);
+    uint8_t* dg = dgrid.data() + gridStride;
+    dtile[0] = 30;                  // 120 -> 90
+    dtile[1] = 100;                 // 120 -> 48, not 20
+    dtile[2] = 10, dg[2] = 40;      // already below the sand: stays 40
+    dtile[3] = 255, dg[3] = 255;    // 255 - 255 = 0 -> 48
+    ApplyDepth(dg, gridStride, dtile.data());
+    bool depth = dg[0] == 90 && dg[1] == 48 && dg[2] == 40 && dg[3] == 48 && dg[4] == 120;
+    for (int k = 0; k < gridStride; ++k)
+        depth = depth && dgrid[k] == 120 && dgrid[(kCapSize + 1) * gridStride + k] == 120;
+    for (int r = 0; r < kCapSize; ++r)
+        depth = depth && dg[r * gridStride + kCapSize] == 120;
+    // Cuts: what a square lost, found again from a world position (as plot centres sit: x0 + px * plot), on a wrapping map
+    // too; cleared when a square has nothing cut; the version moves with every change
+    Cuts cuts;
+    const int mw = 10, mh = 8;
+    const float plot = 180, x0 = (0.5f - mw * 0.5f) * plot, y0 = (0.5f - mh * 0.5f) * plot;
+    cuts.Map(mw, mh, true, x0, y0, plot);
+    std::vector<uint8_t> beforeSq(kCapSize * kCapSize, 96), afterSq(kCapSize * kCapSize, 96);
+    afterSq[20 * kCapSize + 10] = 66;  // pixel (10, 20) of square (3, 2) lowered by 30
+    const unsigned v0 = cuts.Version();
+    cuts.Set(3, 2, beforeSq.data(), afterSq.data(), kCapSize);
+    auto world = [&](int sx, int sy, int i, int j, float& wx, float& wy) {
+        wx = x0 + (sx - 1 + i / float(kCapSize)) * plot;
+        wy = y0 + (mh - sy - j / float(kCapSize)) * plot;
+    };
+    float wx, wy;
+    world(3, 2, 10, 20, wx, wy);
+    bool cut = cuts.Version() != v0 && cuts.At(wx, wy) == 30 && cuts.At(wx + plot / kCapSize, wy) == 0 &&
+               cuts.At(wx, wy - plot / kCapSize) == 0 && cuts.At(wx + 1.0f, wy - 1.0f) == 30;  // the nearest sample
+    cut = cut && cuts.At(wx + mw * plot, wy) == 30 && cuts.At(wx - mw * plot, wy) == 30;  // the map wraps east-west
+    cut = cut && cuts.At(wx, wy + mh * plot) == 0;                                         // not north-south
+    const unsigned v1 = cuts.Version();
+    cuts.Set(3, 2, beforeSq.data(), beforeSq.data(), kCapSize);  // restamped, nothing lowered: forgotten
+    cut = cut && cuts.At(wx, wy) == 0 && cuts.Squares() == 0 && cuts.Version() != v1;
+    // Bridging by a square's typical cut (three quarters of its lowered samples no deeper): a trench's whole cut even
+    // with one high spot cut deep beside it, none of a mesa gorge's (even a shallow sample in it), half where the typical
+    // cut is half way between the limits
+    std::vector<uint8_t> high(kCapSize * kCapSize, 200), low(kCapSize * kCapSize, 200);
+    afterSq.assign(kCapSize * kCapSize, 96);
+    for (int k = 0; k < 40; ++k)
+        afterSq[(20 + k % 8) * kCapSize + 10 + k / 8] = 48;  // a trench, 48 deep
+    afterSq[50 * kCapSize + 50] = 0;                         // and one high spot cut 96 deep
+    cuts.Set(3, 2, beforeSq.data(), afterSq.data(), kCapSize);
+    for (int k = 0; k < 300; ++k)
+        low[(k / 20) * kCapSize + 20 + k % 20] = 50;         // a gorge 150 deep across most of the square
+    low[20 * kCapSize + 10] = 50, low[5 * kCapSize + 5] = 180;  // ... and 20 deep beside it
+    cuts.Set(4, 2, high.data(), low.data(), kCapSize);
+    std::vector<uint8_t> mid(kCapSize * kCapSize, 200);
+    mid[20 * kCapSize + 10] = 200 - static_cast<int>((Cuts::kBridgeFull + Cuts::kBridgeNone) / 2);  // half way
+    cuts.Set(5, 2, high.data(), mid.data(), kCapSize);
+    float gx, gy, ex, ey, mx, my;
+    world(4, 2, 10, 20, gx, gy);
+    world(4, 2, 5, 5, ex, ey);
+    world(5, 2, 10, 20, mx, my);
+    const float half = (Cuts::kBridgeFull + Cuts::kBridgeNone) / 2;
+    cut = cut && cuts.Bridge(wx, wy) == 48 && cuts.At(gx, gy) == 150 && cuts.Bridge(gx, gy) == 0 &&
+          cuts.At(ex, ey) == 20 && cuts.Bridge(ex, ey) == 0 && std::fabs(cuts.Bridge(mx, my) - half * 0.5f) < 0.6f;
+    printf("RIVERLAYER arms=%d tile=%d add=%d full=%d sites=%d refused=%d parse=%d pick=%d order=%d cap=%d capsites=%d depth=%d cuts=%d\n", arms,
+           tile, add, full, sites, refused, parse, pick, order, cap, capsites, depth, cut);
     return 0;
 }
 

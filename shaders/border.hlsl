@@ -61,11 +61,14 @@ VSOut VSMain(VSIn i)
     // The ground here: grid points are at whole multiples of the spacing (texel centres), bilinear between the four.
     float2 cell = world.xy * f4Drape.x;
     float2 corner = floor(cell), t = cell - corner;
-    float2 at = (corner + 0.5) * f4Drape.y;
+    // Wrapped here, not by the sampler: the grid wraps (the map is centred on 0, so half of it is at negative cells),
+    // and a vertex texture read past 0 clamped to the edge on Iain's card (borders west and south of the map's
+    // middle read the wrong ground and weren't lifted; trace 2026-11-11 00:06)
+    float2 at = frac((corner + 0.5) * f4Drape.y), next = frac(at + f4Drape.y);
     float h00 = tex2Dlod(HeightMap, float4(at, 0, 0)).r;
-    float h10 = tex2Dlod(HeightMap, float4(at + float2(f4Drape.y, 0), 0, 0)).r;
-    float h01 = tex2Dlod(HeightMap, float4(at + float2(0, f4Drape.y), 0, 0)).r;
-    float h11 = tex2Dlod(HeightMap, float4(at + f4Drape.yy, 0, 0)).r;
+    float h10 = tex2Dlod(HeightMap, float4(next.x, at.y, 0, 0)).r;
+    float h01 = tex2Dlod(HeightMap, float4(at.x, next.y, 0, 0)).r;
+    float h11 = tex2Dlod(HeightMap, float4(next, 0, 0)).r;
     float ground = lerp(lerp(h00, h10, t.x), lerp(h01, h11, t.x), t.y);  // unknown ground: far below, no change
     world.z = max(world.z, ground + f4Drape.z);
     o.pos = float4(dot(world, mtxViewProj[0]), dot(world, mtxViewProj[1]), dot(world, mtxViewProj[2]),

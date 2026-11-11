@@ -144,7 +144,7 @@ static std::vector<std::pair<std::wstring, std::wstring>> IniSection(const std::
 // SurfaceTextures= line adds to the first instead of being ignored.
 static bool IsListSetting(const std::wstring& key)
 {
-    for (const wchar_t* name : {L"SurfaceTextures", L"NoShadowTextures", L"BlobShadowTexture"})
+    for (const wchar_t* name : {L"SurfaceTextures", L"NoShadowTextures", L"BlobShadowTexture", L"ModelsUnderBorders"})
         if (_wcsicmp(key.c_str(), name) == 0)
             return true;
     return false;
@@ -504,6 +504,7 @@ void LoadConfig()
     g_config.riverLayerTerrain = IniString(ini, L"terrain tiles", L"RiverLayerTerrain", L"");
     g_config.riverLayerFirstTile = IniInt(ini, L"terrain tiles", L"RiverLayerFirstTile", 33);
     g_config.riverLayerCaps = IniString(ini, L"terrain tiles", L"RiverLayerCaps", L"");
+    g_config.riverLayerDepths = IniString(ini, L"terrain tiles", L"RiverLayerDepths", L"");
     for (int s = 0; s < 8; ++s)  // JigsawPieces1..8
     {
         const std::wstring n = L"JigsawPieces" + std::to_wstring(s + 1);
@@ -686,6 +687,7 @@ void LoadConfig()
     g_config.detailNormalStrength = (std::max)(
         0.0f, static_cast<float>(_wtof(IniString(ini, L"textures", L"DetailNormalStrength", L"1").c_str())));
     g_config.blendTileClamp = IniInt(ini, L"textures", L"BlendTileClamp", 1) != 0;
+    g_config.modelsUnderBorders = IniList(ini, L"textures", L"ModelsUnderBorders", L"");
     g_config.detailBumpiness =
         (std::max)(0.0f, static_cast<float>(_wtof(IniString(ini, L"textures", L"DetailBumpiness", L"1.5").c_str())));
     g_config.lightingEnabled = IniInt(ini, L"lighting", L"Enabled", 1) != 0;

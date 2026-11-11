@@ -1799,6 +1799,8 @@ int g_riverTerrain = -2, g_riverOrder = 0;  // -2: not looked up yet; -1: it can
 unsigned g_riverLogged = 0xffffffffu;
 RiverLayer::Shapes g_shapes;
 bool g_shapesRead = false;
+RiverLayer::Cuts g_cuts;
+float g_cutZScale = 1.0f;
 unsigned g_capSquares = 0, g_capLogged = 0;
 
 // The shape tiles, once.
@@ -1807,7 +1809,8 @@ void ReadShapes()
     if (g_shapesRead)
         return;
     g_shapesRead = true;
-    const std::wstring& folder = g_config.riverLayerCaps;
+    // RiverLayerDepths wins: its tiles lower the ground rather than cap it
+    const std::wstring& folder = g_config.riverLayerDepths.empty() ? g_config.riverLayerCaps : g_config.riverLayerDepths;
     if (folder.empty())
         return;
     for (const RiverLayer::ShapeId& id : RiverLayer::kOrder)
@@ -1946,12 +1949,60 @@ extern "C" void __stdcall RiverCapSquare(uint8_t* landscape, int x, int y)
         return;
     void* map = g_dll.Map();
     const int w = g_dll.width(map, nullptr), h = g_dll.height(map, nullptr);
+    if (!g_cuts.Mapped())
+    {
+        // Plot centres as CvMap::plotXToPointX/plotYToPointY give them, evenly spaced round the middle of the map
+        void* gc = g_dll.getInstance();
+        const float plot = g_dll.defineFloat ? g_dll.defineFloat(gc, nullptr, "PLOT_SIZE") : 0.0f;
+        const float step = plot >= 1 ? plot : 180.0f;
+        if (g_dll.activeLandscape && g_dll.landscapeInfo && g_dll.zScale)
+            if (void* info = g_dll.landscapeInfo(gc, nullptr, g_dll.activeLandscape(gc, nullptr)))
+            {
+                const float z = g_dll.zScale(info, nullptr);
+                if (z > 0)
+                    g_cutZScale = z;
+            }
+        g_cuts.Map(w, h, g_dll.wrapX(map, nullptr), (0.5f - w * 0.5f) * step, (0.5f - h * 0.5f) * step, step);
+    }
     const int shape = ShapeAt(map, x, y, h, w, g_dll.wrapX(map, nullptr), nullptr);
     if (shape < 0)
+    {
+        g_cuts.Clear(x, y);  // restamped without a river: nothing cut here now
         return;
-    RiverLayer::ApplyCap(pixels + static_cast<size_t>(cellH) * stride * y + static_cast<size_t>(cellW) * x, stride,
+    }
+    uint8_t* square = pixels + static_cast<size_t>(cellH) * stride * y + static_cast<size_t>(cellW) * x;
+    uint8_t before[RiverLayer::kCapSize * RiverLayer::kCapSize];
+    for (int r = 0; r < RiverLayer::kCapSize; ++r)
+        memcpy(before + r * RiverLayer::kCapSize, square + static_cast<size_t>(r) * stride, RiverLayer::kCapSize);
+    if (!g_config.riverLayerDepths.empty())
+        RiverLayer::ApplyDepth(square, stride, g_shapes.tiles[shape].data());
+    else
+        RiverLayer::ApplyCap(square, stride,
                          g_shapes.tiles[shape].data());
+    g_cuts.Set(x, y, before, square, stride);
     ++g_capSquares;
+}
+
+float RiverCutAt(float wx, float wy)
+{
+    return g_cuts.Bridge(wx, wy) * g_cutZScale;  // shallow cuts bridged, mesa gorges followed down
+}
+
+unsigned RiverCutVersion()
+{
+    return g_cuts.Version();
+}
+
+float RiverCutRawAt(float wx, float wy)
+{
+    return g_cuts.At(wx, wy) * g_cutZScale;
+}
+
+std::string RiverCutDescribe()
+{
+    char z[48];
+    snprintf(z, sizeof(z), "\"zscale\":%.3f,", g_cutZScale);
+    return z + g_cuts.Describe();
 }
 
 // The peak stamp's calls come here: (landscape, x) on the stack, its RET 8 pops them, the mask in EAX and y in EBX.
@@ -2002,7 +2053,7 @@ void ApplyRiverLayer()
     g_layerBuilder = reinterpret_cast<void(__stdcall*)(void*)>(at + exeLayout->layerBuilder);
     g_peakStampFn = at + exeLayout->peakStamp;
     auto sites = RiverLayer::Sites(at, reinterpret_cast<uint32_t>(&RiverLayerBuilder), *exeLayout);
-    if (!g_config.riverLayerCaps.empty())
+    if (!g_config.riverLayerCaps.empty() || !g_config.riverLayerDepths.empty())
         for (const auto& site : RiverLayer::CapSites(at, reinterpret_cast<uint32_t>(&RiverPeakThunk), *exeLayout))
             sites.push_back(site);
     int written = 0;

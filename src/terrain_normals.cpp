@@ -335,12 +335,56 @@ bool TerrainNormals::EnsureHeightTexture()
         m_internalRefs += DeviceRefs(m_dev) - before;
         m_heightsNew = TerrainCells::Rect::Whole(m_cells);
     }
+    // The texture holds the ground as it was before the canyons were cut (the cut added back), so what is draped over
+    // it, the culture borders above all, bridges a canyon rather than dropping into it. The normals keep the cut.
+    if (RiverCutVersion() != m_cutVersion)
+    {
+        m_cutVersion = RiverCutVersion();
+        m_heightsNew = TerrainCells::Rect::Whole(m_cells);
+    }
+    const float span = m_spacing * m_cells;
     if (!m_heightsNew.Empty() && !m_heights.empty() && Upload<float>(m_heightTex, m_heightsNew, [&](int x, int y) {
             const float v = Height(x, y);
-            return std::isnan(v) ? -10000.0f : v;
+            if (std::isnan(v))
+                return -10000.0f;
+            // a cell is a place in the world modulo the grid's span; the map is centred on 0 and narrower than the span,
+            // so the cells past half way are its negative side
+            const float wx = x * m_spacing, wy = y * m_spacing;
+            return v + RiverCutAt(wx < span * 0.5f ? wx : wx - span, wy < span * 0.5f ? wy : wy - span);
         }))
         m_heightsNew = TerrainCells::Rect();
     return true;
+}
+
+bool TerrainNormals::SaveCuts(const std::wstring& path) const
+{
+    if (m_heights.empty() || m_spacing <= 0)
+        return false;
+    const float span = m_spacing * m_cells;
+    std::vector<float> out(static_cast<size_t>(m_cells) * m_cells * 2);
+    for (UINT y = 0; y < m_cells; ++y)
+        for (UINT x = 0; x < m_cells; ++x)
+        {
+            const float wx = x * m_spacing, wy = y * m_spacing;
+            const float ax = wx < span * 0.5f ? wx : wx - span, ay = wy < span * 0.5f ? wy : wy - span;
+            out[(static_cast<size_t>(y) * m_cells + x) * 2] = RiverCutAt(ax, ay);
+            out[(static_cast<size_t>(y) * m_cells + x) * 2 + 1] = RiverCutRawAt(ax, ay);
+        }
+    return WriteBytes(path, out.data(), out.size() * sizeof(float));
+}
+
+bool TerrainNormals::SaveHeightTexture(const std::wstring& path)
+{
+    if (!m_heightTex)
+        return false;
+    D3DLOCKED_RECT lr;
+    if (FAILED(m_heightTex->LockRect(0, &lr, nullptr, D3DLOCK_READONLY)))
+        return false;
+    std::vector<float> out(static_cast<size_t>(m_cells) * m_cells);
+    for (UINT y = 0; y < m_cells; ++y)
+        memcpy(&out[static_cast<size_t>(y) * m_cells], static_cast<BYTE*>(lr.pBits) + y * lr.Pitch, m_cells * sizeof(float));
+    m_heightTex->UnlockRect(0);
+    return WriteBytes(path, out.data(), out.size() * sizeof(float));
 }
 
 bool TerrainNormals::EnsureHillResources()

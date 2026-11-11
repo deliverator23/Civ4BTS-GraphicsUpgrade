@@ -108,6 +108,8 @@ struct Config
     int riverLayerFirstTile = 33;
     // RiverLayerCaps=<folder under Assets> (river_layer.h; empty = none): shape tiles, cutting the ground to fit.
     std::wstring riverLayerCaps;
+    // RiverLayerDepths=<folder under Assets> (river_layer.h): the same, but the tiles say how far to lower the ground.
+    std::wstring riverLayerDepths;
     // MixedCoastBlend=1 (terrain_sets.h, BlendSquare): on a coast square of two or more land terrains with paired lists,
     // each paired land layer paints the whole land and the terrain shader weights it by its share of the square's land
     // corners, so they blend across the square instead of meeting in square blocks. Needs our terrain shader (the
@@ -205,6 +207,9 @@ struct Config
     float detailNormalStrength = 1.0f;
     float detailBumpiness = 1.5f;
     bool blendTileClamp = true;  // read blend sheets inside each square's tile at every mip (Shader Model 3)
+    // Models drawn with one of these textures (TextureList entries) show under the culture borders' tint, as the
+    // ground does, rather than over it (BtS draws the borders first, then the models over them).
+    std::wstring modelsUnderBorders;
     UINT lightCycleKey = '4';  // modifiers + key pauses and resumes the light cycle
     float lightSun[kLightGroups][3] = {};
     float lightAmbient[kLightGroups][3] = {};
@@ -280,6 +285,13 @@ void ApplyPlotFlatten();
 void ApplyLandBlends();
 // [terrain tiles] RiverLayerTerrain: hooks the terrain layer records if set (terrain_sets.cpp). Once.
 void ApplyRiverLayer();
+// How much of the canyons' cut to add back at a world position, in world units (0 where nothing was cut; the whole cut
+// in a shallow trench, none in a deep gorge through a mesa: RiverLayer::Cuts::Bridge), and a number that changes
+// whenever any cut does (terrain_sets.cpp): the height texture adds it back, so borders bridge the trenches.
+float RiverCutAt(float wx, float wy);
+unsigned RiverCutVersion();
+float RiverCutRawAt(float wx, float wy);  // debug: the whole cut there, bridged or not, in world units
+std::string RiverCutDescribe();           // debug: RiverLayer::Cuts::Describe and the z scale, JSON fields
 std::string LandBlendsSummary();  // "" if nothing new since the last call
 // "terrain tile groups: ..." (picks by tile group, hill/peak variants used) when they changed since the last call,
 // else "".

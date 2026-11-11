@@ -198,6 +198,16 @@ the vertex or material alpha) says where the water is. By default this is the oa
 SurfaceTextures=Art\Terrain\Features\Oasis\oasis_water.dds; Art\Effects\Flood\flood_water.dds
 ```
 
+**Models under the culture borders.** BtS tints the ground inside a civilization's borders, then draws the models on
+top, so a model that is part of the landscape stands out of the tint. `[textures] ModelsUnderBorders` lists textures
+whose models take the tint instead, the same as the ground around them, as if they were under it. Nothing moves, and
+units in front still cover them. Entries work as in `NoShadowTextures`. Off unless something is listed:
+
+```ini
+[textures]
+ModelsUnderBorders=Art\Terrain\Features\Caves\cave.dds
+```
+
 **Effects that follow the light.** BtS draws most particle effects (dust, smoke, glows) unlit, so they keep the
 same colour by day and by night. `[lighting] LitEffectTextures` lists textures whose effects should follow the light
 instead. They then darken and change colour with the day–night cycle and the lighting presets, as the ground under them
