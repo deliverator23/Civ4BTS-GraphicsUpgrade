@@ -128,51 +128,6 @@ bool ReadFromFpk(const std::wstring& fpk, const std::string& name, std::vector<u
     return false;
 }
 
-// Civ 5's layout: u32 6, "FPK_", u16, u32 count, then per entry u32 name length, name bytes as they are, padding to 4,
-// u64 time, u32 size, u32 offset.
-bool ReadFromCiv5Fpk(const std::wstring& fpk, const std::string& name, std::vector<uint8_t>& out)
-{
-    FILE* f = nullptr;
-    if (_wfopen_s(&f, fpk.c_str(), L"rb") || !f)
-        return false;
-    auto lower = [](std::string s) {
-        for (auto& c : s)
-            c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
-        return s;
-    };
-    const std::string want = lower(name);
-    uint8_t head[14];
-    FpkEntry found;
-    bool ok = false;
-    if (fread(head, 1, 14, f) == 14 && memcmp(head + 4, "FPK_", 4) == 0)
-    {
-        uint32_t count;
-        memcpy(&count, head + 10, 4);
-        std::string entryName;
-        for (uint32_t i = 0; i < count && !ok; ++i)
-        {
-            uint32_t len = 0;
-            if (fread(&len, 4, 1, f) != 1 || len > 1024)
-                break;
-            entryName.resize(len);
-            if (fread(&entryName[0], 1, len, f) != len)
-                break;
-            fseek(f, (4 - len % 4) % 4, SEEK_CUR);
-            uint8_t rest[16];
-            if (fread(rest, 1, 16, f) != 16)
-                break;
-            if (lower(entryName) == want)
-            {
-                memcpy(&found.size, rest + 8, 4);
-                memcpy(&found.offset, rest + 12, 4);
-                ok = true;
-            }
-        }
-    }
-    fclose(f);
-    return ok && ReadFpkEntry(fpk, found, out);
-}
-
 namespace
 {
 std::wstring Trim(const std::wstring& s)

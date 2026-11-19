@@ -86,18 +86,16 @@ bool Water::Ready()
 bool Water::Load()
 {
     // The textures, each from the first of: a running mod's Assets\Art\GraphicsUpgrade (loose or in its FPK archives),
-    // the mod's GraphicsUpgrade folder, the GraphicsUpgrade folder next to the DLL, a Colonization install
-    // (Assets\Art0.FPK, or loose files at the paths in its CIV4WaterPlaneInfos.xml). The normal map is water_normal.dds;
-    // in the two GraphicsUpgrade folders also under its old name (Colonization's own), water_001.dds, as 1.0.x
-    // installs and mods have it. The environment cube is water_env.dds. The shaders (water.hlsl, water_surface.hlsl)
-    // are built into the DLL.
+    // the mod's GraphicsUpgrade folder, the GraphicsUpgrade folder next to the DLL (shipped there). The normal map is
+    // water_normal.dds; in the two GraphicsUpgrade folders also under its old name, water_001.dds, as 1.0.x installs
+    // and mods have it. The environment cube is water_env.dds. The shaders (water.hlsl, water_surface.hlsl) are built
+    // into the DLL.
     struct Texture
     {
-        const wchar_t *name, *oldName, *colonizationName;
+        const wchar_t *name, *oldName;
         std::vector<uint8_t> bytes;
         std::wstring from;
-    } textures[2] = {{L"water_normal.dds", L"water_001.dds", L"water_001.dds", {}, {}},
-                     {L"water_env.dds", nullptr, L"water_env.dds", {}, {}}};
+    } textures[2] = {{L"water_normal.dds", L"water_001.dds", {}, {}}, {L"water_env.dds", nullptr, {}, {}}};
     auto find = [&](Texture& t) {
         if (ReadAsset(std::wstring(L"Art\\GraphicsUpgrade\\") + t.name, t.bytes, t.from, true))
             return true;
@@ -108,26 +106,14 @@ bool Water::Load()
                     t.from = folder + L"\\" + file;
                     return true;
                 }
-        const std::wstring& dir = g_config.colonizationDir;
-        const std::wstring loose = std::wstring(L"Art\\Terrain\\Water\\RRWater\\") + t.colonizationName;
-        std::string packed;
-        for (wchar_t c : loose)
-            packed += static_cast<char>(towlower(c));
-        for (const std::wstring& path : {dir + L"\\Assets\\Art0.FPK", dir + L"\\Assets\\" + loose})
-            if (path.size() > 4 && path.compare(path.size() - 4, 4, L".FPK") == 0 ? ReadFromFpk(path, packed, t.bytes)
-                                                                                 : ReadFileBytes(path, t.bytes))
-            {
-                t.from = path;
-                return true;
-            }
         return false;
     };
     for (Texture& t : textures)
         if (!find(t))
         {
             Log::Write("water: textures not found: %ls isn't in the mod's Assets\\Art\\GraphicsUpgrade or GraphicsUpgrade "
-                       "folder, %ls\\GraphicsUpgrade, or the Colonization install %ls; BtS water left as is",
-                       t.name, ProxyDir().c_str(), g_config.colonizationDir.c_str());
+                       "folder, or %ls\\GraphicsUpgrade; BtS water left as is",
+                       t.name, ProxyDir().c_str());
             return false;
         }
     std::vector<uint8_t>& normalDds = textures[0].bytes;
@@ -426,16 +412,12 @@ void Water::LoadShore(const std::function<bool(const std::vector<uint8_t>&, IDir
         Log::Write("water: %s (caustics off)", glint ? "the glint follows the sun" : "wave shading");
         return;
     }
-    // Civilization V's caustic networks: from the GraphicsUpgrade folders (the mod's, then the game's), else
-    // Civilization V's own archive.
+    // The caustic networks: from the GraphicsUpgrade folders (the mod's, then the game's, where they're shipped).
     struct Source
     {
         const wchar_t* name;
-        const char* civ5Name;
         IDirect3DTexture9** out;
-    } sources[2] = {{L"water_caustics1.dds", "fx_caustics_base_01.dds", &m_caustic[0]},
-                    {L"water_caustics2.dds", "fx_caustics_base_02.dds", &m_caustic[1]}};
-    const std::wstring civ5Pack = g_config.civ5Dir + L"\\Resource\\DX9\\EffectTextures.fpk";
+    } sources[2] = {{L"water_caustics1.dds", &m_caustic[0]}, {L"water_caustics2.dds", &m_caustic[1]}};
     std::wstring from;
     for (Source& s : sources)
     {
@@ -444,12 +426,10 @@ void Water::LoadShore(const std::function<bool(const std::vector<uint8_t>&, IDir
         for (const std::wstring& folder : {g_config.modGraphicsDir, ProxyDir() + L"\\GraphicsUpgrade"})
             if (!found && !folder.empty() && ReadFileBytes(folder + L"\\" + s.name, dds))
                 found = true, from = folder;
-        if (!found && ReadFromCiv5Fpk(civ5Pack, s.civ5Name, dds))
-            found = true, from = civ5Pack;
         if (!found || !texture(dds, s.out))
         {
-            Log::Write("water: %ls not found in the GraphicsUpgrade folder or %ls (or not a texture): no caustics%s",
-                       s.name, civ5Pack.c_str(), glint ? "; the glint still follows the sun" : "");
+            Log::Write("water: %ls not found in the GraphicsUpgrade folder (or not a texture): no caustics%s", s.name,
+                       glint ? "; the glint still follows the sun" : "");
             for (IDirect3DTexture9** t : {&m_caustic[0], &m_caustic[1]})
                 if (*t)
                     (*t)->Release(), *t = nullptr;

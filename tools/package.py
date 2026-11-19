@@ -8,9 +8,9 @@ files, in a GraphicsUpgrade-<version> folder; the zip's name stays the same so t
   d3d9.dll               the proxy
   GraphicsUpgrade.ini    settings
   GraphicsUpgrade.md     README.md: what it does, how to install it and the settings
-  presets/               [lighting] sections for BtS's, Colonization's and Civilization VI's lighting
-  GraphicsUpgrade/       Colonization's water textures: water_normal.dds (normal map), water_env.dds (environment cube);
-                         Civilization V's caustics: water_caustics1.dds, water_caustics2.dds
+  presets/               [lighting] sections: BtS's own, a warm fixed light, a day-night cycle
+  GraphicsUpgrade/       the water textures: water_normal.dds (normal map), water_env.dds (environment cube),
+                         water_caustics1.dds and water_caustics2.dds (caustics)
 
 To install, copy the folder's contents into the Beyond the Sword folder.
 """

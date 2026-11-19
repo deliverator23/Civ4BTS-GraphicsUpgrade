@@ -591,9 +591,6 @@ void LoadConfig()
     g_config.waterKey = IniKey(ini, L"water", L"ToggleKey", '1');
     g_config.waterNormalKey = IniKey(ini, L"water", L"NormalMapToggleKey", '7');
     g_config.waterNormalMap = IniInt(ini, L"water", L"NormalMap", 0);
-    std::wstring colDir = IniString(ini, L"water", L"ColonizationDir", L"");
-    if (!colDir.empty())
-        g_config.colonizationDir = colDir;
     g_config.waterSurfaceTextures =
         IniList(ini, L"water", L"SurfaceTextures", L"Art\\Terrain\\Features\\Oasis\\oasis_water.dds");
     g_config.underwaterDepth = static_cast<float>(_wtof(IniString(ini, L"water", L"UnderwaterDepth", L"25").c_str()));
@@ -611,9 +608,6 @@ void LoadConfig()
     g_config.riverGlint = (std::max)(0, (std::min)(255, IniInt(ini, L"water", L"RiverGlint", 128)));
     g_config.riverShimmer = (std::max)(0.0f, (std::min)(3.0f, static_cast<float>(_wtof(
                                                               IniString(ini, L"water", L"RiverShimmer", L"3").c_str()))));
-    std::wstring civ5Dir = IniString(ini, L"water", L"Civ5Dir", L"");
-    if (!civ5Dir.empty())
-        g_config.civ5Dir = civ5Dir;
     // The water shader's f4WaterConstants: x = ReflectionEvenness, y = ReflectionRipple, z = RefractionRipple (w unused).
     // 1.0's INIs had them as one setting, WaterConstants=x,y,z,w, read when none of the three is set.
     const wchar_t* waterKeys[3] = {L"ReflectionEvenness", L"ReflectionRipple", L"RefractionRipple"};

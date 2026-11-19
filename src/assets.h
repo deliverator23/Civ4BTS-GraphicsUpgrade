@@ -20,8 +20,6 @@ struct FpkEntry
 std::vector<FpkEntry> FpkEntries(const std::wstring& fpk);
 bool ReadFpkEntry(const std::wstring& fpk, const FpkEntry& entry, std::vector<uint8_t>& out);
 bool ReadFromFpk(const std::wstring& fpk, const std::string& name, std::vector<uint8_t>& out);
-// A file from a Civilization V .fpk archive (version 6: plain names; name compared ignoring case).
-bool ReadFromCiv5Fpk(const std::wstring& fpk, const std::string& name, std::vector<uint8_t>& out);
 
 // The copy of an art file the game uses (name: a path under Assets): the first of the running mod's, Beyond the
 // Sword's, Warlords' and Civilization IV's, loose before packed (modOnly: the running mod's only). from: the file or

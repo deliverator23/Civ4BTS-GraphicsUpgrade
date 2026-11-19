@@ -161,8 +161,7 @@ def game_files():
 
 # Every test's settings start from the main effects off (the release defaults turn them on), so a test only gets
 # what it asks for. Merged key by key: Windows reads only the first copy of a section.
-BASELINE = {'water': {'Enabled': '0', 'GlintFollowsSun': '0', 'Caustics': '0', 'WaveShading': '0',
-                      'Civ5Dir': 'C:\\nowhere'},
+BASELINE = {'water': {'Enabled': '0', 'GlintFollowsSun': '0', 'Caustics': '0', 'WaveShading': '0'},
             'reflection': {'Enabled': '0'}, 'shadows': {'Enabled': '0'},
             'lighting': {'Enabled': '0', 'LightCycleOn': '0'}}
 
@@ -618,6 +617,10 @@ def main():
             shutil.rmtree(sdir)
         os.makedirs(sdir)
         shutil.copyfile(DLL, os.path.join(sdir, 'd3d9.dll'))
+        # The water's textures, as the release package has them, for runs that turn the water on (the river glint).
+        os.makedirs(os.path.join(sdir, 'GraphicsUpgrade'))
+        for fn in ('water_normal.dds', 'water_env.dds'):
+            shutil.copyfile(os.path.join(ROOT, 'textures', fn), os.path.join(sdir, 'GraphicsUpgrade', fn))
         with TestIni(os.path.join(sdir, 'GraphicsUpgrade.ini')) as f:
             f.write(f'[general]\nOutputDir={sout_dir}\nGames=*\n[reflection]\nWaterHeight={water_height}\n'
                     f'[shadows]\nEnabled={enabled}\nSunDirection={sun}\nDarkness=0.5\nOverlay=1\nBuildingShadows={buildings}\n'
@@ -1237,7 +1240,7 @@ def main():
 
     # The preset files as shipped: the DLL reads the colours they give (logged at device creation).
     for preset, unit in (('lighting-bts.ini', 'unit sun 204,204,176, ambient 88,88,72'),
-                         ('lighting-colonization.ini', 'unit sun 255,235,188, ambient 89,103,133')):
+                         ('lighting-warm.ini', 'unit sun 255,235,188, ambient 89,103,133')):
         text = open(os.path.join(ROOT, 'presets', preset), encoding='utf-8').read()
         light_run('preset', text)
         plog = open(os.path.join(TEST, 'light_preset', 'out', 'test_proxy', 'session.log'), encoding='latin-1').read()
@@ -1750,10 +1753,8 @@ def main():
         print('  skip  older build\'s tree and river shaders: set GU_BTS_OLD_SHADERS to its Shaders folder')
 
     print('water:')
-    # The water textures as packaged (textures/, as a GraphicsUpgrade folder next to each test DLL); no Colonization
-    # install needed (ColonizationDir points nowhere).
+    # The water textures as packaged (textures/, as a GraphicsUpgrade folder next to each test DLL).
     water_assets = os.path.join(ROOT, 'textures')
-    col_dir = 'C:\\nowhere'
 
     def install_water(folder, normal_name='water_normal.dds'):
         os.makedirs(os.path.join(folder, 'GraphicsUpgrade'), exist_ok=True)
@@ -1771,7 +1772,7 @@ def main():
         shutil.copyfile(DLL, os.path.join(wdir, 'd3d9.dll'))
         install_water(wdir)
         with TestIni(os.path.join(wdir, 'GraphicsUpgrade.ini')) as f:
-            f.write(f'[general]\nOutputDir={wout_dir}\nGames=*\n[water]\nEnabled=1\nColonizationDir={col_dir}\n')
+            f.write(f'[general]\nOutputDir={wout_dir}\nGames=*\n[water]\nEnabled=1\n')
         wout = run([os.path.join(TEST, 'test_proxy.exe'), os.path.join(wdir, 'd3d9.dll'), 'water'])
         wlog = open(os.path.join(wout_dir, 'test_proxy', 'session.log'), encoding='latin-1').read()
         check('water: shaders vertex' in wlog and 'mtxShadow c30' in wlog and
@@ -1846,7 +1847,7 @@ def main():
                 shutil.copyfile(src, os.path.join(sdir, 'GraphicsUpgrade', name))
             with TestIni(os.path.join(sdir, 'GraphicsUpgrade.ini')) as f:
                 f.write(f'[general]\nOutputDir={os.path.join(sdir, "out")}\nGames=*\n[water]\nEnabled=1\n'
-                        f'ColonizationDir={col_dir}\n{water_ini}[shadows]\nSunDirection={sun or "-1,0,-1"}\n'
+                        f'{water_ini}[shadows]\nSunDirection={sun or "-1,0,-1"}\n'
                         f'[debug]\nWaterTime=7.5\n')  # the water's clock stopped: every run draws the same frame
             out = run([os.path.join(TEST, 'test_proxy.exe'), os.path.join(sdir, 'd3d9.dll'), 'water'])
             log = open(os.path.join(sdir, 'out', 'test_proxy', 'session.log'), encoding='latin-1').read()
@@ -1862,12 +1863,12 @@ def main():
             check('drawn with the shoreline water (glint follows the sun on' in slog and
                   'no caustics; the glint still follows the sun' in slog and
                   'final refs device 0, d3d 0' in sout,
-                  'glint follows the sun: the Shader Model 3 water drawn; without Civ 5 textures no caustics; '
+                  'glint follows the sun: the Shader Model 3 water drawn; without caustic textures no caustics; '
                   'device released')
             check(abs(same_sum - base_sum) <= base_sum * 0.001,
                   f'glint follows the sun: with the sun where the sky texture painted it, the picture is as before '
                   f'(frame {same_sum} vs {base_sum})')
-            # Caustics: the bundled textures (Civ 5's) from the GraphicsUpgrade folder load (no terrain here, so no
+            # Caustics: the bundled textures from the GraphicsUpgrade folder load (no terrain here, so no
             # shore is known and the picture is the glint's alone).
             files = [(os.path.join(ROOT, 'textures', fn), fn) for fn in ('water_caustics1.dds', 'water_caustics2.dds')]
             (tex_sum, _), tlog, tout = shore_run('textures', 'GlintFollowsSun=1\nCaustics=1\n', painted, files)
@@ -1902,7 +1903,7 @@ def main():
                     f.write(data)
             with TestIni(os.path.join(sdir, 'GraphicsUpgrade.ini')) as f:
                 f.write(f'[general]\nOutputDir={os.path.join(sdir, "out")}\nGames=*\n[water]\nEnabled=1\n'
-                        f'ColonizationDir={col_dir}\n{water}[lighting]\nEnabled=1\n{light}')
+                        f'{water}[lighting]\nEnabled=1\n{light}')
             extra = []
             if mod_ini is not None:
                 mod_gu = os.path.join(sdir, 'Mods', 'TestMod', 'GraphicsUpgrade')
@@ -2002,7 +2003,7 @@ def main():
             install_water(udir)
             with TestIni(os.path.join(udir, 'GraphicsUpgrade.ini')) as f:
                 f.write(f'[general]\nOutputDir={os.path.join(udir, "out")}\nGames=*\n[debug]\nTraces=1\n[trace]\nAutoFrame=1\n'
-                        f'[water]\nEnabled=1\nColonizationDir={col_dir}\nUnderwaterDepth={depth}\nUnderwaterVisibility=0.7\n'
+                        f'[water]\nEnabled=1\nUnderwaterDepth={depth}\nUnderwaterVisibility=0.7\n'
                         f'UnderwaterBands=8\n[reflection]\nWaterHeight=0.5\n')
             res = run([os.path.join(TEST, 'test_proxy.exe'), os.path.join(udir, 'd3d9.dll'), 'water'])
             traces = os.path.join(udir, 'out', 'test_proxy', 'traces')
@@ -2031,7 +2032,7 @@ def main():
         install_water(sdir)
         with TestIni(os.path.join(sdir, 'GraphicsUpgrade.ini')) as f:
             f.write(f'[general]\nOutputDir={os.path.join(sdir, "out")}\nGames=*\n[debug]\nTraces=1\n[trace]\nAutoFrame=2\n'
-                    f'[water]\nEnabled=1\nColonizationDir={col_dir}\nUnderwaterDepth=50\nUnderwaterVisibility=0.7\n'
+                    f'[water]\nEnabled=1\nUnderwaterDepth=50\nUnderwaterVisibility=0.7\n'
                     f'UnderwaterBands=8\n[reflection]\nEnabled=1\nSize=512\n')
         sres = run([os.path.join(TEST, 'test_proxy.exe'), os.path.join(sdir, 'd3d9.dll'), 'sea'])
         straces = os.path.join(sdir, 'out', 'test_proxy', 'traces')
@@ -2067,8 +2068,8 @@ def main():
               f"the map shows the sea resource from the game's own draw after the water, untouched (pixel "
               f"{ms.group(2) if ms else '?'})")
 
-        # Bundled files only (as in the release package: a GraphicsUpgrade folder next to the DLL), with ColonizationDir
-        # pointing nowhere: the water must still be Colonization's. Then neither: BtS water left alone.
+        # Bundled files only (as in the release package: a GraphicsUpgrade folder next to the DLL): the water must be
+        # ours. Then none: BtS water left alone.
         for label, bundle in (('bundled', True), ('oldname', True), ('none', False)):
             bdir = os.path.join(TEST, 'water_' + label)
             bout = os.path.join(bdir, 'out')
@@ -2079,7 +2080,7 @@ def main():
             if bundle:
                 install_water(bdir, 'water_001.dds' if label == 'oldname' else 'water_normal.dds')
             with TestIni(os.path.join(bdir, 'GraphicsUpgrade.ini')) as f:
-                f.write(f'[general]\nOutputDir={bout}\nGames=*\n[water]\nEnabled=1\nColonizationDir=C:\\nowhere\n')
+                f.write(f'[general]\nOutputDir={bout}\nGames=*\n[water]\nEnabled=1\n')
             bres = run([os.path.join(TEST, 'test_proxy.exe'), os.path.join(bdir, 'd3d9.dll'), 'water'])
             blog = open(os.path.join(bout, 'test_proxy', 'session.log'), encoding='latin-1').read()
             mb = re.search(r'WATER pixel=([0-9a-f]{8})', bres)
@@ -2089,10 +2090,10 @@ def main():
                       'a 1.0.x GraphicsUpgrade folder (the normal map under its old name, water_001.dds) still works')
             elif bundle:
                 check(not magenta and 'water: textures from ' + os.path.join(bdir, 'GraphicsUpgrade', 'water_normal.dds') in blog,
-                      'bundled GraphicsUpgrade folder used when Colonization is absent (as in the release package)')
+                      'bundled GraphicsUpgrade folder used (as in the release package)')
             else:
                 check(magenta and 'water: textures not found' in blog,
-                      'no bundled files and no Colonization: BtS water left alone, logged')
+                      'no bundled files: BtS water left alone, logged')
             check('final refs device 0, d3d 0' in bres, f'device and Direct3D fully released ({label})')
 
         # Water on models ([water] SurfaceTextures): a pool-like fixed-function quad (green, the texture's alpha)
@@ -2117,7 +2118,7 @@ def main():
                         f.write(content)
                 mod_arg = ['mod=' + mod]
             with TestIni(os.path.join(sdir, 'GraphicsUpgrade.ini')) as f:
-                f.write(f'[general]\nOutputDir={os.path.join(sdir, "out")}\nGames=*\n[water]\nColonizationDir=C:\\nowhere\n'
+                f.write(f'[general]\nOutputDir={os.path.join(sdir, "out")}\nGames=*\n[water]\n'
                         + ini.replace('{dds}', dds))
             res = run([os.path.join(TEST, 'test_proxy.exe'), os.path.join(sdir, 'd3d9.dll'), 'surface', dds] + mod_arg)
             m = re.search(r'SURFACE pixel=([0-9a-f]{8}) restored=(\d)', res)

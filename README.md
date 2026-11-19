@@ -22,7 +22,7 @@ cast shadows. These apply only while that mod is running. See [For modders](#for
 | **Hill and peak shadows** | None | Hills and peaks shade the ground behind them |
 | **Ground detail** | Painted on, lit the same whatever the light | Small bumps (sand ripples, cracks, stones) catch the sun and turn with it |
 | **Building shadows** | Painted on, always pointing the same way | Real shadows from buildings, improvements and resources |
-| **Lighting** | BtS's white sun and grey shade | [Without day-night cycle] A warm sun and cool blue shade, as in Colonization; colours adjustable for units, ships, trees, buildings, terrain and rivers |
+| **Lighting** | BtS's white sun and grey shade | [Without day-night cycle] A warm sun and cool blue shade; colours adjustable for units, ships, trees, buildings, terrain and rivers |
 | **Day and night** | None | [With day-night cycle] The light changes colour and the sun circles the sky, with shadows turning to follow it |
 
 Everything is on by default. Water, shadows and lighting can be switched off in game (see the hotkeys below), and every
@@ -124,8 +124,8 @@ ships and vehicles, terrain, rivers, trees, buildings, and the sun on the water.
 `[lighting]` and `[lighting groups]` sections to paste in place of the two in `GraphicsUpgrade.ini`:
 
 - **`lighting-bts.ini`**: BtS's own lighting, close to how the game looks without GraphicsUpgrade. A good starting point for your own colours.
-- **`lighting-colonization.ini`**: Colonization's warm sun and cool blue shade.
-- **`lighting-civ6.ini`**: a day–night cycle with Civilization VI's colours, the sun circling the sky once a day.
+- **`lighting-warm.ini`**: a warm sun and cool blue shade, fixed (the default colours with the day–night cycle off).
+- **`lighting-day-night.ini`**: a day–night cycle in muted, natural colours, the sun circling the sky once a day.
 
 The day–night cycle runs through a day over `LightChangeCycleTime` seconds: golden hour, sunset, a silvery
 moonlit night and dawn. The sun travels round the sky rather than swinging back and forth, so the shadows turn with it.
@@ -161,7 +161,7 @@ in your mod's folder still works for these too, and there the normal map is also
 
 More looks for the waves can go in the same places, as `water_normal_1.dds`, `water_normal_2.dds` and so on (numbered
 from 1, without gaps). Each is a normal map that covers 1440 world units (8 plots) before it repeats, where
-`water_normal.dds` covers Colonization's 480. Ctrl+Shift+7 (`[water] NormalMapToggleKey`) cycles through them,
+`water_normal.dds` covers 480. Ctrl+Shift+7 (`[water] NormalMapToggleKey`) cycles through them,
 `water_normal.dds` first, and `[water] NormalMap` picks the one the game starts with.
 
 Any of these water normal maps can be DXT5nm instead of plain DXT5: x in the alpha channel and y in green (red and blue
@@ -205,7 +205,7 @@ units in front still cover them. Entries work as in `NoShadowTextures`. Off unle
 
 ```ini
 [textures]
-ModelsUnderBorders=Art\Terrain\Features\Caves\cave.dds
+ModelsUnderBorders=Art\Terrain\Features\Crater\crater.dds
 ```
 
 **The settler's city-site guide on the ground.** BtS draws the guide (the square or cross of plots a city there
@@ -230,7 +230,7 @@ are left as they are. The interface and the Civilopedia are never changed. Entri
 
 ```ini
 [lighting]
-LitEffectTextures=Art\Effects\Sandstorm_P; Art\Effects\Dust\dust_cloud.dds
+LitEffectTextures=Art\Effects\Smoke; Art\Effects\Dust\dust_cloud.dds
 ```
 
 **Rock that sits in the ground.** The game adds the light to the terrain's colours but multiplies a model's colours by
@@ -254,8 +254,8 @@ takes one set, by feature first, so a plot in this set gets no stamp from a set 
 
 ```ini
 [terrain tiles]
-PlotStamps1OnFeatures=FEATURE_CAVE
-PlotStamps1Folder=Art\Terrain\Stamps\CaveSeats
+PlotStamps1OnFeatures=FEATURE_CRATER
+PlotStamps1Folder=Art\Terrain\Stamps\CraterSeats
 PlotStamps1Flatten=1
 ```
 
@@ -318,8 +318,8 @@ straight through.
 
 GraphicsUpgrade sits between the game and Direct3D 9. It changes how BtS's own scene is drawn, frame by frame:
 
-- **Water:** the ships are redrawn into a mirrored reflection. BtS's own water is then drawn with a new water shader,
-  reverse engineered from Colonization's. Water on models, such as an oasis' pool, gets the same ripples, sky reflection
+- **Water:** the ships are redrawn into a mirrored reflection. BtS's own water is then drawn with a new water shader.
+  Water on models, such as an oasis' pool, gets the same ripples, sky reflection
   and sun glint drawn over it. BtS draws sea resources after the water, too late for its reflection and its view under
   the surface: each is also kept and drawn into the next frame's, so there they run one frame (a sixtieth of a second)
   late.
@@ -348,7 +348,7 @@ That builds `build\d3d9.dll`. To build and package a release into `dist\`:
 uv run tools/package.py
 ```
 
-To run the tests (no game needed; a few use the installed BtS and Colonization files and are skipped without them):
+To run the tests (no game needed; a few use installed games' files and are skipped without them):
 
 ```bash
 uv run tests/run_tests.py
@@ -358,9 +358,6 @@ uv run tests/run_tests.py
 
 GraphicsUpgrade by Deliverator.
 
-The water shader is reverse engineered from the one in Sid Meier's Civilization IV: Colonization. The water textures
-(`water_normal.dds`, which is Colonization's `water_001.dds`, and `water_env.dds`) are from Colonization, © Firaxis
-Games / 2K; `water_env.dds`'s sun glint has been redrawn to remove a seam. The caustic textures
-(`water_caustics1.dds` and `water_caustics2.dds`, Civilization V's `fx_caustics_base_01.dds` and `_02.dds`) are from
-Sid Meier's Civilization V, © Firaxis Games / 2K. GraphicsUpgrade is an unofficial fan project,
-not affiliated with or endorsed by Firaxis Games, 2K or Take-Two Interactive.
+The water and caustic textures in the `GraphicsUpgrade` folder are from other Sid Meier's Civilization games,
+© Firaxis Games / 2K (`water_env.dds`'s sun glint redrawn to remove a seam). GraphicsUpgrade is an unofficial fan
+project, not affiliated with or endorsed by Firaxis Games, 2K or Take-Two Interactive.

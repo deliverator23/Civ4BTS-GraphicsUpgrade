@@ -56,14 +56,14 @@ Haze and colour shift towards the horizon, tinted by the time of day: golden at 
 
 The terrain heights give the distance to shore and the water depth. From those:
 
-- **Caustics:** done. Light patterns shimmering on the sea floor in shallow water, from Civilization V's caustic
+- **Caustics:** done. Light patterns shimmering on the sea floor in shallow water, from the shipped caustic
   textures (`[water] Caustics`).
 - **Glint:** done. The sun glint follows the cycle's sun instead of staying at the fixed spot in `water_env.dds`,
   mirrored to the far side of the view so it stays visible (`[water] GlintFollowsSun`).
 - **Foam:** tried and dropped. Rolling bands of foam, then granular foam along the waterline: neither looked right
   at Civ4's scale.
 
-Status: not released yet.
+Status: released in 1.0.4.
 
 ### 7. Animated fog of war
 
@@ -73,7 +73,7 @@ Slowly drifting cloud over unexplored and out-of-sight tiles, replacing the flat
 
 A final full-screen pass with a lookup-table colour grade before the frame is shown.
 
-- **Presets:** natural, vivid (like Civ VI), aged parchment map, or a mod's own through its GraphicsUpgrade.ini.
+- **Presets:** natural, vivid, aged parchment map, or a mod's own through its GraphicsUpgrade.ini.
 - **Bloom:** BtS's bloom replaced with a softer modern one.
 
 ### 9. Seasons and weather
@@ -100,18 +100,11 @@ Builds on the before/after screenshots.
 
 ## Open threads
 
-- **Colonization's shore waves:**
-  - **Test files:** Colonization's 31 wave files are in `CustomAssets\art\terrain\waves`, with whitened wave textures.
+- **Richer shore waves:**
+  - **Test files:** 31 wave files are in `CustomAssets\art\terrain\waves`, with whitened wave textures.
   - **Tuning:** settle on how white the foam should be.
   - **Night:** the waves are drawn unlit, so they need the same night darkening as the roads.
-  - **Release:** decide how to ship them (copied from the player's Colonization install, or with credit like the water textures).
+  - **Release:** decide how to ship them (with credit, like the water textures).
 - **Ship sails staying white at night:** some ships, not the galleon. Needs a trace with an affected ship in view at night.
 - **Civilopedia previews keep BtS's water:** a known limitation.
 - **The game hung on exit once,** stuck while shutting down, which locked the DLL. Watch for it happening again.
-- **Culture borders sink into the terrain with 65 samples per plot** (Iain, DuneWars Messiah, 2026-10-20):
-  the border fill and outline pass under the ground in places instead of lying on it. Cause (trace, 2026-10-28): each
-  border draw is one plot, a 17 x 17 grid (a vertex every 11.25 units) that BtS still builds at its own resolution,
-  so the terrain's 65 samples a plot rise between its vertices. Fixed (Iain, in game, 2026-11-02): with
-  TerrainVertsPerPlot 33/65 the borders are drawn with our copy of their shader (`shaders/border.hlsl`,
-  `src/borders.cpp`): each vertex lifted onto our height grid where the ground is above it, and its depth taken from
-  24 units nearer the camera along its line of sight (same place on the screen).

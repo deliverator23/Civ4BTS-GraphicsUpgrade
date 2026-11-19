@@ -152,8 +152,7 @@ struct Config
     // Water on models (an oasis' pool): fixed-function draws with one of these textures (TextureList entries) get the
     // water's ripples, sky reflection and sun glint on top, and cast no shadow.
     std::wstring waterSurfaceTextures;
-    std::wstring colonizationDir = L"C:\\Program Files (x86)\\Steam\\steamapps\\common\\Civilization IV Colonization";
-    float waterConstants[4] = {0.22995f, 0.238738f, 0.0954951f, 0.7f};  // Colonization's f4WaterConstants
+    float waterConstants[4] = {0.22995f, 0.238738f, 0.0954951f, 0.7f};  // the water shader's f4WaterConstants
     float waterTexScale = 0.0020822511f;                              // CIV4WaterPlaneInfos.xml TextureScaling
     float waterURate = 0.01f, waterVRate = 0.002f;                    // CIV4WaterPlaneInfos.xml URate/VRate
     // Seen through the water: what ships and submarines have below the surface is drawn into the refraction, most
@@ -162,14 +161,13 @@ struct Config
     float underwaterVisibility = 0.7f;  // 0..1, just below the surface
     // Shoreline and shallow water (Shader Model 3): the sun's glint follows the sun; sunlight shimmering on the sea
     // floor near the coast (caustics), a strength (0 = off). Their textures come from the
-    // GraphicsUpgrade folder, else a Civilization V install's.
-    int glintFollowsSun = 1;  // 0 = Colonization's fixed glint, 1 = follows the sun in view, 2 = exactly where it is
+    // GraphicsUpgrade folder.
+    int glintFollowsSun = 1;  // 0 = a fixed glint, 1 = follows the sun in view, 2 = exactly where it is
     float caustics = 1.0f;
     int waveShading = 64;  // the waves' faces lit by the glint's light, and sparkle around it: 0 (off) to 255
     float foamLight = 0.4f;  // how much of the change of light the coast waves' foam takes: 0 = white, as BtS, to 1
     int riverGlint = 128;  // the sea's glint off the rivers: 0 (off), 128 (normal) to 255
     float riverShimmer = 3;  // how far the rivers' ripples sway along the channel, texels of their normal map (0 = still)
-    std::wstring civ5Dir = L"C:\\Program Files (x86)\\Steam\\steamapps\\common\\Sid Meier's Civilization V";
     UINT underwaterBands = 8;
     // Sun shadows: units, ships, trees and buildings drawn from the sun into a coverage texture, blurred, and applied
     // to the ground, rivers, roads and water.

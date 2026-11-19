@@ -104,7 +104,7 @@ ProxyDevice::ProxyDevice(IDirect3DDevice9* real, ProxyD3D9* parent)
         Log::Write("effects off in this game (game id %s not in Games=%ls); passing everything through",
                    Log::GameId().c_str(), g_config.games.c_str());
     if (m_water.enabled)
-        Log::Write("Reflective, dynamic water on from start (%ls)", g_config.colonizationDir.c_str());
+        Log::Write("Reflective, dynamic water on from start");
     if (m_refl.enabled)
         Log::Write("reflection on from start (size %u, water height %g)", g_config.reflectionSize, g_config.waterHeight);
     D3DCAPS9 caps = {};
