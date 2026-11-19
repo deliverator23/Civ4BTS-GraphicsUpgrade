@@ -62,7 +62,7 @@ std::string Rect(const RECT* r)
 }
 
 ProxyDevice::ProxyDevice(IDirect3DDevice9* real, ProxyD3D9* parent)
-    : Device9Forward(real), m_parent(parent), m_trace(m_registry), m_refl(real), m_water(real), m_shadows(real), m_light(real), m_waves(real), m_borders(real), m_haze(real), m_terrain(real), m_detail(real), m_perf(real)
+    : Device9Forward(real), m_parent(parent), m_trace(m_registry), m_refl(real), m_water(real), m_shadows(real), m_light(real), m_waves(real), m_borders(real), m_haze(real), m_areaBorders(real), m_terrain(real), m_detail(real), m_perf(real)
 {
     m_effects = EffectsAllowed();
     m_refl.enabled = m_effects && g_config.reflectionEnabled;
@@ -72,6 +72,9 @@ ProxyDevice::ProxyDevice(IDirect3DDevice9* real, ProxyD3D9* parent)
     m_haze.enabled = m_effects && !g_config.modelsUnderBorders.empty();
     if (m_haze.enabled)
         m_haze.models.Load(g_config.modelsUnderBorders, "[textures] ModelsUnderBorders");
+    m_areaBorders.enabled = m_effects && !g_config.areaBorderTextures.empty();
+    if (m_areaBorders.enabled)
+        m_areaBorders.textures.Load(g_config.areaBorderTextures, "[textures] AreaBorderTextures");
     m_shadows.enabled = m_effects && g_config.shadowsEnabled;
     m_shadows.overlay = m_effects && g_config.shadowOverlay;
     m_light.enabled = m_effects && g_config.lightingEnabled;
@@ -501,6 +504,7 @@ HRESULT ProxyDevice::CreateTexture(UINT Width, UINT Height, UINT Levels, DWORD U
         m_light.ForgetTexture(*ppTexture);
         m_hiddenModels.Forget(*ppTexture);
         m_haze.ForgetTexture(*ppTexture);
+        m_areaBorders.ForgetTexture(*ppTexture);
     }
     if (Usage & (D3DUSAGE_RENDERTARGET | D3DUSAGE_DEPTHSTENCIL))
         Log::Write("CreateTexture %ux%u levels %u usage 0x%x fmt %u pool %u -> 0x%08x tex %s", Width, Height, Levels,
@@ -997,7 +1001,7 @@ HRESULT ProxyDevice::Dispatch(Draw draw)
     const ShaderInfo* vs = nullptr;
     bool fixedFunction = false;
     if (m_refl.enabled || m_water.enabled || m_shadows.enabled || m_light.enabled || m_aniso || m_borders.enabled ||
-        m_haze.enabled)
+        m_haze.enabled || m_areaBorders.enabled)
     {
         IDirect3DVertexShader9* shader = nullptr;
         m_real->GetVertexShader(&shader);
@@ -1098,8 +1102,10 @@ HRESULT ProxyDevice::Dispatch(Draw draw)
         }
     }
     const bool hills = m_shadows.enabled && g_config.hillShadows;
-    if ((m_light.enabled || hills || m_water.enabled) && vs && vs->btsTerrain && m_refl.TargetIsBackBuffer())
-        m_terrain.Capture(*vs);  // heights from the terrain's vertex buffers: per-pixel lighting, hill shadows, the shore
+    if ((m_light.enabled || hills || m_water.enabled || m_areaBorders.enabled) && vs && vs->btsTerrain &&
+        m_refl.TargetIsBackBuffer())
+        m_terrain.Capture(*vs);  // heights from the terrain's vertex buffers: per-pixel lighting, hill shadows, the shore,
+                                 // the area borders
     if (vs && vs->btsTerrain && m_trace.Active() && m_lightmapSavedFor != m_trace.Dir())
     {
         // Traces keep the terrain lightmap (BtS bakes it at map load), for working out how it was lit.
@@ -1251,10 +1257,30 @@ HRESULT ProxyDevice::Dispatch(Draw draw)
     }
     // [textures] ModelsUnderBorders: a listed model on the map, under the borders' tint (BorderHaze).
     const bool underBorders = m_haze.enabled && !wave && !anyBorder && m_refl.TargetIsBackBuffer() && m_haze.Listed();
+    // [textures] AreaBorderTextures: the settler's city-site guide (fixed-function, flat beneath the hills, depth test
+    // off) laid over the terrain's heights and depth tested.
+    const bool areaBorder = m_areaBorders.enabled && fixedFunction && mainView && m_indexed.valid && !underBorders &&
+                            m_areaBorders.Listed();
+    bool areaDrawn = false;
     if (underBorders)
         hr = m_haze.DrawUnder([&] { return draw(); });
+    else if (areaBorder && m_areaBorders.Draw(m_terrain, m_indexed.type, m_indexed.base, m_indexed.minVertex,
+                                              m_indexed.numVertices, m_indexed.start, m_indexed.count, hr))
+        areaDrawn = true;
     else if (!(wave && m_waves.Draw([&] { return draw(); }, hr)) && !(border && m_borders.Draw([&] { return draw(); }, hr)))
         hr = draw();
+    if (areaBorder && m_trace.Active())
+    {
+        const Drape::Stats& st = m_areaBorders.LastStats();
+        char buf[200];
+        snprintf(buf, sizeof(buf),
+                 "{\"ev\":\"area_border\",\"draped\":%d,\"tris_in\":%u,\"tris_out\":%u,\"verts\":%u,\"cuts\":%u,"
+                 "\"ground\":[%.2f,%.2f]}",
+                 areaDrawn ? 1 : 0, areaDrawn ? st.trianglesIn : 0, areaDrawn ? st.trianglesOut : 0,
+                 areaDrawn ? st.vertices : 0, areaDrawn ? st.cuts : 0, areaDrawn ? st.lowest : 0,
+                 areaDrawn ? st.highest : 0);
+        m_trace.Event(buf);
+    }
     // ... and each border on the map drawn again, the same way, into the tint layer the listed models get laid over them.
     if (anyBorder && m_haze.enabled && m_refl.TargetIsBackBuffer())
     {
@@ -1726,10 +1752,13 @@ HRESULT ProxyDevice::DrawIndexedPrimitive(D3DPRIMITIVETYPE PrimitiveType, INT Ba
         return D3D_OK;
     if (m_effects)
         KeepSeaModel(true, PrimitiveType, BaseVertexIndex, MinVertexIndex, NumVertices, startIndex, primCount);
-    return Dispatch([&] {
+    m_indexed = {true, PrimitiveType, BaseVertexIndex, MinVertexIndex, NumVertices, startIndex, primCount};
+    const HRESULT hr = Dispatch([&] {
         return m_real->DrawIndexedPrimitive(PrimitiveType, BaseVertexIndex, MinVertexIndex, NumVertices, startIndex,
                                             primCount);
     });
+    m_indexed.valid = false;
+    return hr;
 }
 
 HRESULT ProxyDevice::DrawPrimitiveUP(D3DPRIMITIVETYPE PrimitiveType, UINT PrimitiveCount,

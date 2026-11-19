@@ -12,6 +12,7 @@
 // terrain, rivers and ground decals are darkened by. Needs Shader Model 3.
 #pragma once
 #include "common.h"
+#include "area_border_drape.h"
 #include "terrain_cells.h"
 #include "trace.h"
 
@@ -78,6 +79,30 @@ public:
             return std::numeric_limits<float>::quiet_NaN();
         return m_heights[Index(static_cast<int>(std::floor(x / m_spacing + 0.5f)),
                                static_cast<int>(std::floor(y / m_spacing + 0.5f)))];
+    }
+    // The heights over world (x0, y0)-(x1, y1) as the height texture has them (the canyons' cuts added back, so what's
+    // draped over them bridges them), for draping on the CPU (area borders): every cell from the one at or below
+    // (x0, y0) to the one at or above (x1, y1), and one more all round (a vertex on the edge may round past it).
+    // False with no grid yet, or for more than 256 x 256 cells.
+    bool DrapeHeights(float x0, float y0, float x1, float y1, Drape::Heights& out) const
+    {
+        if (m_spacing <= 0 || m_heights.empty() || !(x1 >= x0) || !(y1 >= y0))
+            return false;
+        const int cx0 = static_cast<int>(std::floor(x0 / m_spacing)) - 1, cy0 = static_cast<int>(std::floor(y0 / m_spacing)) - 1;
+        const int cx1 = static_cast<int>(std::ceil(x1 / m_spacing)) + 1, cy1 = static_cast<int>(std::ceil(y1 / m_spacing)) + 1;
+        const int w = (std::max)(2, cx1 - cx0 + 1), h = (std::max)(2, cy1 - cy0 + 1);
+        if (w > 256 || h > 256)
+            return false;
+        out.cx0 = cx0, out.cy0 = cy0, out.w = w, out.h = h, out.spacing = m_spacing;
+        out.v.resize(static_cast<size_t>(w) * h);
+        for (int j = 0; j < h; ++j)
+            for (int i = 0; i < w; ++i)
+            {
+                const float z = m_heights[Index(cx0 + i, cy0 + j)];
+                out.v[static_cast<size_t>(j) * w + i] =
+                    std::isnan(z) ? z : z + RiverCutAt((cx0 + i) * m_spacing, (cy0 + j) * m_spacing);
+            }
+        return true;
     }
     // The grid's size for this spacing: the smallest power of two (kMinCells to kMaxCells) whose cells cover the map
     // (mapSpan world units across, from mtxLightmap; 0 if unknown) and at least a Huge map (128 plots), so a later,

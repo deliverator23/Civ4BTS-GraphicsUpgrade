@@ -208,6 +208,18 @@ units in front still cover them. Entries work as in `NoShadowTextures`. Off unle
 ModelsUnderBorders=Art\Terrain\Features\Caves\cave.dds
 ```
 
+**The settler's city-site guide on the ground.** BtS draws the guide (the square or cross of plots a city there
+would work) as a flat sheet at one height, drawn over everything. Where the ground is higher or lower than that height,
+the guide shows away from the plots it marks: lower on the screen on high ground. `[textures] AreaBorderTextures` lists
+the guide's textures. With them, it's laid over the terrain's hills and valleys instead, as the culture borders are,
+and hills in front of it hide it. Anything standing on it (units, trees, buildings) shows in front of it. Entries work
+as in `NoShadowTextures`. The default is BtS's own guide texture. Remove the line to keep BtS's flat guide:
+
+```ini
+[textures]
+AreaBorderTextures=Art\Terrain\PlotTextures\AreaBorder.dds
+```
+
 **Effects that follow the light.** BtS draws most particle effects (dust, smoke, glows) unlit, so they keep the
 same colour by day and by night. `[lighting] LitEffectTextures` lists textures whose effects should follow the light
 instead. They then darken and change colour with the day–night cycle and the lighting presets, as the ground under them

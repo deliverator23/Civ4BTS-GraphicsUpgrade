@@ -505,6 +505,25 @@ def main():
     check(ps.get('clip') == 1, "added onto the engine's heights (with a jigsaw piece's under it), clamped at 255; "
           'the samples clipped there counted (the headroom the stamps lack)')
 
+    print('area borders, draping:')
+    dout = run([os.path.join(TEST, 'test_proxy.exe'), 'drape'])
+    m = re.search(r'^DRAPE (.*?)(?: \(.*)?$', dout, re.M)
+    dr = {k: int(v) for k, v in (kv.split('=') for kv in m.group(1).split())} if m else {}
+    dline = m.group(0) if m else dout.strip()[-300:]
+    check(dr.get('layout') == 1 and dr.get('refuses') == 1,
+          f"vertex layout from the FVF: normal, colour and uv found; blended or mis-sized vertices refused ({dline})")
+    check(dr.get('heights') == 1, 'the height lookup: bilinear, unknown outside and next to unknown cells that count')
+    check(dr.get('count') == 1, f"the guide's tiles cut into pieces no wider than a grid cell, the unused zero tile left "
+                                f"out ({dline})")
+    check(dr.get('ground') == 1 and dr.get('attrs') == 1,
+          "every new vertex on the ground plus the lift; uv, colour and normal interpolated as BtS's")
+    check(dr.get('pull') == 1 and dr.get('ortho') == 1,
+          'pulled 24 units towards the camera without moving on the screen (perspective and orthographic)')
+    check(dr.get('unknown') == 1 and dr.get('toomany') == 1,
+          'refused over unknown ground, and when 16-bit indices would run out')
+    check(dr.get('edge') == 1, "a guide whose corners are on grid cells, heights over exactly its cells: the vertices cut "
+                               "onto its edges still find ground (Dune Wars trace 2026-11-19: drawn flat every frame)")
+
     print('terrain grid, partial updates:')
     cout = run([os.path.join(TEST, 'test_proxy.exe'), 'terraincells'])
     m = re.search(r'^TERRAINCELLS (.*)$', cout, re.M)
@@ -754,6 +773,28 @@ def main():
             check('LitEffectTextures: ' + effect_dds + ': 1 texture' in elog and
                   'first effect taking the light (blend 5/2, lighting 0' in elog,
                   'the listed effect texture found and logged; the first effect taking the light logged')
+
+    # The settler's city-site guide: BtS draws it flat (here at z = -300) with the depth test off. With its texture in
+    # [textures] AreaBorderTextures it's laid over the terrain's heights (the slope z = 0.2x, read from the terrain's
+    # buffers) and depth tested: seen from 1000 up it's wider (64 pixels, not 49), and the occluder at z = 100 over
+    # x < 0 hides that half. Unlisted, it's as BtS draws it, over the occluder.
+    guide_dds = os.path.join(TEST, 'guide_white.dds')
+    write_dds(guide_dds, (0xFF, 0xFF, 0xFF, 0xFF))
+    g_off, glog_off = shadow_run('unlisted', 0, 'guide', '')
+    g_on, glog_on = shadow_run('listed', 0, 'guide', f'[textures]\nAreaBorderTextures={guide_dds}\n')
+    check(22 <= g_off.get('guidel', 0) <= 27 and 22 <= g_off.get('guider', 0) <= 27 and g_off.get('guidestate') == 1 and
+          'area borders:' not in glog_off and g_off['released'],
+          f"guide not listed: drawn as BtS draws it, flat and over everything ({g_off.get('guidel')} + "
+          f"{g_off.get('guider')} pixels, expected about 24 + 25)")
+    check(g_on.get('guidel') == 0 and 31 <= g_on.get('guider', 0) <= 35 and g_on.get('guidestate') == 1 and
+          g_on['released'],
+          f"guide listed: laid over the slope ({g_on.get('guider')} pixels right of centre, expected about 33) and depth "
+          f"tested (the occluded half: {g_on.get('guidel')} pixels, expected 0); the game's buffers, depth test and "
+          f"WORLD back after it")
+    check('AreaBorderTextures: ' + guide_dds + ': 1 texture' in glog_on and
+          'area borders: draped over the terrain (2 triangles cut into 8, ground -20.0 to 20.0), 24 units nearer the '
+          'camera' in glog_on,
+          "the guide's texture found and logged; its draping logged (the zero tile left out, the slope's heights)")
 
     # The baked terrain light comes from the SunLight.nif the game uses (the running mod's first) for the BakedTerrain*
     # settings left out. Here a mod's light like Realism Invictus's (sun 255,235,188) from a direction 0.8 up: the

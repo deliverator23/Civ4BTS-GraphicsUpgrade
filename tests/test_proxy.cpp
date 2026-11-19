@@ -44,7 +44,9 @@
 #include "water_shore_vs.h"
 #include "water_vs.h"
 
+#include "../src/area_border_drape.h"
 #include "../src/jigsaw.h"
+#include "../src/matrix.h"
 #include "../src/plot_stamps.h"
 #include "../src/hill_field.h"
 #include "../src/terrain_cells.h"
@@ -818,6 +820,14 @@ static int SeaScene(IDirect3DDevice9* dev, int frames)
 //                    building: with [shadows] BuildingShadows=1 its shadow lands at (100,300); adds " bld=."
 //   buildingwater    the same, after a patch of BtS-style water (mtxWorld z 0) at (-450,-450): the water's height is
 //                    read from it, so with [reflection] WaterHeight above the building's base it still casts
+//   guide            the slope's terrain (its heights read), then BtS's city-site guide as BtS draws it: a fixed-function
+//                    indexed tile (FVF 0x152, managed buffers, a white 1x1 texture), x and y -100 to 100, flat at z = -300,
+//                    depth test off, with an unused all-zero tile after it, seen from straight above through a perspective
+//                    camera 1000 up (fixed function). Before it, a black occluder at z = 100 over x < 0 writes depth. Flat,
+//                    the tile shows 49 pixels wide across the centre row, half each side; laid on the slope (z = 0.2x,
+//                    with [textures] AreaBorderTextures listing the texture) 64 wide, its x < 0 half behind the occluder.
+//                    Adds " guidel=. guider=. guidestate=." (white pixels left and right of the centre on the centre row;
+//                    guidestate = the game's buffers, depth test and WORLD back after the draw)
 static bool ReadAll(const std::wstring& path, std::vector<DWORD>& out)
 {
     FILE* f = nullptr;
@@ -972,9 +982,11 @@ static int ShadowScene(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS& pp, int fra
                effectLit = wcscmp(overlay, L"effectlit") == 0, effectMul = wcscmp(overlay, L"effectmul") == 0,
                effectUi = wcscmp(overlay, L"effectui") == 0,
                effect = wcscmp(overlay, L"effect") == 0 || effectLit || effectMul || effectUi;
+    const bool guide = wcscmp(overlay, L"guide") == 0;
+    const bool slopeGround = slope || guide;
     IDirect3DVertexBuffer9* slopeVb = nullptr;
     IDirect3DIndexBuffer9* slopeIb = nullptr;
-    if (slope)
+    if (slopeGround)
     {
         float verts[25][7];
         for (int y = 0; y < 5; ++y)
@@ -1112,6 +1124,36 @@ static int ShadowScene(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS& pp, int fra
     if (building && !solid(0xFFFFFFFF, &overlayTex[2]))
         return 1;
     int reused = -1;
+    // guide: BtS's guide tile (x, y, z, normal, colour, uv; FVF 0x152) and an unused all-zero tile, from managed buffers
+    struct GuideVertex
+    {
+        float x, y, z, nx, ny, nz;
+        DWORD colour;
+        float u, v;
+    };
+    IDirect3DVertexBuffer9* guideVb = nullptr;
+    IDirect3DIndexBuffer9* guideIb = nullptr;
+    IDirect3DTexture9* guideTex = nullptr;
+    if (guide)
+    {
+        const GuideVertex gv[8] = {{-100, -100, -300, 0, 0, 1, 0xFFFFFFFF, 0, 1}, {100, -100, -300, 0, 0, 1, 0xFFFFFFFF, 1, 1},
+                                   {100, 100, -300, 0, 0, 1, 0xFFFFFFFF, 1, 0},   {-100, 100, -300, 0, 0, 1, 0xFFFFFFFF, 0, 0},
+                                   {}, {}, {}, {}};
+        const WORD gi[12] = {0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7};
+        void* p = nullptr;
+        CHECK(dev->CreateVertexBuffer(sizeof(gv), D3DUSAGE_WRITEONLY, 0, D3DPOOL_MANAGED, &guideVb, nullptr));
+        CHECK(guideVb->Lock(0, 0, &p, 0));
+        memcpy(p, gv, sizeof(gv));
+        guideVb->Unlock();
+        CHECK(dev->CreateIndexBuffer(sizeof(gi), D3DUSAGE_WRITEONLY, D3DFMT_INDEX16, D3DPOOL_MANAGED, &guideIb, nullptr));
+        CHECK(guideIb->Lock(0, 0, &p, 0));
+        memcpy(p, gi, sizeof(gi));
+        guideIb->Unlock();
+        if (!solid(0xFFFFFFFF, &guideTex))
+            return 1;
+    }
+    unsigned guideLeft = 0, guideRight = 0;
+    int guideState = 1;
 
     // register form: x/500, y/500, depth 0.5 - z/1000
     const float vp[16] = {1 / 500.0f, 0, 0, 0, 0, 1 / 500.0f, 0, 0, 0, 0, -1 / 1000.0f, 0.5f, 0, 0, 0, 1};
@@ -1187,7 +1229,7 @@ static int ShadowScene(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS& pp, int fra
             CHECK(dev->SetSamplerState(0, D3DSAMP_MINFILTER, D3DTEXF_LINEAR));
             CHECK(dev->SetSamplerState(0, D3DSAMP_MIPFILTER, D3DTEXF_LINEAR));
         }
-        if (slope)
+        if (slopeGround)
         {
             CHECK(dev->SetStreamSource(0, slopeVb, 0, 28));
             CHECK(dev->SetIndices(slopeIb));
@@ -1380,6 +1422,92 @@ static int ShadowScene(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS& pp, int fra
             CHECK(dev->SetTextureStageState(1, D3DTSS_TEXCOORDINDEX, 1));
             CHECK(dev->SetTextureStageState(1, D3DTSS_COLOROP, D3DTOP_DISABLE));
             CHECK(dev->SetTextureStageState(1, D3DTSS_ALPHAOP, D3DTOP_DISABLE));
+        }
+
+        if (guide)
+        {
+            // The camera 1000 up looking straight down (view z = 1000 - z), perspective: x / view z x 2.5.
+            D3DMATRIX id4 = translation(0, 0), gView = {}, gProj = {};
+            gView._11 = gView._22 = 1;
+            gView._33 = -1;
+            gView._43 = 1000;
+            gView._44 = 1;
+            const float zn = 10, zf = 5000, q = zf / (zf - zn);
+            gProj._11 = gProj._22 = 2.5f;
+            gProj._33 = q;
+            gProj._34 = 1;
+            gProj._43 = -q * zn;
+            CHECK(dev->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFF000000, 1.0f, 0));
+            CHECK(dev->SetVertexShader(nullptr));
+            CHECK(dev->SetPixelShader(nullptr));
+            CHECK(dev->SetRenderState(D3DRS_VERTEXBLEND, D3DVBF_DISABLE));
+            CHECK(dev->SetRenderState(D3DRS_LIGHTING, FALSE));
+            CHECK(dev->SetTransform(D3DTS_WORLD, &id4));
+            CHECK(dev->SetTransform(D3DTS_VIEW, &gView));
+            CHECK(dev->SetTransform(D3DTS_PROJECTION, &gProj));
+            for (DWORD i = 0; i < 4; ++i)
+                CHECK(dev->SetTexture(i, nullptr));
+            CHECK(dev->SetTextureStageState(1, D3DTSS_COLOROP, D3DTOP_DISABLE));
+            CHECK(dev->SetTextureStageState(1, D3DTSS_ALPHAOP, D3DTOP_DISABLE));
+            // The occluder: black, z = 100, x -500 to 0, depth written.
+            struct OccluderVertex
+            {
+                float x, y, z;
+                DWORD c;
+            } oq[6] = {{-500, -500, 100, 0xFF000000}, {0, -500, 100, 0xFF000000}, {0, 500, 100, 0xFF000000},
+                       {-500, -500, 100, 0xFF000000}, {0, 500, 100, 0xFF000000}, {-500, 500, 100, 0xFF000000}};
+            CHECK(dev->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_SELECTARG1));
+            CHECK(dev->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_DIFFUSE));
+            CHECK(dev->SetRenderState(D3DRS_ZENABLE, TRUE));
+            CHECK(dev->SetRenderState(D3DRS_ZWRITEENABLE, TRUE));
+            CHECK(dev->SetRenderState(D3DRS_ZFUNC, D3DCMP_LESSEQUAL));
+            CHECK(dev->SetFVF(D3DFVF_XYZ | D3DFVF_DIFFUSE));
+            CHECK(dev->DrawPrimitiveUP(D3DPT_TRIANGLELIST, 2, oq, sizeof(OccluderVertex)));
+            // The guide, as BtS draws it: depth test off, the texture times the vertex colour.
+            CHECK(dev->SetRenderState(D3DRS_ZENABLE, FALSE));
+            CHECK(dev->SetRenderState(D3DRS_ZWRITEENABLE, TRUE));
+            CHECK(dev->SetTexture(0, guideTex));
+            CHECK(dev->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_MODULATE));
+            CHECK(dev->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_TEXTURE));
+            CHECK(dev->SetTextureStageState(0, D3DTSS_COLORARG2, D3DTA_DIFFUSE));
+            CHECK(dev->SetFVF(D3DFVF_XYZ | D3DFVF_NORMAL | D3DFVF_DIFFUSE | D3DFVF_TEX1));
+            CHECK(dev->SetStreamSource(0, guideVb, 0, sizeof(GuideVertex)));
+            CHECK(dev->SetIndices(guideIb));
+            CHECK(dev->DrawIndexedPrimitive(D3DPT_TRIANGLELIST, 0, 0, 8, 0, 4));
+            IDirect3DVertexBuffer9* nowVb = nullptr;
+            IDirect3DIndexBuffer9* nowIb = nullptr;
+            UINT nowOffset = 1, nowStride = 0;
+            DWORD nowZ = 1;
+            D3DMATRIX nowWorld = {};
+            dev->GetStreamSource(0, &nowVb, &nowOffset, &nowStride);
+            dev->GetIndices(&nowIb);
+            dev->GetRenderState(D3DRS_ZENABLE, &nowZ);
+            dev->GetTransform(D3DTS_WORLD, &nowWorld);
+            if (nowVb != guideVb || nowOffset != 0 || nowStride != sizeof(GuideVertex) || nowIb != guideIb ||
+                nowZ != FALSE || memcmp(&nowWorld, &id4, sizeof(id4)) != 0)
+                guideState = 0;
+            if (nowVb)
+                nowVb->Release();
+            if (nowIb)
+                nowIb->Release();
+            CHECK(dev->SetStreamSource(0, nullptr, 0, 0));
+            CHECK(dev->SetIndices(nullptr));
+            CHECK(dev->SetTexture(0, nullptr));
+            CHECK(dev->SetRenderState(D3DRS_ZENABLE, FALSE));
+            if (f == frames - 1)
+            {
+                IDirect3DSurface9* gbb = nullptr;
+                CHECK(dev->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &gbb));
+                CHECK(dev->GetRenderTargetData(gbb, sys));
+                gbb->Release();
+                D3DLOCKED_RECT lr;
+                CHECK(sys->LockRect(&lr, nullptr, D3DLOCK_READONLY));
+                const BYTE* row = static_cast<const BYTE*>(lr.pBits) + (pp.BackBufferHeight / 2) * lr.Pitch;
+                for (UINT x = 0; x < pp.BackBufferWidth; ++x)
+                    if ((reinterpret_cast<const DWORD*>(row)[x] & 0xFF) > 128)
+                        ++(x < pp.BackBufferWidth / 2 ? guideLeft : guideRight);
+                sys->UnlockRect();
+            }
         }
 
         if (effect)
@@ -1649,7 +1777,12 @@ static int ShadowScene(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS& pp, int fra
         printf(" above=%u", abovePixel);
     if (shallow)
         printf(" shallow=%u", shallowPixel);
+    if (guide)
+        printf(" guidel=%u guider=%u guidestate=%d", guideLeft, guideRight, guideState);
     printf("\n");
+    for (IUnknown* o : {static_cast<IUnknown*>(guideVb), static_cast<IUnknown*>(guideIb), static_cast<IUnknown*>(guideTex)})
+        if (o)
+            o->Release();
     if (blob)
         blob->Release();
     if (flagPole)
@@ -3070,6 +3203,191 @@ static int TerrainPatchTest()
            bytes33, changed, idempotent, v65, refused, tooSmall, bad, stock17, cells, maskSites, maskFlat, maskRamp,
            heightmapFolder);
     printf("TERRAINPATCH refusal: %s\n", refusedWhy.c_str());
+    return 0;
+}
+
+// test_proxy drape: the area borders' draping (area_border_drape.h) on its own. Ground: z = 0.5x + 0.25y + 100 on a grid
+// 11.25 apart (bilinear between cells is then exact). A BtS-style guide: 2 x 2 tiles 180 across at z = 20.5 (FVF 0x152:
+// position, normal, colour, uv; uv = a linear function of x and y, the colour (10, 20, 30, 40)), plus an unused all-zero
+// tile, seen through a perspective camera like BtS's (tilted, 1000 away). Prints "DRAPE <key>=<0/1> ...":
+//   layout   0x152 at stride 36: normal at 12, colour in slot 6; blended (XYZB3) or a stride that doesn't fit refused
+//   heights  bilinear exact; NaN outside and where a counted cell is unknown; a point on a known cell's edge next to an
+//            unknown cell still known
+//   count    8 triangles taken (the zero tile left out), each cut 23 ways (the diagonal 254.6 / 11.25), 2400 vertices,
+//            4232 triangles, every index in range
+//   ground   draped without the pull: every vertex on the ground + lift
+//   attrs    uv the same linear function of the draped x, y; the colour kept; the normal kept
+//   pull     with the pull: every vertex at the same place on the screen as without it, nearer in depth, 24 units nearer
+//   unknown  ground unknown under one vertex: refused (not for want of indices)
+//   toomany  more than 65535 vertices: refused, for want of indices
+//   ortho    an orthographic camera: pulled straight along the view, x and y kept
+static int DrapeTest()
+{
+    using namespace Drape;
+    // layout
+    Layout l;
+    const DWORD fvf = D3DFVF_XYZ | D3DFVF_NORMAL | D3DFVF_DIFFUSE | D3DFVF_TEX1;
+    const bool layoutOk = LayoutFor(fvf, 36, l) && l.normalAt == 12 && l.colour.size() == 9 && l.colour[6] == 1 &&
+                          l.colour[0] == 0 && l.colour[7] == 0;
+    Layout bad;
+    const bool refuses = !LayoutFor(D3DFVF_XYZB3 | D3DFVF_NORMAL | D3DFVF_TEX1, 44, bad) && !LayoutFor(fvf, 40, bad) &&
+                         !LayoutFor(fvf, 32, bad);
+    // heights
+    auto plane = [](float x, float y) { return 0.5f * x + 0.25f * y + 100; };
+    Heights h;
+    h.spacing = 11.25f;
+    h.cx0 = -40, h.cy0 = -40, h.w = 81, h.h = 81;
+    h.v.resize(81 * 81);
+    for (int j = 0; j < 81; ++j)
+        for (int i = 0; i < 81; ++i)
+            h.v[j * 81 + i] = plane((h.cx0 + i) * h.spacing, (h.cy0 + j) * h.spacing);
+    bool heightsOk = std::fabs(h.At(33.3f, -71.9f) - plane(33.3f, -71.9f)) < 1e-3f && std::isnan(h.At(1000, 0)) &&
+                     std::isnan(h.At(0, -460));
+    Heights hole = h;
+    hole.v[40 * 81 + 41] = std::numeric_limits<float>::quiet_NaN();  // cell (1, 0)
+    heightsOk = heightsOk && std::isnan(hole.At(5.0f, 0.0f)) &&      // between cells 0 and 1: counts the unknown
+                !std::isnan(hole.At(0.0f, 5.0f)) && !std::isnan(hole.At(-5.0f, 3.0f));
+    // the guide: 2 x 2 tiles over x, y -180..180, plus a zero tile
+    struct V
+    {
+        float x, y, z, nx, ny, nz;
+        DWORD colour;
+        float u, v;
+    };
+    const DWORD colour = 0x0A141E28;  // a 10, r 20, g 30, b 40 (bytes: 28 1E 14 0A)
+    auto uvAt = [](float x, float y, float& u, float& v) { u = 0.3f + x / 720, v = 0.6f - y / 900; };
+    std::vector<V> verts;
+    std::vector<uint32_t> tris;
+    for (int ty = 0; ty < 2; ++ty)
+        for (int tx = 0; tx < 2; ++tx)
+        {
+            const uint32_t b = static_cast<uint32_t>(verts.size());
+            const float x0 = -180.0f + 180 * tx, y0 = -180.0f + 180 * ty;
+            const float c[4][2] = {{x0, y0}, {x0 + 180, y0}, {x0 + 180, y0 + 180}, {x0, y0 + 180}};
+            for (auto& q : c)
+            {
+                V v = {q[0], q[1], 20.5f, 0.1f, 0.2f, 0.97f, colour, 0, 0};
+                uvAt(q[0], q[1], v.u, v.v);
+                verts.push_back(v);
+            }
+            const uint32_t t[6] = {b, b + 1, b + 2, b, b + 2, b + 3};
+            tris.insert(tris.end(), t, t + 6);
+        }
+    {
+        const uint32_t b = static_cast<uint32_t>(verts.size());
+        for (int k = 0; k < 4; ++k)
+            verts.push_back(V{});
+        const uint32_t t[6] = {b, b + 1, b + 2, b, b + 2, b + 3};
+        tris.insert(tris.end(), t, t + 6);
+    }
+    // The camera: eye at (0, -600, 800) looking at the origin (as BtS's, tilted), perspective 60 degrees.
+    auto lookAt = [](const float* eye, float* m) {
+        float zx = -eye[0], zy = -eye[1], zz = -eye[2];
+        const float zl = std::sqrt(zx * zx + zy * zy + zz * zz);
+        zx /= zl, zy /= zl, zz /= zl;
+        // x = up (0,0,1) cross z, y = z cross x
+        float xx = -zy, xy = zx, xz = 0;
+        const float xl = std::sqrt(xx * xx + xy * xy);
+        xx /= xl, xy /= xl;
+        const float yx = zy * xz - zz * xy, yy = zz * xx - zx * xz, yz = zx * xy - zy * xx;
+        const float r[16] = {xx, yx, zx, 0, xy, yy, zy, 0, xz, yz, zz, 0,
+                             -(xx * eye[0] + xy * eye[1] + xz * eye[2]), -(yx * eye[0] + yy * eye[1] + yz * eye[2]),
+                             -(zx * eye[0] + zy * eye[1] + zz * eye[2]), 1};
+        memcpy(m, r, sizeof(r));
+    };
+    const float eye[3] = {0, -600, 800};
+    float view[16], proj[16] = {}, toClip[16], fromClip[16];
+    lookAt(eye, view);
+    const float zn = 10, zf = 5000, q = zf / (zf - zn), sc = 1.7320508f;
+    proj[0] = proj[5] = sc, proj[10] = q, proj[11] = 1, proj[14] = -q * zn;
+    mat::Mul(view, proj, toClip);
+    mat::Invert(toClip, fromClip);
+    const float lift = 1.5f, pull = 24.0f;
+    std::vector<uint8_t> flat, pulled;
+    std::vector<uint16_t> flatIdx, pulledIdx;
+    Stats sf, sp;
+    const auto* bytes = reinterpret_cast<const uint8_t*>(verts.data());
+    const bool builtFlat = Build(l, bytes, verts.size(), tris, 11.25f, h, lift, toClip, fromClip, 0, flat, flatIdx, sf);
+    const bool builtPulled = Build(l, bytes, verts.size(), tris, 11.25f, h, lift, toClip, fromClip, pull, pulled, pulledIdx, sp);
+    const size_t n = flat.size() / sizeof(V);
+    bool indicesOk = flatIdx.size() == static_cast<size_t>(sf.trianglesOut) * 3;
+    for (uint16_t i : flatIdx)
+        indicesOk = indicesOk && i < n;
+    const bool countOk = builtFlat && builtPulled && sf.trianglesIn == 8 && sf.cuts == 23 && sf.vertices == 2400 &&
+                         n == 2400 && sf.trianglesOut == 4232 && indicesOk && pulled.size() == flat.size() &&
+                         pulledIdx == flatIdx;
+    bool groundOk = countOk, attrsOk = countOk, pullOk = countOk;
+    float worstPull = 0;
+    for (size_t k = 0; countOk && k < n; ++k)
+    {
+        V a, b;
+        memcpy(&a, &flat[k * sizeof(V)], sizeof(V));
+        memcpy(&b, &pulled[k * sizeof(V)], sizeof(V));
+        groundOk = groundOk && std::fabs(a.z - (plane(a.x, a.y) + lift)) < 2e-3f;
+        float u, v;
+        uvAt(a.x, a.y, u, v);
+        attrsOk = attrsOk && std::fabs(a.u - u) < 1e-4f && std::fabs(a.v - v) < 1e-4f && a.colour == colour &&
+                  std::fabs(a.nx - 0.1f) < 1e-5f && std::fabs(a.ny - 0.2f) < 1e-5f && std::fabs(a.nz - 0.97f) < 1e-5f &&
+                  b.u == a.u && b.v == a.v && b.colour == a.colour;
+        float ca[4], cb[4];
+        Transform(&a.x, toClip, ca);
+        Transform(&b.x, toClip, cb);
+        const float moved = std::sqrt((b.x - a.x) * (b.x - a.x) + (b.y - a.y) * (b.y - a.y) + (b.z - a.z) * (b.z - a.z));
+        worstPull = (std::max)(worstPull, std::fabs(moved - pull));
+        pullOk = pullOk && std::fabs(ca[0] / ca[3] - cb[0] / cb[3]) < 1e-5f && std::fabs(ca[1] / ca[3] - cb[1] / cb[3]) < 1e-5f &&
+                 cb[2] / cb[3] < ca[2] / ca[3] && std::fabs(moved - pull) < 0.01f;
+    }
+    // unknown ground under a vertex
+    std::vector<uint8_t> o;
+    std::vector<uint16_t> oi;
+    Stats su;
+    const bool unknownOk = !Build(l, bytes, verts.size(), tris, 11.25f, hole, lift, toClip, fromClip, pull, o, oi, su) &&
+                           !su.tooMany;
+    // too many vertices: the tiles' triangles four times over, cut 0.4 units at a time (64 ways each, 2145 vertices a
+    // triangle: 30 fit, not 32)
+    std::vector<uint32_t> many;
+    for (int r = 0; r < 4; ++r)
+        many.insert(many.end(), tris.begin(), tris.begin() + 24);
+    Stats sm;
+    const bool tooManyOk = !Build(l, bytes, verts.size(), many, 0.4f, h, lift, toClip, fromClip, pull, o, oi, sm) &&
+                           sm.tooMany;
+    // orthographic: looking straight down, x/500, y/500
+    float ortho[16] = {1 / 500.0f, 0, 0, 0, 0, 1 / 500.0f, 0, 0, 0, 0, -1 / 1000.0f, 0, 0, 0, 0.5f, 1}, orthoInv[16];
+    mat::Invert(ortho, orthoInv);
+    float pt[3] = {40, -30, 120};
+    Pull(ortho, orthoInv, pt, pull);
+    const bool orthoOk = std::fabs(pt[0] - 40) < 1e-3f && std::fabs(pt[1] + 30) < 1e-3f && std::fabs(pt[2] - 144) < 1e-2f;
+    // edge: the guide from a Dune Wars trace (2026-11-19 12:07): 4 x 4 tiles over x -4950..-4230, y -990..-270, its
+    // corners on grid cells, with heights over exactly the cells it covers: vertices cut onto its edges must still find
+    // ground there, however the arithmetic rounds.
+    std::vector<V> edgeVerts;
+    std::vector<uint32_t> edgeTris;
+    for (int ty = 0; ty < 4; ++ty)
+        for (int tx = 0; tx < 4; ++tx)
+        {
+            const uint32_t b = static_cast<uint32_t>(edgeVerts.size());
+            const float x0 = -4950.0f + 180 * tx, y0 = -990.0f + 180 * ty;
+            const float c[4][2] = {{x0, y0}, {x0 + 180, y0}, {x0 + 180, y0 + 180}, {x0, y0 + 180}};
+            for (auto& q : c)
+                edgeVerts.push_back(V{q[0], q[1], 20.5f, 0, 0, 1, colour, 0, 0});
+            const uint32_t t[6] = {b, b + 1, b + 2, b, b + 2, b + 3};
+            edgeTris.insert(edgeTris.end(), t, t + 6);
+        }
+    Heights edgeH;
+    edgeH.spacing = 11.25f;
+    edgeH.cx0 = -440, edgeH.cy0 = -88, edgeH.w = 65, edgeH.h = 65;  // -4950 / 11.25 .. -4230 / 11.25, -990 .. -270
+    edgeH.v.resize(65 * 65);
+    for (int j = 0; j < 65; ++j)
+        for (int i = 0; i < 65; ++i)
+            edgeH.v[j * 65 + i] = plane((edgeH.cx0 + i) * 11.25f + 4590, (edgeH.cy0 + j) * 11.25f + 630);
+    Stats se;
+    const bool edgeOk = Build(l, reinterpret_cast<const uint8_t*>(edgeVerts.data()), edgeVerts.size(), edgeTris, 11.25f,
+                              edgeH, lift, toClip, fromClip, pull, o, oi, se) &&
+                        se.trianglesIn == 32;
+    printf("DRAPE layout=%d refuses=%d heights=%d count=%d ground=%d attrs=%d pull=%d unknown=%d toomany=%d ortho=%d "
+           "edge=%d (tris %u -> %u, cuts %u, vertices %u, worst pull error %.4f)\n",
+           layoutOk, refuses, heightsOk, countOk, groundOk, attrsOk, pullOk, unknownOk, tooManyOk, orthoOk, edgeOk,
+           sf.trianglesIn, sf.trianglesOut, sf.cuts, sf.vertices, worstPull);
     return 0;
 }
 
@@ -4871,6 +5189,8 @@ int wmain(int argc, wchar_t** argv)
         return HillFieldTest();
     if (argc > 1 && wcscmp(argv[1], L"jigsaw") == 0)
         return JigsawTest(argc > 2 ? argv[2] : nullptr);
+    if (argc > 1 && wcscmp(argv[1], L"drape") == 0)
+        return DrapeTest();
     if (argc > 1 && wcscmp(argv[1], L"terraincells") == 0)
         return TerrainCellsTest();
     // A trailing mod=<folder> is for the proxy, which reads the command line itself (the way BtS is started with a mod)

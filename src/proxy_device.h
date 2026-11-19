@@ -1,6 +1,7 @@
 // IDirect3DDevice9 wrapper: the effects (water, reflection, shadows, lighting) and the debug tools (log, shader dumps,
 // frame traces, ghost).
 #pragma once
+#include "area_borders.h"
 #include "common.h"
 #include "d3d9_forward.h"
 #include "detail_normals.h"
@@ -127,6 +128,15 @@ private:
     Waves m_waves;  // coast waves drawn with our copy of their shader (opacity over time)
     Borders m_borders;  // culture borders over finer terrain ([debug] TerrainVertsPerPlot), our copy of their shader
     BorderHaze m_haze;  // models under the borders' tint ([textures] ModelsUnderBorders)
+    AreaBorders m_areaBorders;  // the settler's city-site guide laid over the terrain ([textures] AreaBorderTextures)
+    // The DrawIndexedPrimitive being dispatched (its arguments, for the area borders), valid only inside that Dispatch.
+    struct IndexedDraw
+    {
+        bool valid = false;
+        D3DPRIMITIVETYPE type = D3DPT_TRIANGLELIST;
+        INT base = 0;
+        UINT minVertex = 0, numVertices = 0, start = 0, count = 0;
+    } m_indexed;
     TerrainNormals m_terrain;  // heights and normals read from the terrain's vertex buffers (per-pixel lighting)
     DetailNormals m_detail;    // the terrain detail textures' normal maps ([textures] DetailNormals)
     TextureList m_hiddenModels;  // [terrain tiles] PlotStamps<n>HideModels

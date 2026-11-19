@@ -210,6 +210,9 @@ struct Config
     // Models drawn with one of these textures (TextureList entries) show under the culture borders' tint, as the
     // ground does, rather than over it (BtS draws the borders first, then the models over them).
     std::wstring modelsUnderBorders;
+    // BtS's area borders (the settler's city-site guide) drawn with one of these textures (TextureList entries) are laid
+    // over the terrain's heights instead of flat beneath the hills (AreaBorders).
+    std::wstring areaBorderTextures;
     UINT lightCycleKey = '4';  // modifiers + key pauses and resumes the light cycle
     float lightSun[kLightGroups][3] = {};
     float lightAmbient[kLightGroups][3] = {};
