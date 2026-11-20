@@ -1,5 +1,6 @@
 #include "proxy_device.h"
 #include "camera.h"
+#include "hotkey_filter.h"
 #include "matrix.h"
 #include "proxy_d3d9.h"
 #include "overlay.h"
@@ -138,6 +139,18 @@ ProxyDevice::ProxyDevice(IDirect3DDevice9* real, ProxyD3D9* parent)
                KeyName(g_config.reflectionKey).c_str(),
                KeyName(g_config.overlayKey).c_str(), KeyName(g_config.shadowOverlayKey).c_str(),
                KeyName(g_config.ghostKey).c_str(), g_config.tracesEnabled ? KeyName(g_config.traceKey).c_str() : "off");
+    // The keys the polling in Present acts on, kept from the game so that they don't set off its own commands too.
+    std::vector<UINT> keys = {g_config.terrainDebugKey};
+    if (g_config.tracesEnabled)
+        keys.push_back(g_config.traceKey);
+    if (m_effects)
+        keys.insert(keys.end(), {g_config.waterKey, g_config.waterNormalKey, g_config.shadowsKey, g_config.lightingKey,
+                                 g_config.lightCycleKey, g_config.anisotropyKey, g_config.detailNormalsKey,
+                                 g_config.reflectionKey, g_config.overlayKey, g_config.shadowOverlayKey,
+                                 g_config.ghostKey, g_config.compareKey});
+    D3DDEVICE_CREATION_PARAMETERS created = {};
+    real->GetCreationParameters(&created);
+    HotkeyFilter::Start(created.hFocusWindow, keys);
     m_requestFile = Log::GameDir() + L"\\trace.request";
     DeleteFileW(m_requestFile.c_str());  // a stale request from an earlier session shouldn't fire at startup
 }
@@ -193,6 +206,7 @@ ULONG ProxyDevice::Release()
         if (!timed)
             Log::Write("%s", m_perf.Summary().c_str());
         Log::Write("device released after %u frames", m_frame);
+        HotkeyFilter::Stop();
         delete this;
     }
     return refs;

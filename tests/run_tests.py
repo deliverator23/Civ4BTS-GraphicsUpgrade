@@ -291,6 +291,24 @@ def main():
           'trigger file picked up, deleted, second trace written')
     check('device released' in log, 'device wrapper released')
 
+    print('hotkeys kept from the game:')
+    kdir = os.path.join(TEST, 'keys')
+    if os.path.isdir(kdir):
+        shutil.rmtree(kdir)
+    os.makedirs(kdir)
+    shutil.copyfile(DLL, os.path.join(kdir, 'd3d9.dll'))
+    with TestIni(os.path.join(kdir, 'GraphicsUpgrade.ini')) as f:
+        f.write(f'[general]\nOutputDir={os.path.join(kdir, "out")}\nGames=*\n[debug]\nTraces=1\n')
+    kout = run([os.path.join(TEST, 'test_proxy.exe'), os.path.join(kdir, 'd3d9.dll'), 'keys'])
+    klog = open(os.path.join(kdir, 'out', 'test_proxy', 'session.log'), encoding='latin-1').read()
+    check('hotkeys kept from the game (message hook on thread' in klog, 'message hook installed with the device')
+    check('ctrl+shift 1=0 9=0 /=0 Q=3;' in kout,
+          'Ctrl+Shift+1 (water), +9 (trace) and +/ (screenshots) dropped before the window; Ctrl+Shift+Q gets through')
+    check('ctrl 1=3 shift 1=3 1=3 ctrl+shift+alt 1=3;' in kout,
+          '1 with any other modifiers (the game\'s unit groups) gets through')
+    check('held 0+0, after 3' in kout, 'a dropped key stays dropped until released, even with Shift let go first')
+    check('after release ctrl+shift 1=3' in kout, 'the hook goes with the device')
+
     print('terrain patch ([debug] TerrainVertsPerPlot, experimental):')
     check('terrain patch: TerrainVertsPerPlot 33 not applied: test_proxy.exe isn\'t Civ4BeyondSword.exe' in log,
           'not applied outside BtS (the harness ran with TerrainVertsPerPlot=33)')

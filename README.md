@@ -82,8 +82,13 @@ To use other keys, change them in `GraphicsUpgrade.ini`: `ToggleKey` in the `[wa
 sections, `LightCycleToggleKey` in `[lighting]` for pausing the day–night cycle, `ToggleKey` and
 `DetailNormalsToggleKey` in `[textures]` for the filtering and the ground's bumps, and `CompareKey` in `[general]` for the
 screenshots. Each can be a number, a letter, a key name such as `F11` or `Numpad5`, a symbol such as `/`, or `none`.
-`KeyModifiers` in `[general]` sets the Ctrl+Shift part. Letters are best avoided: many mods' own keys ignore extra
-modifiers, so a letter can set off a mod's command too. No mod we know of uses the number keys or `/`.
+`KeyModifiers` in `[general]` sets the Ctrl+Shift part.
+
+These keys are kept from the game: BtS doesn't see Ctrl+Shift+1 as Ctrl+1 or Shift+1 (its unit groups), nor
+Ctrl+Shift+/ as / (the next worker). The same number or `/` with any other modifiers is the game's as usual. This
+holds for mods too, BUG and Dune Wars among them. Their own keys are letters and F-keys with Ctrl, Alt or Shift (BUG's
+Alt+G, Ctrl+Shift+K, Ctrl+X...), so none of them clash with the number keys and `/`. If you give one of GraphicsUpgrade's
+keys the same keys as a mod command, GraphicsUpgrade wins and the mod's command stops working.
 
 ## Settings
 

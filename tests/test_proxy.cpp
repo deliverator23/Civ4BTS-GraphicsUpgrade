@@ -5316,6 +5316,62 @@ int wmain(int argc, wchar_t** argv)
         printf("OK: watercmp, final refs device %lu, d3d %lu\n", devRefs, d3dRefs);
         return 0;
     }
+    if (argc > 2 && wcscmp(argv[2], L"keys") == 0)
+    {
+        // test_proxy <dll> keys: the hotkeys' messages (Ctrl+Shift + 1, 9, /) never reach the window; other keys, and
+        // the same keys with other modifiers, do. Prints how many of each key's messages got through.
+        auto setMods = [](bool ctrl, bool shift, bool alt) {
+            BYTE state[256] = {};
+            GetKeyboardState(state);
+            state[VK_CONTROL] = state[VK_LCONTROL] = ctrl ? 0x80 : 0;
+            state[VK_SHIFT] = state[VK_LSHIFT] = shift ? 0x80 : 0;
+            state[VK_MENU] = state[VK_LMENU] = alt ? 0x80 : 0;
+            SetKeyboardState(state);
+        };
+        auto drain = [&](UINT vk) {
+            int got = 0;
+            MSG msg;
+            while (PeekMessageW(&msg, wnd, 0, 0, PM_REMOVE))
+                if ((msg.message == WM_KEYDOWN || msg.message == WM_KEYUP || msg.message == WM_SYSKEYDOWN ||
+                     msg.message == WM_SYSKEYUP) && msg.wParam == vk)
+                    ++got;
+            return got;
+        };
+        // A press, a repeat and the release: 3 messages if they get through.
+        auto press = [&](UINT vk, bool ctrl, bool shift, bool alt) {
+            setMods(ctrl, shift, alt);
+            const UINT down = alt ? WM_SYSKEYDOWN : WM_KEYDOWN, up = alt ? WM_SYSKEYUP : WM_KEYUP;
+            PostMessageW(wnd, down, vk, 1);
+            PostMessageW(wnd, down, vk, 0x40000001);
+            PostMessageW(wnd, up, vk, 0xC0000001);
+            return drain(vk);
+        };
+        int cs1 = press('1', true, true, false), cs9 = press('9', true, true, false);
+        int csSlash = press(VK_OEM_2, true, true, false), csQ = press('Q', true, true, false);
+        int c1 = press('1', true, false, false), s1 = press('1', false, true, false), bare1 = press('1', false, false, false);
+        int csa1 = press('1', true, true, true);
+        // Shift let go while 1 is held: its repeat and release are still ours (the game would read them as Ctrl+1).
+        setMods(true, true, false);
+        PostMessageW(wnd, WM_KEYDOWN, '1', 1);
+        int heldDown = drain('1');
+        setMods(true, false, false);
+        PostMessageW(wnd, WM_KEYDOWN, '1', 0x40000001);
+        PostMessageW(wnd, WM_KEYUP, '1', 0xC0000001);
+        int heldRest = drain('1');
+        int after = press('1', true, false, false);  // and after the release, Ctrl+1 is the game's again
+        setMods(false, false, false);
+        printf("keys: ctrl+shift 1=%d 9=%d /=%d Q=%d; ctrl 1=%d shift 1=%d 1=%d ctrl+shift+alt 1=%d; held %d+%d, after %d\n",
+               cs1, cs9, csSlash, csQ, c1, s1, bare1, csa1, heldDown, heldRest, after);
+        ULONG devRefs = dev->Release();
+        // The device gone, the hook is too: Ctrl+Shift+1 gets through.
+        int gone = press('1', true, true, false);
+        setMods(false, false, false);
+        ULONG d3dRefs = d3d->Release();
+        DestroyWindow(wnd);
+        printf("keys: after release ctrl+shift 1=%d\n", gone);
+        printf("OK: keys, final refs device %lu, d3d %lu\n", devRefs, d3dRefs);
+        return 0;
+    }
     if (argc > 2 && wcscmp(argv[2], L"water") == 0)
     {
         if (WaterScene(dev, 3) != 0)
