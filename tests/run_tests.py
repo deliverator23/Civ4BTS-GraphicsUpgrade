@@ -2028,14 +2028,18 @@ def main():
             bmp = open(os.path.join(traces, os.listdir(traces)[0], 'refraction.bmp'), 'rb').read()
             size = struct.unpack_from('<i', bmp, 18)[0]
             red = lambda x, y: bmp[54 + (int((1 - y) / 2 * size) * size + int((x + 1) / 2 * size)) * 4 + 2]
-            return red(-0.5, 0.47), red(0.5, 0.47), 'final refs device 0, d3d 0' in res
+            return red(-0.5, 0.47), red(0.5, 0.47), red(0.5, -0.47), 'final refs device 0, d3d 0' in res
         expect = round(255 * 0.7 * (1 - 1.5 / 8))
-        sub_red, ship_red, released = underwater(0.2)
-        none_red, _, _ = underwater(0)
+        sub_red, ship_red, rigid_red, released = underwater(0.2)
+        none_red, _, none_rigid, _ = underwater(0)
         check(abs(sub_red - expect) <= 3 and ship_red == 0 and released,
               f'submarine below the surface shows through the water, faded by depth (red {sub_red}, expected {expect}); '
               f'the ship above the surface stays out of the refraction ({ship_red})')
-        check(none_red == 0, f'UnderwaterDepth=0: nothing under the surface shown, as before ({none_red})')
+        check(abs(rigid_red - expect) <= 3,
+              f'a submarine drawn as a rigid fixed-function mesh (no unit shader, no vertex blending) shows the same way, '
+              f'and the screen copy comes before it (red {rigid_red}, expected {expect})')
+        check(none_red == 0 and none_rigid == 0,
+              f'UnderwaterDepth=0: nothing under the surface shown, as before ({none_red}, {none_rigid})')
 
         # Sea resources (whales, fish...), which BtS draws after the water: kept and drawn into the next frame's
         # reflection and refraction, before its water, as ships are. Frame 2 (traced) replays frame 1's models through

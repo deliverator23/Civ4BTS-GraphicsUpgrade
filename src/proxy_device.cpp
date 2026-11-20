@@ -297,6 +297,7 @@ HRESULT ProxyDevice::Present(CONST RECT* pSourceRect, CONST RECT* pDestRect, HWN
         if (!land.empty())
             Log::Write("%s", land.c_str());
     }
+    m_waterLastFrame = m_frameWaterDraws > 0;
     m_frameDraws = m_frameRtSwitches = m_framePrims = m_frameGhosts = m_frameWaterDraws = m_frameBlobsSkipped = m_framePaintedSkipped = m_frameDeferred = 0;
     m_frameSeaModels = 0;
     // This frame's sea resources wait for the next frame's water; last frame's, if this frame drew no water, go.
@@ -1167,16 +1168,21 @@ HRESULT ProxyDevice::Dispatch(Draw draw)
     m_refl.BeforeDraw(vs);
     m_shadows.waterHeight = m_refl.WaterHeight();
     m_shadows.waterDrawn = m_refl.HeightFromWater();
+    // A ship drawn as rigid fixed-function meshes (a model without a unit shader or vertex blending), which the water
+    // takes in as it does the skinned ones. Only with water in view (last frame's), so that a frame without any
+    // doesn't take every model near the water's height for a ship.
+    const bool rigidShip = fixedFunction && m_waterLastFrame && m_frameWaterDraws == 0 &&
+                           (m_water.enabled || m_refl.enabled) && RigidShipPart();
     if (m_water.enabled)
     {
         // Refraction: copy the screen at the first ship or water draw of the main scene, i.e. after the terrain (the
         // sea floor) and before anything that stands in the water.
         if (!m_water.SnapshotTaken())
         {
-            bool shipOrWater = false;
+            bool shipOrWater = rigidShip;
             if (vs)
                 shipOrWater = vs->btsWater || (vs->viewProj >= 0 && vs->worldBones >= 0);
-            else if (fixedFunction)
+            else if (fixedFunction && !shipOrWater)
             {
                 DWORD blend = D3DVBF_DISABLE, fvf = 0;
                 m_real->GetRenderState(D3DRS_VERTEXBLEND, &blend);
@@ -1318,16 +1324,16 @@ HRESULT ProxyDevice::Dispatch(Draw draw)
             m_trace.Event("{\"ev\":\"water_surface\"}");
     }
     Ghost(draw);
-    if (m_refl.enabled && (vs || fixedFunction) && m_refl.AfterDraw(vs, fixedFunction, [&] { draw(); }) &&
+    if (m_refl.enabled && (vs || fixedFunction) && m_refl.AfterDraw(vs, fixedFunction, [&] { draw(); }, 0, rigidShip) &&
         m_trace.Active())
         m_trace.Event(std::string("{\"ev\":\"reflect\",\"path\":\"") + (vs ? "vs" : "ff") + "\"}");
     // Below the surface: ships' and submarines' underwater parts into the refraction, before the water is drawn.
     if (m_water.enabled && m_frameWaterDraws == 0 && m_water.SnapshotTaken() && (vs || fixedFunction))
     {
-        bool ship = false;
+        bool ship = rigidShip;
         if (vs)
             ship = vs->viewProj >= 0 && vs->worldBones >= 0;
-        else
+        else if (!ship)
         {
             DWORD blend = D3DVBF_DISABLE, fvf = 0;
             m_real->GetRenderState(D3DRS_VERTEXBLEND, &blend);
@@ -1502,6 +1508,24 @@ static bool ModelOrigin(IDirect3DDevice9* dev, const ShaderInfo& vs, float* out)
 // too). The lower of the terrain under its first bone and under the last blob: a unit
 // with no blob leaves another's, and a first bone's origin can swing well off the model, but the lower one only ever
 // clips less.
+// A ship's rigid fixed-function mesh, before the frame's first water draw (BtS draws ships after the terrain and
+// before the water): not vertex-blended, lit (normals), writing depth, into the map, and placed where a ship is, its
+// origin from a little below the water's height to well above it (masts). Unit models without a unit shader or bones
+// are drawn this way, as are skinned ones the game skins itself.
+bool ProxyDevice::RigidShipPart()
+{
+    DWORD blend = D3DVBF_DISABLE, fvf = 0, zwrite = FALSE;
+    D3DMATRIX world;
+    m_real->GetRenderState(D3DRS_VERTEXBLEND, &blend);
+    m_real->GetFVF(&fvf);
+    m_real->GetRenderState(D3DRS_ZWRITEENABLE, &zwrite);
+    if (blend != D3DVBF_DISABLE || (fvf & D3DFVF_POSITION_MASK) != D3DFVF_XYZ || !(fvf & D3DFVF_NORMAL) || !zwrite ||
+        !m_refl.TargetIsBackBuffer() || FAILED(m_real->GetTransform(D3DTS_WORLD, &world)))
+        return false;
+    const float dz = world._43 - m_refl.WaterHeight();
+    return dz > -60.0f && dz < 150.0f;
+}
+
 float ProxyDevice::UnitGround(const ShaderInfo* vs)
 {
     const float kMargin = 2.0f;

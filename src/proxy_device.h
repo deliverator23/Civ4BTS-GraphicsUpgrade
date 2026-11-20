@@ -102,6 +102,7 @@ private:
     template <class Draw> bool TerrainDebug(Draw& draw, HRESULT& hr);
     bool DrawingToBackBuffer();
     float UnitGround(const ShaderInfo* vs);
+    bool RigidShipPart();
     const ShaderInfo* CurrentPixelShader();
     // Selection circles under ships: BtS draws them at water level before the water, so the reflective, dynamic water
     // would show them refracted beneath its surface. Such draws are held back and replayed straight after the water.
@@ -190,6 +191,7 @@ private:
     ULONG m_deferRefs = 0;  // device references held by those state blocks (see Release)
     uint32_t m_frameDeferred = 0;
     uint32_t m_frameWaterDraws = 0;
+    bool m_waterLastFrame = false;  // the last frame drew water: rigid ship meshes are looked for (RigidShipPart)
     std::unordered_set<uint64_t> m_dumpedShaders;
     std::unordered_set<uint64_t> m_loggedDecls;
     UINT m_vsRegisters = 256;

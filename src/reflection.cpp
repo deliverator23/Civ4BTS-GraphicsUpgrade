@@ -100,14 +100,14 @@ void Reflection::BeforeDraw(const ShaderInfo* vs)
 }
 
 bool Reflection::AfterDraw(const ShaderInfo* vs, bool fixedFunction, const std::function<void()>& redraw,
-                           float clipAbove)
+                           float clipAbove, bool rigidShip)
 {
     if (!enabled || !needed || m_waterSeen)
         return false;
     if (vs ? (vs->viewProj < 0 || vs->worldBones < 0) : !fixedFunction)
         return false;
     DWORD blend = D3DVBF_DISABLE;
-    if (!vs)
+    if (!vs && !rigidShip)
     {
         m_dev->GetRenderState(D3DRS_VERTEXBLEND, &blend);
         if (blend == D3DVBF_DISABLE)

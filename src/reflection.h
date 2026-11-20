@@ -29,8 +29,10 @@ public:
     void BeforeDraw(const ShaderInfo* vs);
     // Called after a draw. If it was a unit/ship draw to the back buffer before the water, redraws it mirrored.
     // Returns true if it did. clipAbove: only what's that far above the water (a model lying on it can't flicker in
-    // and out at the surface).
-    bool AfterDraw(const ShaderInfo* vs, bool fixedFunction, const std::function<void()>& redraw, float clipAbove = 0);
+    // and out at the surface). rigidShip: a fixed-function draw the caller found to be a ship's rigid mesh
+    // (ProxyDevice::RigidShipPart), taken as the skinned ones are.
+    bool AfterDraw(const ShaderInfo* vs, bool fixedFunction, const std::function<void()>& redraw, float clipAbove = 0,
+                   bool rigidShip = false);
     // Debug overlay: the texture's colour and alpha side by side in the top-right corner. Call before Present.
     void DrawOverlay();
     // Saves the texture as a 32-bit BMP (BGRA, alpha kept). False if there's no texture yet.

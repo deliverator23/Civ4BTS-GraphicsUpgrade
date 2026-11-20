@@ -427,6 +427,30 @@ static int WaterScene(IDirect3DDevice9* dev, int frames)
             CHECK(dev->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_MODULATE));
             CHECK(dev->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_TEXTURE));
         }
+        // A submarine drawn as a rigid fixed-function mesh (no unit shader, no vertex blending: lit, with normals,
+        // writing depth), 0.04 below the surface at (0.5,-0.5) and before the ships below: the first ship drawn, so
+        // the refraction's screen copy must come before it, and its underwater part goes in as the shader one's does.
+        {
+            const float rigidSub[3][6] = {{0.4f, -0.6f, 0.46f, 0, 0, 1}, {0.5f, -0.4f, 0.46f, 0, 0, 1},
+                                          {0.6f, -0.6f, 0.46f, 0, 0, 1}};
+            CHECK(dev->SetVertexShader(nullptr));
+            CHECK(dev->SetPixelShader(nullptr));
+            CHECK(dev->SetFVF(D3DFVF_XYZ | D3DFVF_NORMAL));
+            CHECK(dev->SetRenderState(D3DRS_LIGHTING, FALSE));
+            D3DMATRIX id;
+            memcpy(&id, identity, sizeof(id));
+            CHECK(dev->SetTransform(D3DTS_WORLD, &id));
+            CHECK(dev->SetTexture(0, nullptr));
+            CHECK(dev->SetRenderState(D3DRS_TEXTUREFACTOR, 0xFFFF0000));
+            CHECK(dev->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_SELECTARG1));
+            CHECK(dev->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_TFACTOR));
+            CHECK(dev->SetRenderState(D3DRS_ZENABLE, TRUE));
+            CHECK(dev->SetRenderState(D3DRS_ZWRITEENABLE, TRUE));
+            CHECK(dev->DrawPrimitiveUP(D3DPT_TRIANGLELIST, 1, rigidSub, 24));
+            CHECK(dev->SetRenderState(D3DRS_ZENABLE, FALSE));
+            CHECK(dev->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_MODULATE));
+            CHECK(dev->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_TEXTURE));
+        }
         // Two ships drawn like BtS's (unit-style shader, mtxViewProj c60), before the water at z = 0.5: a "submarine"
         // 0.04 below the surface at (-0.5,0.5), and one above it at (0.5,0.5). With [water] Underwater* set, the proxy
         // draws the submarine's underwater part into the refraction (traces save it as refraction.bmp).
