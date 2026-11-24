@@ -10,15 +10,16 @@ Ways GraphicsUpgrade could improve Civ4's look further. Each builds on what the 
 
 Roughly in order of how much they'd add for the work.
 
-## The ten ideas
+## Ideas
 
 ### 1. Sharper distant textures (anisotropic filtering): done
 
-Anisotropic filtering keeps terrain, roads and water sharp towards the horizon at Civ4's tilted camera, instead of blurring them.
+Anisotropic filtering keeps terrain, roads, water, units and buildings sharp towards the horizon at Civ4's tilted
+camera, instead of blurring them.
 
 - **Setting:** `[textures] Anisotropy` (default 8)
 - **Hotkey:** Ctrl+Shift+5
-- **Status:** not released yet
+- **Status:** released in 1.0.4
 
 ### 2. City lights at night
 
@@ -38,53 +39,44 @@ A soft, scrolling noise texture multiplied into our terrain shader.
 
 Cheap, and it gives the map life when nothing is moving.
 
-### 4. Ambient occlusion
-
-Soft contact shading where units stand, around buildings and trees, and in valleys.
-
-- **How:** most cards let the game's depth buffer be read back through the `INTZ` depth format, which opens screen-space effects.
-- **Catch:** `INTZ` doesn't combine with multisample anti-aliasing (MSAA), so it needs a fallback when MSAA is on.
-
-### 5. Atmosphere: distance haze
+### 4. Atmosphere: distance haze
 
 Haze and colour shift towards the horizon, tinted by the time of day: golden at dusk, blue at night.
 
-- **How:** the depth readback from idea 4, or the terrain's own distance in the terrain shader.
+- **How:** the game's depth buffer read back through the `INTZ` depth format (most cards have it, though not with
+  multisample anti-aliasing), or the terrain's own distance in the terrain shader.
 - **Effect:** a sense of scale when zoomed out.
 
-### 6. Shoreline and shallow-water detail: partly done
+### 5. Shoreline and shallow-water detail: done
 
 The terrain heights give the distance to shore and the water depth. From those:
 
 - **Caustics:** done. Light patterns shimmering on the sea floor in shallow water, from the shipped caustic
   textures (`[water] Caustics`).
-- **Glint:** done. The sun glint follows the cycle's sun instead of staying at the fixed spot in `water_env.dds`,
-  mirrored to the far side of the view so it stays visible (`[water] GlintFollowsSun`).
-- **Foam:** tried and dropped. Rolling bands of foam, then granular foam along the waterline: neither looked right
-  at Civ4's scale.
+- **Glint:** done. The sun glint follows the cycle's sun, and the moon at night, instead of staying at the fixed spot
+  in `water_env.dds`, mirrored to the far side of the view so it stays visible (`[water] GlintFollowsSun`).
+- **Waves:** done. The waves' faces are lit by the sun or moon, with sparkle around the glint (`[water] WaveShading`).
+- **Coast waves:** done. Drawn with our own wave shader: the foam takes the light (`[water] FoamLight`) and runs up the
+  beach over the terrain.
+- **Rivers:** done. The glint off the rivers (`[water] RiverGlint`), and ripples that sway along the channel
+  (`[water] RiverShimmer`).
+- **Foam bands:** tried and dropped. Rolling bands of foam, then granular foam along the waterline: neither looked
+  right at Civ4's scale.
 
 Status: released in 1.0.4.
 
-### 7. Animated fog of war
+### 6. Animated fog of war
 
 Slowly drifting cloud over unexplored and out-of-sight tiles, replacing the flat grey: the fog-of-war texture modulated by noise in the terrain shader.
 
-### 8. Colour grading and better bloom
+### 7. Colour grading and better bloom
 
 A final full-screen pass with a lookup-table colour grade before the frame is shown.
 
 - **Presets:** natural, vivid, aged parchment map, or a mod's own through its GraphicsUpgrade.ini.
 - **Bloom:** BtS's bloom replaced with a softer modern one.
 
-### 9. Seasons and weather
-
-- **Snow:** by latitude, or on a winter cycle like the day–night one, blended into the terrain shader by height and slope.
-- **Precipitation:** optional rain or snow particles.
-- **Wet ground:** a darker, wet look during rain.
-
-The biggest item here, but very distinctive.
-
-### 10. Photo mode
+### 8. Photo mode
 
 - **Interface:** hide it reliably (BtS's own Hide Interface is hard to get out of).
 - **Animation:** freeze it and the light cycle.
@@ -95,16 +87,12 @@ Builds on the before/after screenshots.
 ## Smaller ideas
 
 - **Rim lighting on units,** so they read better at night.
-- **Normal-mapped terrain,** per pixel from the height data, for crisper hill and mountain relief.
+- **Normal-mapped terrain:** done. The terrain is lit per pixel from its heights, and in 1.0.4 its small bumps catch
+  the sun too (`[textures] DetailNormals`).
 - **A sky backdrop** where the camera's tilt shows the horizon.
 
 ## Open threads
 
-- **Richer shore waves:**
-  - **Test files:** 31 wave files are in `CustomAssets\art\terrain\waves`, with whitened wave textures.
-  - **Tuning:** settle on how white the foam should be.
-  - **Night:** the waves are drawn unlit, so they need the same night darkening as the roads.
-  - **Release:** decide how to ship them (with credit, like the water textures).
 - **Ship sails staying white at night:** some ships, not the galleon. Needs a trace with an affected ship in view at night.
 - **Civilopedia previews keep BtS's water:** a known limitation.
 - **The game hung on exit once,** stuck while shutting down, which locked the DLL. Watch for it happening again.

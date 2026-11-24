@@ -8,7 +8,7 @@ whatever mod you play. It's a single `d3d9.dll` that sits next to the game, its 
 textures. It doesn't affect saves or multiplayer, and you can remove it at any time.
 
 Mods can include their own GraphicsUpgrade.ini settings file, to configure their own lighting and other settings such as models that shouldn't
-cast shadows. These apply only while that mod is running. See [For modders](#for-modders).
+cast shadows. These apply only while that mod is running. See [For modders](#for-modders) and the modding guide, [MODDING.md](MODDING.md).
 
 ## What it changes
 
@@ -47,7 +47,18 @@ part can be turned off in the settings. Shadows fall on the terrain, rivers, roa
    presets\              (optional lighting presets)
    ```
 
-   The zip also has this guide, as `GraphicsUpgrade.md`.
+   The zip also has this guide, as `GraphicsUpgrade.md`, and the modding guide, as `GraphicsUpgrade-Modding.md`.
+
+   Also copy the contents of the zip's `CustomAssets` folder (an `art` folder) into the game's CustomAssets folder,
+   adding to anything already there:
+
+   ```
+   Documents\My Games\Beyond the Sword\CustomAssets\
+   ```
+
+   These are coast waves that fade in and out as they roll in, with whiter foam, and a rippled river surface for the
+   rivers' shimmer. The game loads them itself, in plain BtS and in mods that allow custom assets. GraphicsUpgrade
+   works without them, with BtS's own waves and rivers.
 
    For Steam, that's usually:
 
@@ -59,7 +70,8 @@ part can be turned off in the settings. Shadows fall on the terrain, rivers, roa
 
 If the folder already has a `d3d9.dll` (ReShade, DXVK...), read [Using with ReShade or DXVK](#using-with-reshade-or-dxvk) first.
 
-**To remove it,** delete `d3d9.dll`, `GraphicsUpgrade.ini`, `GraphicsUpgrade\` and `presets\` from that folder.
+**To remove it,** delete `d3d9.dll`, `GraphicsUpgrade.ini`, `GraphicsUpgrade\` and `presets\` from that folder, and
+`art\terrain\waves\` and `art\terrain\routes\rivers\AllRiversNormal.dds` from the CustomAssets folder.
 
 ## In game
 
@@ -86,7 +98,7 @@ screenshots. Each can be a number, a letter, a key name such as `F11` or `Numpad
 
 These keys are kept from the game: BtS doesn't see Ctrl+Shift+1 as Ctrl+1 or Shift+1 (its unit groups), nor
 Ctrl+Shift+/ as / (the next worker). The same number or `/` with any other modifiers is the game's as usual. This
-holds for mods too, BUG and Dune Wars among them. Their own keys are letters and F-keys with Ctrl, Alt or Shift (BUG's
+holds for mods too, BUG among them. Their own keys are letters and F-keys with Ctrl, Alt or Shift (BUG's
 Alt+G, Ctrl+Shift+K, Ctrl+X...), so none of them clash with the number keys and `/`. If you give one of GraphicsUpgrade's
 keys the same keys as a mod command, GraphicsUpgrade wins and the mod's command stops working.
 
@@ -116,6 +128,8 @@ The ones you're most likely to want:
 | `[textures] DetailNormals` | Bumps on the ground that catch the sun (1) or not (0); needs the lighting on |
 | `[textures] DetailBumpiness` | How bumpy the ground looks (0 = only where a mod gives a normal map) |
 | `[textures] BlendTileClamp` | No thin lines along square edges where terrains blend (1), or blends read as BtS reads them (0) |
+| `[textures] AreaBorderTextures` | The settler's city-site guide laid over the hills and valleys (BtS's guide texture, the default), or BtS's flat guide (empty) |
+| `[lighting] BuildingLightRange` | How much brighter than their textures buildings, improvements and resources can be lit: 1 (BtS's look) to 2 |
 
 **Settings files from 1.0.** Two things have moved, and a `GraphicsUpgrade.ini` (yours or a mod's) that still has them
 the old way keeps working, with a line in the log saying what to change: the group colours (`UnitSun`, `TerrainAmbient`
@@ -144,158 +158,29 @@ BMP), one pixel wide per hour, the sun's colour along the top row and the ambien
 `GraphicsUpgrade` folder next to the game's `GraphicsUpgrade.ini`, or in a mod's own `GraphicsUpgrade` folder. A
 24×2 picture gives a 24-hour day, and a wider one gives finer steps.
 
+**Buildings under a bright light.** BtS lights buildings, improvements and resources in a way that stops at the colour
+of their textures. When the sun and the ambient add up to more than that, as they do in BtS's own light and in bright
+day–night cycles, whatever faces the sky shows its texture's colour whatever the time of day, while the ground around
+it darkens and changes colour. `[lighting] BuildingLightRange` lets them be lit brighter than their textures, up to 2
+times, as the game lights the ground, so they follow the light as the ground does. The default of 1 keeps BtS's look.
+Units are not changed.
+
+### The settler's city-site guide
+
+BtS draws the guide (the square or cross of plots a city there would work) as a flat sheet at one height, drawn over
+everything, so on high or low ground it shows away from the plots it marks. GraphicsUpgrade lays it over the terrain's
+hills and valleys instead, and hills in front of it hide it; anything standing on it (units, trees, buildings) shows in
+front. `[textures] AreaBorderTextures` lists the guide's textures, BtS's own by default; empty it for BtS's flat guide.
+
 ## For modders
 
-**Your own settings.** Put a `GraphicsUpgrade` folder in your mod's folder (`Mods\<your mod>\GraphicsUpgrade\`) with a
-`GraphicsUpgrade.ini` in it. While your mod is running, each setting in that file replaces the same setting in the
-player's own `GraphicsUpgrade.ini`; anything you leave out stays as the player has it. List only what you change, under
-the usual section names:
+A mod can fit GraphicsUpgrade to itself without the player changing anything: a `GraphicsUpgrade.ini` in the mod's
+own `GraphicsUpgrade` folder (`Mods\<your mod>\GraphicsUpgrade\`) replaces any of the player's settings while the mod
+runs. With it a mod can set its own lighting and day–night cycle, ship its own water textures, keep markers from
+casting shadows, have effects follow the light, and use the experimental terrain features (finer heightmaps, terrain
+stamps, river layers).
 
-```ini
-[lighting]
-Enabled=1
-SunColour=255,220,170
-AmbientColour=80,100,90
-```
-
-**Your own water textures.** Put `water_normal.dds` (the ripples' normal map) and/or `water_env.dds` (the sky the water
-reflects, with the sun's glint in its alpha) in your mod's `Assets\Art\GraphicsUpgrade\`, loose or packed in your
-`.FPK` files. Each one is looked for on its own, so you can ship just the one you change. A `GraphicsUpgrade` folder
-in your mod's folder still works for these too, and there the normal map is also found under its old name,
-`water_001.dds`.
-
-More looks for the waves can go in the same places, as `water_normal_1.dds`, `water_normal_2.dds` and so on (numbered
-from 1, without gaps). Each is a normal map that covers 1440 world units (8 plots) before it repeats, where
-`water_normal.dds` covers 480. Ctrl+Shift+7 (`[water] NormalMapToggleKey`) cycles through them,
-`water_normal.dds` first, and `[water] NormalMap` picks the one the game starts with.
-
-Any of these water normal maps can be DXT5nm instead of plain DXT5: x in the alpha channel and y in green (red and blue
-unused), marked with the `DDPF_NORMAL` flag as NVIDIA's texture tools write it. At the same size it keeps the waves'
-shape about 2.5 times more accurately.
-
-GraphicsUpgrade finds the running mod in two ways:
-- from the game's command line (`mod= "Mods\<your mod>"`, the way BtS starts a mod)
-- from the `Mod =` line in `CivilizationIV.ini`
-
-The log notes which mod it found.
-
-**Models that shouldn't cast shadows.** `[shadows] NoShadowTextures` lists textures whose models cast no shadow. By
-default these are the unit flags. Entries are separated by `;`, or written on more `NoShadowTextures=` lines (each
-line adds to the others), and each one is a `.dds` file or a folder of them. Write them as paths under `Assets`, just as
-in your XML:
-
-```ini
-[shadows]
-NoShadowTextures=Art\Units\Flags; Art\Units\Flag\Medallions.dds; Art\Units\MyMarker\marker.dds
-```
-
-GraphicsUpgrade looks in your mod's `Assets` first, then the game's (loose files or inside `.FPK` archives), and
-recognises the textures in game by their content. If your mod replaces BtS's unit blob shadow
-(`Art\Units\01_UnitShadows\unit_shadows.dds`), your version is picked up automatically.
-
-**Water on your models.** `[water] SurfaceTextures` lists textures whose models are water. They keep their own
-look and get the water's ripples, sky reflection and sun glint on top, and cast no shadow. The texture's alpha (times
-the vertex or material alpha) says where the water is. By default this is the oasis' pool. Entries work as in
-`NoShadowTextures`:
-
-```ini
-[water]
-SurfaceTextures=Art\Terrain\Features\Oasis\oasis_water.dds; Art\Effects\Flood\flood_water.dds
-```
-
-**Models under the culture borders.** BtS tints the ground inside a civilization's borders, then draws the models on
-top, so a model that is part of the landscape stands out of the tint. `[textures] ModelsUnderBorders` lists textures
-whose models take the tint instead, the same as the ground around them, as if they were under it. Nothing moves, and
-units in front still cover them. Entries work as in `NoShadowTextures`. Off unless something is listed:
-
-```ini
-[textures]
-ModelsUnderBorders=Art\Terrain\Features\Crater\crater.dds
-```
-
-**The settler's city-site guide on the ground.** BtS draws the guide (the square or cross of plots a city there
-would work) as a flat sheet at one height, drawn over everything. Where the ground is higher or lower than that height,
-the guide shows away from the plots it marks: lower on the screen on high ground. `[textures] AreaBorderTextures` lists
-the guide's textures. With them, it's laid over the terrain's hills and valleys instead, as the culture borders are,
-and hills in front of it hide it. Anything standing on it (units, trees, buildings) shows in front of it. Entries work
-as in `NoShadowTextures`. The default is BtS's own guide texture. Remove the line to keep BtS's flat guide:
-
-```ini
-[textures]
-AreaBorderTextures=Art\Terrain\PlotTextures\AreaBorder.dds
-```
-
-**Effects that follow the light.** BtS draws most particle effects (dust, smoke, glows) unlit, so they keep the
-same colour by day and by night. `[lighting] LitEffectTextures` lists textures whose effects should follow the light
-instead. They then darken and change colour with the day–night cycle and the lighting presets, as the ground under them
-does. This applies to unlit, blended effects in the map: additive ones (source alpha or one onto one) and alpha-blended
-ones. Multiplying effects, which darken what is behind them, already follow the light through the lit ground, so they
-are left as they are. The interface and the Civilopedia are never changed. Entries work as in `NoShadowTextures`, and
-`*` means every such effect. By default the list is empty, so fires and magic glows stay as bright at night as by day:
-
-```ini
-[lighting]
-LitEffectTextures=Art\Effects\Smoke; Art\Effects\Dust\dust_cloud.dds
-```
-
-**Rock that sits in the ground.** The game adds the light to the terrain's colours but multiplies a model's colours by
-it. Under a strongly coloured light such as a red sunset, the same light takes far more colour from the ground than from
-a model standing on it, so rocks can look out of place. `[lighting] GroundLitTextures` lists textures whose models add
-the light as the ground does. Entries work as in `NoShadowTextures`. It applies to models whose first texture stage is
-the plain texture times the light:
-
-```ini
-[lighting]
-GroundLitTextures=Art\Terrain\Features\Rocks\rock_base.dds
-```
-
-**Level ground under a model (experimental).** A model with `ContourGeometry` has each vertex laid at the ground's height
-plus its own, so on uneven ground it shears. A plot stamp set with `Flatten=1` levels a seat for it instead of adding
-height: its pieces (`pieces.xml` and 16-bit greyscale heightmaps, in a one-plot layout, two plots across and centred on the
-plot) are weights, from 0 to 1 over 0 to 65535. Where the weight is 1 the ground goes to one level, the mean height there,
-and the ground around it is drawn towards that level by the weight. The weight must be 0 before it reaches the edge of a
-square, a line that runs through each plot centre, so a seat lies wholly inside one square; the log warns if not. A plot
-takes one set, by feature first, so a plot in this set gets no stamp from a set that lists its terrain:
-
-```ini
-[terrain tiles]
-PlotStamps1OnFeatures=FEATURE_CRATER
-PlotStamps1Folder=Art\Terrain\Stamps\CraterSeats
-PlotStamps1Flatten=1
-```
-
-**Buildings and resources under a bright light.** BtS lights buildings, improvements and resources in a way that
-stops at the colour of their textures. When the sun and the ambient add up to more than that, as they do in BtS's own
-light and in bright day–night cycles, whatever faces the sky shows its texture's colour whatever the time of day,
-while the ground around it darkens and changes colour. `[lighting] BuildingLightRange` lets them be lit brighter than
-their textures, up to 2 times, as the game lights the ground. Then they follow the light as the ground does. The
-default of 1 keeps BtS's look. Units are not changed:
-
-```ini
-[lighting]
-BuildingLightRange=2
-```
-
-**Your own terrain lighting.** BtS bakes the terrain's light from `Art\Terrain\Lights\SunLight.nif`, and
-GraphicsUpgrade needs that light to re-light the terrain and roads correctly. If your mod has its own `SunLight.nif`
-(loose or in an `.FPK`), it is read automatically, and the log notes what was found. The `BakedTerrain*` lines under
-`[lighting]` override it.
-
-**Normal maps for your terrain.** With the lighting on, the ground's small bumps are lit by the sun as it moves. By
-default they come from each terrain's detail texture (the `<Detail>` in `CIV4ArtDefines_Terrain.xml`), its light and
-dark areas read as high and low, and `[textures] DetailBumpiness` sets how strong they are. That works well for
-textures like rock or soil. It works less well for a detail texture with light and shadow painted into it, where a
-painted shadow would read as a dip. For those, ship a normal map: the same path and name as the detail texture with
-`_normal` added, loose or in your `.FPK` files:
-
-```
-Art\Terrain\Textures\Detail\DesertDetail.dds
-Art\Terrain\Textures\Detail\DesertDetail_normal.dds
-```
-
-The normal map is the usual kind (DirectX): red along the texture's width, green up the image, blue out of the ground.
-It is used instead of the detail texture's light and dark areas, at `[textures] DetailNormalStrength` (1 = as made).
-The log lists which detail textures have one.
+All of this is in the modding guide, [MODDING.md](MODDING.md) (`GraphicsUpgrade-Modding.md` in the download).
 
 ## Using with ReShade or DXVK
 
@@ -363,6 +248,7 @@ uv run tests/run_tests.py
 
 GraphicsUpgrade by Deliverator.
 
-The water and caustic textures in the `GraphicsUpgrade` folder are from other Sid Meier's Civilization games,
-© Firaxis Games / 2K (`water_env.dds`'s sun glint redrawn to remove a seam). GraphicsUpgrade is an unofficial fan
+The water and caustic textures in the `GraphicsUpgrade` folder and the coast waves in the `CustomAssets` folder are
+from other Sid Meier's Civilization games, © Firaxis Games / 2K (`water_env.dds`'s sun glint redrawn to remove a seam,
+the waves' foam whitened). GraphicsUpgrade is an unofficial fan
 project, not affiliated with or endorsed by Firaxis Games, 2K or Take-Two Interactive.

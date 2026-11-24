@@ -8,11 +8,15 @@ files, in a GraphicsUpgrade-<version> folder; the zip's name stays the same so t
   d3d9.dll               the proxy
   GraphicsUpgrade.ini    settings
   GraphicsUpgrade.md     README.md: what it does, how to install it and the settings
+  GraphicsUpgrade-Modding.md  MODDING.md: fitting GraphicsUpgrade to a mod
   presets/               [lighting] sections: BtS's own, a warm fixed light, a day-night cycle
   GraphicsUpgrade/       the water textures: water_normal.dds (normal map), water_env.dds (environment cube),
                          water_caustics1.dds and water_caustics2.dds (caustics)
+  CustomAssets/          art the game loads itself: coast waves (art/terrain/waves) and a rippled river normal map
+                         (art/terrain/routes/rivers), from CustomAssets/ here
 
-To install, copy the folder's contents into the Beyond the Sword folder.
+To install, copy the folder's contents into the Beyond the Sword folder, except CustomAssets, whose contents go into
+the player's My Games\Beyond the Sword\CustomAssets.
 """
 import hashlib
 import re
@@ -51,10 +55,12 @@ def main():
     shutil.copyfile(ROOT / 'build' / 'd3d9.dll', pkg / 'd3d9.dll')
     shutil.copyfile(ROOT / 'GraphicsUpgrade.ini', pkg / 'GraphicsUpgrade.ini')
     shutil.copyfile(ROOT / 'README.md', pkg / 'GraphicsUpgrade.md')
+    shutil.copyfile(ROOT / 'MODDING.md', pkg / 'GraphicsUpgrade-Modding.md')
     for p in sorted((ROOT / 'presets').glob('*.ini')):
         shutil.copyfile(p, pkg / 'presets' / p.name)
     for fn in WATER_TEXTURES:
         shutil.copyfile(ROOT / 'textures' / fn, pkg / 'GraphicsUpgrade' / fn)
+    shutil.copytree(ROOT / 'CustomAssets', pkg / 'CustomAssets')
 
     files = sorted(p for p in pkg.rglob('*') if p.is_file())
     zip_path = dist / 'GraphicsUpgrade.zip'
