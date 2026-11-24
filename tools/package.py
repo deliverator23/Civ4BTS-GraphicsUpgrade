@@ -11,7 +11,8 @@ files, in a GraphicsUpgrade-<version> folder; the zip's name stays the same so t
   GraphicsUpgrade-Modding.md  MODDING.md: fitting GraphicsUpgrade to a mod
   presets/               [lighting] sections: BtS's own, a warm fixed light, a day-night cycle
   GraphicsUpgrade/       the water textures: water_normal.dds (normal map), water_env.dds (environment cube),
-                         water_caustics1.dds and water_caustics2.dds (caustics)
+                         water_caustics1.dds and water_caustics2.dds (caustics); day-night.png, the day-night
+                         cycle's colours ([lighting] LightCycleImage)
   CustomAssets/          art the game loads itself: coast waves (art/terrain/waves) and a rippled river normal map
                          (art/terrain/routes/rivers), from CustomAssets/ here
 
@@ -27,7 +28,8 @@ import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-WATER_TEXTURES = ('water_normal.dds', 'water_env.dds', 'water_caustics1.dds', 'water_caustics2.dds')
+# In the GraphicsUpgrade folder: the water's textures and the day-night colours (from textures/).
+SHIPPED_TEXTURES = ('water_normal.dds', 'water_env.dds', 'water_caustics1.dds', 'water_caustics2.dds', 'day-night.png')
 
 
 def version():
@@ -58,7 +60,7 @@ def main():
     shutil.copyfile(ROOT / 'MODDING.md', pkg / 'GraphicsUpgrade-Modding.md')
     for p in sorted((ROOT / 'presets').glob('*.ini')):
         shutil.copyfile(p, pkg / 'presets' / p.name)
-    for fn in WATER_TEXTURES:
+    for fn in SHIPPED_TEXTURES:
         shutil.copyfile(ROOT / 'textures' / fn, pkg / 'GraphicsUpgrade' / fn)
     shutil.copytree(ROOT / 'CustomAssets', pkg / 'CustomAssets')
 

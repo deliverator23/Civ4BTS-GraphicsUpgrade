@@ -153,10 +153,12 @@ You can set:
 - the compass direction of the midday sun
 - how high the sun and moon climb
 
-The colours for each hour can also be painted as a small picture: `[lighting] LightCycleImage=cycle.png` (PNG or
-BMP), one pixel wide per hour, the sun's colour along the top row and the ambient's along the second. Put it in the
-`GraphicsUpgrade` folder next to the game's `GraphicsUpgrade.ini`, or in a mod's own `GraphicsUpgrade` folder. A
-24×2 picture gives a 24-hour day, and a wider one gives finer steps.
+The colours for each hour are a small picture, `GraphicsUpgrade\day-night.png` (`[lighting] LightCycleImage`): one
+pixel wide per hour, from midnight on the left to 23:00 on the right, the sun's colour along the top row and the
+shade's along the second, blended in between. Paint over it in any image editor to change the day, or point
+`LightCycleImage` at a picture of your own (PNG or BMP) in the `GraphicsUpgrade` folder, or in a mod's own
+`GraphicsUpgrade` folder. A 24×2 picture gives a 24-hour day, and a wider one gives finer steps. The colours can be
+written as numbers instead, with `LightCycleSteps` and `LightCycleAmbientSteps` as in `presets\lighting-day-night.ini`.
 
 **Buildings under a bright light.** BtS lights buildings, improvements and resources in a way that stops at the colour
 of their textures. When the sun and the ambient add up to more than that, as they do in BtS's own light and in bright

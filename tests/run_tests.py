@@ -2193,6 +2193,7 @@ def main():
         os.makedirs(rel_dir)
         shutil.copyfile(DLL, os.path.join(rel_dir, 'd3d9.dll'))
         install_water(rel_dir)
+        shutil.copyfile(os.path.join(ROOT, 'textures', 'day-night.png'), os.path.join(rel_dir, 'GraphicsUpgrade', 'day-night.png'))
         ini = open(os.path.join(ROOT, 'GraphicsUpgrade.ini'), encoding='utf-8').read()
         ini = ini.replace('OutputDir=\n', f'OutputDir={rel_out}\n', 1)
         open(os.path.join(rel_dir, 'GraphicsUpgrade.ini'), 'w', encoding='utf-8').write(ini)
@@ -2208,6 +2209,9 @@ def main():
               not os.path.exists(os.path.join(rel_out, 'test_proxy', 'traces')),
               'no shader dumps or traces with the shipped settings')
         check('final refs device 0, d3d 0' in relout, 'device and Direct3D fully released (shipped settings)')
+        check(re.search(r'LightCycleImage: .*day-night\.png, 24x2: 24 steps, sun from the top row, ambient from the '
+                        r'second', relog) is not None,
+              "the shipped day-night colours read from GraphicsUpgrade\\day-night.png (24 x 2: 24 steps)")
 
     print('version resource:')
     check(file_version(os.path.join(TEST, 'd3d9.dll')) ==
